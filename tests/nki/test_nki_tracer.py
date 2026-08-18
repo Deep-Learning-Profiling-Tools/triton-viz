@@ -4,7 +4,15 @@ from pathlib import Path
 
 import triton_viz
 from triton_viz.clients import Tracer
-from triton_viz.core.data import Grid, Load, Store, ReduceSum, Dot, NkiCompute
+from triton_viz.core.data import (
+    Dot,
+    Grid,
+    Load,
+    NkiCompute,
+    ReduceSum,
+    Store,
+    TensorTranspose,
+)
 from triton_viz.core.trace import launches
 import math
 
@@ -81,12 +89,15 @@ def test_nl_storage_identity_builds_versioned_load_compute_store_chain():
 
     records = launches[-1].records
     load = next(record for record in records if isinstance(record, Load))
-    compute = next(record for record in records if isinstance(record, NkiCompute))
+    computes = [record for record in records if isinstance(record, NkiCompute)]
+    broadcast = next(record for record in computes if record.api_op == "broadcast_to")
+    compute = next(record for record in computes if record.api_op == "add")
     store = next(record for record in records if isinstance(record, Store))
 
-    assert load.dst_storage == compute.input_storages[0]
-    assert load.dst_version == compute.input_versions[0] == 0
-    assert compute.input_storages[1] == load.dst_storage
+    assert load.dst_storage == broadcast.input_storages[0]
+    assert load.dst_version == broadcast.input_versions[0] == 0
+    assert broadcast.output_storages[0] == compute.input_storages[1]
+    assert compute.input_storages[0] == load.dst_storage
     assert compute.input_ranges[1][1] <= load.dst_range[1]
     assert compute.output_storages[0] == store.src_storage
     assert compute.output_versions[0] == store.src_version == 0
@@ -215,6 +226,53 @@ def test_tracer_records_reduce_sum():
     assert record.index == 1
     assert record.keep_dims is False
     assert record.output_shape == (block_m,)
+
+
+def _silu_kernel(x_ptr):
+    nl.silu(nl.load(x_ptr[nl.arange(8)]))
+
+
+def _gelu_kernel(x_ptr):
+    nl.gelu(nl.load(x_ptr[nl.arange(8)]))
+
+
+@pytest.mark.parametrize(
+    ("api", "kernel"), [("silu", _silu_kernel), ("gelu", _gelu_kernel)]
+)
+def test_tracer_records_all_registered_activation_compute_apis(api, kernel):
+    triton_viz.clear()
+    x = NDArray(value=np.arange(8, dtype=np.float32))
+    traced = triton_viz.trace(client=Tracer(), frontend="nki")(kernel)
+    traced[(1,)](x)
+
+    computes = [
+        record for record in launches[-1].records if isinstance(record, NkiCompute)
+    ]
+    assert [record.api_op for record in computes] == [api]
+    assert computes[0].input_storages
+    assert computes[0].output_storages
+
+
+def test_legacy_nc_transpose_records_tensor_event_and_storage_identity():
+    triton_viz.clear()
+
+    def transpose_kernel(x_ptr):
+        value = nl.load(x_ptr[nl.arange(4)[:, None], nl.arange(8)[None, :]])
+        import neuronxcc.nki.isa as nisa_local
+
+        nisa_local.nc_transpose(value)
+
+    x = NDArray(value=np.arange(32, dtype=np.float32).reshape(4, 8))
+    traced = triton_viz.trace(client=Tracer(), frontend="nki")(transpose_kernel)
+    traced[(1,)](x)
+    records = launches[-1].records
+    load = next(record for record in records if isinstance(record, Load))
+    transpose = next(
+        record for record in records if isinstance(record, TensorTranspose)
+    )
+    assert transpose.input_storages == (load.dst_storage,)
+    assert transpose.input_versions == (load.dst_version,)
+    assert transpose.output_shape == (8, 4)
 
 
 def test_tracer_records_dot():

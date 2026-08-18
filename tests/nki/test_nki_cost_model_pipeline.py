@@ -45,6 +45,9 @@ def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, caps
     fit_output = capsys.readouterr().out
     assert "nki_fit_strided_dma" in fit_output
     assert "nki_fit_runtime_overhead" in fit_output
+    assert "--min-payload-coverage 99.9" not in fit_output
+    assert "--audit-output" in fit_output
+    assert "structured_compute_audit.csv" in fit_output
     assert "dma_read_surface.csv" in fit_output
     assert "dma_read_bf16_surface.csv" in fit_output
     assert "dma_read_large_free.csv" in fit_output

@@ -43,6 +43,7 @@ ENGINE_VECTOR = "vector"
 ENGINE_SCALAR = "scalar"
 ENGINE_GPSIMD = "gpsimd"
 ENGINE_STATIC_DMA = "static_dma"
+ENGINE_SYNC = "sync"
 
 
 @dataclass
@@ -751,11 +752,21 @@ class StructuredControlCalibration:
 
     points: dict[tuple[str, str, str], list[tuple[int, float, int, float]]]
     completion_points: dict[tuple[str, str], list[tuple[int, float]]]
+    micro_dags: dict[tuple[str, str, int], dict[str, Any]] = field(
+        default_factory=dict
+    )
+    opcode_timing_points: dict[
+        tuple[str, str, str], list[tuple[int, float]]
+    ] = field(default_factory=dict)
 
     @classmethod
     def from_csv(cls, path: str | Path) -> StructuredControlCalibration:
         points = {}
         completion_points = {}
+        micro_dags = {}
+        opcode_timing_samples: dict[
+            tuple[str, str, str, int, str], list[float]
+        ] = {}
         with Path(path).open(encoding="utf-8", newline="") as file:
             for row in csv.DictReader(file):
                 key = (
@@ -776,30 +787,152 @@ class StructuredControlCalibration:
                     completion_points.setdefault((key[0], key[2]), []).append(
                         (int(row["free_dim"]), completion_ns)
                     )
-        return cls(points, completion_points)
+                raw_dag = row.get("micro_dag_json") or ""
+                if raw_dag:
+                    dag_key = (key[0], key[2], int(row["free_dim"]))
+                    dag = json.loads(raw_dag)
+                    previous = micro_dags.get(dag_key)
+                    if previous is not None and previous != dag:
+                        raise ValueError(
+                            f"Conflicting micro-DAG rows for {dag_key}"
+                        )
+                    micro_dags[dag_key] = dag
+                    for node in dag.get("nodes", []):
+                        if node.get("is_sync"):
+                            continue
+                        engine = _canonical_engine(
+                            str(node.get("engine") or ""), "compute"
+                        )
+                        opcode = str(node.get("opcode_family") or "")
+                        timing = node.get("timing") or {}
+                        duration = float(
+                            timing.get("completion_latency_ns") or 0.0
+                        )
+                        if duration <= 0:
+                            continue
+                        sample_key = (
+                            engine,
+                            key[2],
+                            opcode,
+                            int(row["free_dim"]),
+                            str(row.get("case") or ""),
+                        )
+                        opcode_timing_samples.setdefault(sample_key, []).append(
+                            duration
+                        )
+        opcode_timing_points: dict[
+            tuple[str, str, str], list[tuple[int, float]]
+        ] = {}
+        for (engine, dtype, opcode, free_dim, _case), values in (
+            opcode_timing_samples.items()
+        ):
+            opcode_timing_points.setdefault(
+                (engine, dtype, opcode), []
+            ).append((free_dim, statistics.median(values)))
+        return cls(
+            points, completion_points, micro_dags, opcode_timing_points
+        )
 
-    def predict_completion_ns(self, region_ir: dict[str, Any]) -> float:
-        """Interpolate an independent control's multi-reduction NC floor."""
+    def micro_dag_lookup(
+        self, region_ir: dict[str, Any]
+    ) -> tuple[dict[str, Any] | None, str]:
+        """Return an exact control-backed compiler Flow micro-DAG."""
         from triton_viz.tools.nki_region_ir import structural_calibration_key
 
-        if int(region_ir.get("reduction_count") or 0) <= 0:
-            return 0.0
         key = (
             structural_calibration_key(region_ir),
             ComputeCalibration._norm_dtype(region_ir.get("dtype")),
+            int(region_ir.get("logical_free_dim") or region_ir.get("free_dim") or 1),
         )
-        rows = sorted(set(self.completion_points.get(key, [])))
+        dag = self.micro_dags.get(key)
+        return (dag, "exact") if dag is not None else (None, "missing")
+
+    def opcode_timing_lookup(
+        self,
+        engine: str,
+        dtype: str,
+        opcode_family: str,
+        free_dim: int,
+    ) -> tuple[float, str]:
+        """Interpolate operator-name-free instruction timing controls."""
+        rows = sorted(
+            self.opcode_timing_points.get(
+                (
+                    _canonical_engine(engine, "compute"),
+                    ComputeCalibration._norm_dtype(dtype),
+                    opcode_family,
+                ),
+                [],
+            )
+        )
         if not rows:
-            return 0.0
+            return 0.0, "ood"
+        exact = [value for size, value in rows if size == free_dim]
+        if exact:
+            return statistics.median(exact), "exact"
+        sizes = [size for size, _value in rows]
+        if free_dim < min(sizes) or free_dim > max(sizes):
+            return 0.0, "ood"
+        lower = max(row for row in rows if row[0] <= free_dim)
+        upper = min(row for row in rows if row[0] >= free_dim)
+        if lower[0] == upper[0]:
+            return lower[1], "interpolated"
+        weight = (math.log2(free_dim) - math.log2(lower[0])) / (
+            math.log2(upper[0]) - math.log2(lower[0])
+        )
+        return lower[1] + weight * (upper[1] - lower[1]), "interpolated"
+
+    def completion_lookup(
+        self,
+        region_ir: dict[str, Any],
+        *,
+        excluded_free_dims: set[int] | None = None,
+        excluded_calibration_keys: set[str] | None = None,
+    ) -> tuple[float, str]:
+        """Return completion floor plus exact/interpolated/OOD provenance.
+
+        The exclusion arguments support honest leave-one-control-out audits
+        without refitting on holdout measurements.
+        """
+        from triton_viz.tools.nki_region_ir import structural_calibration_key
+
+        if int(region_ir.get("reduction_count") or 0) <= 0:
+            return 0.0, "not_applicable"
+        calibration_key = structural_calibration_key(region_ir)
+        if calibration_key in (excluded_calibration_keys or set()):
+            return 0.0, "excluded_grammar"
+        key = (
+            calibration_key,
+            ComputeCalibration._norm_dtype(region_ir.get("dtype")),
+        )
+        excluded_free_dims = excluded_free_dims or set()
+        rows = sorted(
+            {
+                row
+                for row in self.completion_points.get(key, [])
+                if int(row[0]) not in excluded_free_dims
+            }
+        )
+        if not rows:
+            return 0.0, "ood"
         free = int(region_ir.get("logical_free_dim") or region_ir.get("free_dim") or 1)
+        exact = [row for row in rows if row[0] == free]
+        if exact:
+            return statistics.median(row[1] for row in exact), "exact"
+        if free < rows[0][0] or free > rows[-1][0]:
+            return 0.0, "ood"
         lower = max((row for row in rows if row[0] <= free), default=rows[0])
         upper = min((row for row in rows if row[0] >= free), default=rows[-1])
         if lower[0] == upper[0]:
-            return lower[1]
+            return lower[1], "interpolated"
         weight = (math.log2(free) - math.log2(lower[0])) / (
             math.log2(upper[0]) - math.log2(lower[0])
         )
-        return lower[1] + weight * (upper[1] - lower[1])
+        return lower[1] + weight * (upper[1] - lower[1]), "interpolated"
+
+    def predict_completion_ns(self, region_ir: dict[str, Any]) -> float:
+        """Backward-compatible numeric completion-floor lookup."""
+        return self.completion_lookup(region_ir)[0]
 
     def predict_points(
         self, region_ir: dict[str, Any]
@@ -936,11 +1069,15 @@ class RuntimeOverheadCalibration:
 class StridedDmaCalibration:
     """Access-geometry busy-time and completion calibration for strided stores."""
 
-    points: dict[tuple[str, int, int], list[tuple[int, float, float]]]
+    points: dict[
+        tuple[str, int, int], list[tuple[int, float, float, float]]
+    ]
 
     @classmethod
     def from_csv(cls, path: str | Path) -> StridedDmaCalibration:
-        points: dict[tuple[str, int, int], list[tuple[int, float, float]]] = {}
+        points: dict[
+            tuple[str, int, int], list[tuple[int, float, float, float]]
+        ] = {}
         with Path(path).open(encoding="utf-8", newline="") as file:
             for row in csv.DictReader(file):
                 key = (
@@ -951,15 +1088,19 @@ class StridedDmaCalibration:
                 points.setdefault(key, []).append(
                     (
                         int(row["free_dim"]),
-                        float(row["dma_active_ns"]),
+                        float(
+                            row.get("dynamic_dma_active_ns")
+                            or row["dma_active_ns"]
+                        ),
+                        float(row.get("static_dma_active_ns") or 0.0),
                         float(row.get("nc_completion_ns") or 0.0),
                     )
                 )
         return cls(points)
 
-    def predict(
+    def predict_components(
         self, events: Iterable[dict[str, Any]]
-    ) -> tuple[float, float] | None:
+    ) -> tuple[float, float, float] | None:
         patterns = [
             (event, pattern)
             for event in events
@@ -983,11 +1124,20 @@ class StridedDmaCalibration:
         rows = self.points.get((dtype, stride, partitions), [])
         if not rows:
             return None
-        rows = sorted(rows)
+        # Backward compatibility for in-memory/old CSV points stored as
+        # (free, total_dma, completion): treat total as dynamic and static=0.
+        rows = sorted(
+            (
+                row
+                if len(row) == 4
+                else (row[0], row[1], 0.0, row[2])
+            )
+            for row in rows
+        )
         lower = max((row for row in rows if row[0] <= free), default=rows[0])
         upper = min((row for row in rows if row[0] >= free), default=rows[-1])
         if lower[0] == upper[0]:
-            return lower[1], lower[2]
+            return lower[1], lower[2], lower[3]
         # Interpolate only between independent control sizes. Values outside
         # their measured range remain clamped and are reported as OOD by the
         # experiment layer rather than silently extrapolated.
@@ -995,7 +1145,29 @@ class StridedDmaCalibration:
         return (
             lower[1] + weight * (upper[1] - lower[1]),
             lower[2] + weight * (upper[2] - lower[2]),
+            lower[3] + weight * (upper[3] - lower[3]),
         )
+
+    def predict(
+        self, events: Iterable[dict[str, Any]]
+    ) -> tuple[float, float] | None:
+        """Backward-compatible total DMA busy/completion lookup."""
+        result = self.predict_components(events)
+        if result is None:
+            return None
+        dynamic_ns, static_ns, completion_ns = result
+        return dynamic_ns + static_ns, completion_ns
+
+    @staticmethod
+    def matched_indices(events: Iterable[dict[str, Any]]) -> list[int]:
+        """Return only the transfer events described by this calibration."""
+        return [
+            index
+            for index, event in enumerate(events)
+            if (pattern := AccessPattern.from_event(event)) is not None
+            and pattern.dst_space == "hbm"
+            and pattern.layout_family == "strided_positive"
+        ]
 
 
 def _canonical_engine(raw_engine: str, op: str) -> str:
@@ -1020,6 +1192,8 @@ def _canonical_engine(raw_engine: str, op: str) -> str:
         return ENGINE_VECTOR
     if raw_engine == ENGINE_GPSIMD:
         return ENGINE_GPSIMD
+    if raw_engine == ENGINE_SYNC:
+        return ENGINE_SYNC
     if raw_engine == "tensor_or_vector_copy":
         # On-chip PSUM<->SBUF copies are commonly issued on a vector/scalar
         # engine; assume VectorE until the dumper records the real engine token.
@@ -1149,6 +1323,14 @@ class CostModel:
     strided_dma_calibration: StridedDmaCalibration | None = None
     tensor_calibration: TensorCalibrationSurface | None = None
     strict_calibration: bool = False
+    enable_structured_completion_floor: bool = True
+    completion_excluded_free_dims: frozenset[int] = field(default_factory=frozenset)
+    completion_excluded_partition_counts: frozenset[int] = field(
+        default_factory=frozenset
+    )
+    completion_excluded_calibration_keys: frozenset[str] = field(
+        default_factory=frozenset
+    )
 
     # On-chip copy (VectorE/ScalarE moving PSUM<->SBUF): cheaper per byte.
     onchip_startup_ns: float = 100.0
@@ -1731,9 +1913,196 @@ def _expand_lowering_groups(
         final_output_storage = members[-1].get("output_storage")
         final_output_range = members[-1].get("output_range")
         final_output_version = members[-1].get("output_version")
-        for target_index, (engine, (count, streams)) in enumerate(
-            sorted(targets.items())
+        ordered_targets = sorted(targets.items())
+        dag_match = "missing"
+        dag = None
+        if (
+            structured
+            and model.structured_control_lowering is not None
+            and event.get("region_ir")
         ):
+            dag, dag_match = model.structured_control_lowering.micro_dag_lookup(
+                region_ir
+            )
+            if dag is not None:
+                engine_first_start = {}
+                for node in dag.get("nodes", []):
+                    engine_name = _canonical_engine(
+                        str(node.get("engine") or ""), "compute"
+                    )
+                    engine_first_start.setdefault(
+                        engine_name, len(engine_first_start)
+                    )
+                ordered_targets = sorted(
+                    targets.items(),
+                    key=lambda item: (
+                        engine_first_start.get(item[0], len(engine_first_start)),
+                        item[0],
+                    ),
+                )
+        dag_engines = (
+            {
+                _canonical_engine(str(node.get("engine") or ""), "compute")
+                for node in dag.get("nodes", [])
+                if not node.get("is_sync")
+            }
+            if dag is not None
+            else set()
+        )
+        if (
+            dag_match == "exact"
+            and dag is not None
+            and not dag.get("unsupported_unmapped_payload", True)
+            and set(targets).issubset(dag_engines)
+        ):
+            dag_nodes = {str(node["id"]): node for node in dag.get("nodes", [])}
+            predecessors: dict[str, list[str]] = {node_id: [] for node_id in dag_nodes}
+            successors: dict[str, list[str]] = {node_id: [] for node_id in dag_nodes}
+            for source_id, target_id in dag.get("edges", []):
+                source_id, target_id = str(source_id), str(target_id)
+                if source_id in dag_nodes and target_id in dag_nodes:
+                    predecessors[target_id].append(source_id)
+                    successors[source_id].append(target_id)
+            roots = {node_id for node_id, deps in predecessors.items() if not deps}
+            sinks = {node_id for node_id, deps in successors.items() if not deps}
+
+            # Flow supplies topology only.  Do not copy control instruction
+            # durations into holdouts: that would turn the micro-DAG into an
+            # exact timing lookup.  Instead preserve the independently
+            # calibrated per-engine aggregate work and distribute it over the
+            # exact control-backed nodes in proportion to their observed
+            # instruction durations. Unsupported engines remain explicit
+            # zero-duration nodes and are reported as unsupported rather than
+            # being silently priced from holdout/control wall time.
+            predicted_engine_ns: dict[str, float] = {}
+            for engine, (count, streams) in targets.items():
+                aggregate = dict(members[0])
+                aggregate.update(
+                    {
+                        "op": "compute",
+                        "api_op": "lowered_fusion",
+                        "engine": engine,
+                        "input_shape": [1, lowering_free_dim],
+                        "output_shape": [1, lowering_free_dim],
+                        "free_dim": lowering_free_dim,
+                        "output_dtype": dtype,
+                        "input_stream_count": streams,
+                        "lowering_expansion": count,
+                        "lowering_fixed_ns": (
+                            structured.get(engine, (0.0, streams, 0.0))[2]
+                            if int(group) == 0
+                            else 0.0
+                        ),
+                    }
+                )
+                predicted_engine_ns[engine] = model.cost_ns(aggregate)
+            observed_by_engine: dict[str, float] = Counter()
+            node_engine: dict[str, str] = {}
+            for node_id, node in dag_nodes.items():
+                engine = _canonical_engine(
+                    str(node.get("engine") or ""), "compute"
+                )
+                node_engine[node_id] = engine
+                if engine in predicted_engine_ns:
+                    timing = node.get("timing") or {}
+                    observed_by_engine[engine] += max(
+                        0.0, float(timing.get("completion_latency_ns") or 0.0)
+                    )
+            unsupported_engines = sorted(dag_engines - set(targets) - {ENGINE_SYNC})
+            opcode_timing: dict[str, tuple[float, str]] = {}
+            for node_id, node in dag_nodes.items():
+                if node.get("is_sync"):
+                    continue
+                opcode_timing[node_id] = (
+                    model.structured_control_lowering.opcode_timing_lookup(
+                        node_engine[node_id],
+                        dtype,
+                        str(node.get("opcode_family") or ""),
+                        lowering_free_dim,
+                    )
+                )
+            use_opcode_timing = (
+                bool(opcode_timing)
+                and all(match != "ood" for _value, match in opcode_timing.values())
+            )
+            for node_index, node in enumerate(dag.get("nodes", [])):
+                node_id = str(node["id"])
+                timing = node.get("timing") or {}
+                engine = node_engine[node_id]
+                observed_ns = max(
+                    0.0, float(timing.get("completion_latency_ns") or 0.0)
+                )
+                duration_ns = 0.0
+                timing_match = "not_applicable"
+                if node_id in opcode_timing and use_opcode_timing:
+                    duration_ns, timing_match = opcode_timing[node_id]
+                elif engine in predicted_engine_ns:
+                    denominator = observed_by_engine.get(engine, 0.0)
+                    duration_ns = (
+                        predicted_engine_ns[engine] * observed_ns / denominator
+                        if denominator > 0
+                        else predicted_engine_ns[engine]
+                    )
+                    timing_match = "aggregate_calibration"
+                lowered = dict(members[0])
+                lowered.update(
+                    {
+                        "op": "micro_event",
+                        "api_op": "lowered_micro_event",
+                        "engine": engine,
+                        "opcode_family": str(node.get("opcode_family") or ""),
+                        "scheduler_duration_override_ns": duration_ns,
+                        "micro_event_id": node_id,
+                        "micro_event_predecessors": predecessors[node_id],
+                        "micro_dag_match": "exact",
+                        "micro_dag_order": node_index,
+                        "micro_dag_timing_source": (
+                            "opcode_control_surface"
+                            if use_opcode_timing
+                            else "calibrated_engine_work"
+                        ),
+                        "micro_dag_timing_match": timing_match,
+                        "micro_dag_unsupported_engines": unsupported_engines,
+                        "input_ptrs": first_inputs if node_id in roots else [],
+                        "input_storages": (
+                            first_input_storages if node_id in roots else []
+                        ),
+                        "input_ranges": first_input_ranges if node_id in roots else [],
+                        "input_versions": (
+                            first_input_versions if node_id in roots else []
+                        ),
+                        "output_ptr": None,
+                        "output_storage": None,
+                        "output_range": None,
+                        "output_version": None,
+                    }
+                )
+                expanded.append(lowered)
+            publish = dict(members[-1])
+            publish.update(
+                {
+                    "op": "micro_event",
+                    "api_op": "lowered_micro_publish",
+                    "engine": ENGINE_VECTOR,
+                    "opcode_family": "PUBLISH",
+                    "scheduler_duration_override_ns": 0.0,
+                    "micro_event_id": f"publish:{group}",
+                    "micro_event_predecessors": sorted(sinks),
+                    "micro_dag_match": "exact",
+                    "input_ptrs": [],
+                    "input_storages": [],
+                    "input_ranges": [],
+                    "input_versions": [],
+                    "output_ptr": final_output,
+                    "output_storage": final_output_storage,
+                    "output_range": final_output_range,
+                    "output_version": final_output_version,
+                }
+            )
+            expanded.append(publish)
+            index = end
+            continue
+        for target_index, (engine, (count, streams)) in enumerate(ordered_targets):
             lowered = dict(members[0])
             lowered.update(
                 {
@@ -1762,19 +2131,21 @@ def _expand_lowering_groups(
                         )
                     ),
                     "lowered_from_signature": signature,
+                    "micro_dag_match": dag_match,
+                    "micro_dag_order": target_index,
                     # Publish the logical result only once; otherwise parallel
                     # target engines would create artificial WAW hazards.
                     "output_ptr": final_output
-                    if target_index == len(targets) - 1
+                    if target_index == len(ordered_targets) - 1
                     else None,
                     "output_storage": final_output_storage
-                    if target_index == len(targets) - 1
+                    if target_index == len(ordered_targets) - 1
                     else None,
                     "output_range": final_output_range
-                    if target_index == len(targets) - 1
+                    if target_index == len(ordered_targets) - 1
                     else None,
                     "output_version": final_output_version
-                    if target_index == len(targets) - 1
+                    if target_index == len(ordered_targets) - 1
                     else None,
                 }
             )
@@ -1825,41 +2196,83 @@ def simulate(
         if model.structural_static_dma is not None
         else 0.0
     )
-    structured_completion_ns = (
-        max(
+    completion_lookups = (
+        [
             (
-                model.structured_control_lowering.predict_completion_ns(event["region_ir"])
-                for event in source_events
-                if event.get("region_ir")
-            ),
-            default=0.0,
-        )
+                (0.0, "excluded_partition")
+                if int(
+                    event["region_ir"].get("partition_count") or 1
+                )
+                in model.completion_excluded_partition_counts
+                else model.structured_control_lowering.completion_lookup(
+                    event["region_ir"],
+                    excluded_free_dims=set(model.completion_excluded_free_dims),
+                    excluded_calibration_keys=set(
+                        model.completion_excluded_calibration_keys
+                    ),
+                )
+            )
+            for event in source_events
+            if event.get("region_ir")
+        ]
         if model.structured_control_lowering is not None
+        else []
+    )
+    structured_completion_ns = (
+        max((value for value, _match in completion_lookups), default=0.0)
+        if model.enable_structured_completion_floor
         else 0.0
     )
+    completion_matches = Counter(match for _value, match in completion_lookups)
     strided_dma_prediction = (
-        model.strided_dma_calibration.predict(source_events)
+        model.strided_dma_calibration.predict_components(source_events)
         if model.strided_dma_calibration is not None
         else None
     )
     strided_completion_ns = 0.0
     if strided_dma_prediction is not None:
-        strided_dma_busy_ns, strided_completion_ns = strided_dma_prediction
-        dma_indices = [
+        (
+            strided_dynamic_dma_ns,
+            strided_static_dma_ns,
+            strided_completion_ns,
+        ) = strided_dma_prediction
+        matched_indices = model.strided_dma_calibration.matched_indices(source_events)
+        unmatched_indices = [
             index
             for index, event in enumerate(source_events)
             if event.get("op") in {"load", "store", "transfer"}
+            and index not in matched_indices
         ]
-        raw_costs = [model.cost_ns(source_events[index]) for index in dma_indices]
-        raw_total = sum(raw_costs)
-        if raw_total > 0:
-            scale = strided_dma_busy_ns / raw_total
+        unmatched_total = sum(
+            model.cost_ns(source_events[index]) for index in unmatched_indices
+        )
+        matched_costs = [
+            model.cost_ns(source_events[index]) for index in matched_indices
+        ]
+        matched_raw_total = sum(matched_costs)
+        matched_target_total = max(0.0, strided_dynamic_dma_ns - unmatched_total)
+        if matched_raw_total > 0:
+            scale = matched_target_total / matched_raw_total
             source_events = [dict(event) for event in source_events]
-            for index, raw_cost in zip(dma_indices, raw_costs):
+            for index, raw_cost in zip(matched_indices, matched_costs):
                 source_events[index]["scheduler_duration_override_ns"] = (
                     raw_cost * scale
                 )
+        if strided_static_dma_ns > 0:
+            structural_static_ns = max(structural_static_ns, strided_static_dma_ns)
     events = _expand_lowering_groups(source_events, model)
+    if structural_static_ns > 0:
+        events.append(
+            {
+                "seq": -1,
+                "op": "micro_event",
+                "api_op": "compiler_static_dma",
+                "engine": ENGINE_STATIC_DMA,
+                "opcode_family": "STATIC_DMA_PACKET_TRAIN",
+                "scheduler_duration_override_ns": structural_static_ns,
+                "static_dma_dependency_unknown": True,
+            }
+        )
     tensor_events = [
         event
         for event in events
@@ -1868,6 +2281,19 @@ def simulate(
     ]
     tensor_startup_ns = 0.0
     tensor_domain_ood = 0
+    micro_dag_engine_coverage: set[str] = set()
+    micro_dag_unsupported_engine_events = 0
+    micro_dag_timing_matches: Counter[str] = Counter()
+    for event in events:
+        if event.get("micro_dag_match") != "exact":
+            continue
+        engine = _canonical_engine(event.get("engine", ""), event.get("op", ""))
+        if float(event.get("scheduler_duration_override_ns") or 0.0) > 0:
+            micro_dag_engine_coverage.add(engine)
+        micro_dag_timing_matches[str(event.get("micro_dag_timing_match") or "")] += 1
+        micro_dag_unsupported_engine_events += len(
+            event.get("micro_dag_unsupported_engines") or ()
+        )
     if model.tensor_calibration is not None:
         if tensor_events:
             dtype = Counter(
@@ -1912,18 +2338,27 @@ def simulate(
         engine_busy[ENGINE_TENSOR] = tensor_startup_ns
     makespan = tensor_startup_ns
     cross_engine_edges = 0
+    cross_engine_edge_keys: set[tuple[Any, ...]] = set()
+    micro_event_end: dict[str, tuple[float, str]] = {}
     # Running high-water mark of all memory-transfer completions, used as a
     # conservative dependency floor for compute ops that lack pointer linkage.
     prior_transfer_end = 0.0
 
     def _dep(
-        earliest: float, producer_end: float, producer_engine: str, consumer_engine: str
+        earliest: float,
+        producer_end: float,
+        producer_engine: str,
+        consumer_engine: str,
+        edge_key: tuple[Any, ...] | None = None,
     ) -> float:
         """Fold one dependency edge in, adding sync cost if it crosses engines."""
         nonlocal cross_engine_edges
         ready = producer_end
         if producer_engine != consumer_engine:
-            cross_engine_edges += 1
+            if edge_key is None or edge_key not in cross_engine_edge_keys:
+                cross_engine_edges += 1
+                if edge_key is not None:
+                    cross_engine_edge_keys.add(edge_key)
             ready += sync_ns
         return max(earliest, ready)
 
@@ -1967,6 +2402,20 @@ def simulate(
         else:
             slot_indices = [min(range(len(slots)), key=lambda i: slots[i])]
             earliest = slots[slot_indices[0]]
+
+        # Compiler Flow predecessors inside an exact control-backed micro-DAG.
+        # These edges are explicit evidence, independent of reconstructed
+        # storage aliases.
+        for predecessor in event.get("micro_event_predecessors") or ():
+            producer = micro_event_end.get(str(predecessor))
+            if producer is not None:
+                earliest = _dep(
+                    earliest,
+                    producer[0],
+                    producer[1],
+                    engine,
+                    ("micro", str(predecessor), str(event.get("micro_event_id"))),
+                )
 
         # RAW: wait for prior writers whose range overlaps a buffer we read.
         for key, version, _ptr, lo, hi in reads:
@@ -2031,9 +2480,10 @@ def simulate(
         )
         engine_busy[engine] = engine_busy.get(engine, 0.0) + duration
         makespan = max(makespan, end)
+        micro_event_id = event.get("micro_event_id")
+        if micro_event_id is not None:
+            micro_event_end[str(micro_event_id)] = (end, engine)
 
-    if structural_static_ns > 0:
-        engine_busy[ENGINE_STATIC_DMA] = structural_static_ns
     calibrated_nc_ns = None
     if model.runtime_overhead_calibration is not None:
         max_partitions = max(
@@ -2082,7 +2532,12 @@ def simulate(
     # Independent strided controls expose a packet/queue completion tail that
     # is not represented by DMA active time.  It is a geometry-keyed lower
     # bound on end-to-end completion, not an additive operator residual.
-    final_ns = max(final_ns, strided_completion_ns, structured_completion_ns)
+    without_structured_completion_ns = max(final_ns, strided_completion_ns)
+    final_ns = max(without_structured_completion_ns, structured_completion_ns)
+    structured_completion_activated = (
+        model.enable_structured_completion_floor
+        and structured_completion_ns > without_structured_completion_ns
+    )
     return SimulationResult(
         predicted_latency_ns=final_ns,
         timeline=timeline,
@@ -2092,6 +2547,24 @@ def simulate(
             "compute_plus_dma": phase_critical_ns,
             "resource_overlap_makespan": makespan,
             "runtime_critical_path_extension": final_ns - makespan,
+            "without_structured_completion_floor": without_structured_completion_ns,
+            "structured_completion_floor_ns": structured_completion_ns,
+            "structured_completion_floor_activated": float(
+                structured_completion_activated
+            ),
+            "completion_exact_count": float(
+                completion_matches.get("exact", 0)
+            ),
+            "completion_interpolated_count": float(
+                completion_matches.get("interpolated", 0)
+            ),
+            "completion_ood_count": float(completion_matches.get("ood", 0)),
+            "completion_excluded_grammar_count": float(
+                completion_matches.get("excluded_grammar", 0)
+            ),
+            "completion_excluded_partition_count": float(
+                completion_matches.get("excluded_partition", 0)
+            ),
             "runtime_control_in_domain": (
                 float(runtime_control_in_domain)
                 if runtime_control_in_domain is not None
@@ -2108,6 +2581,34 @@ def simulate(
             ),
             "dma_surface_max_log_distance": dma_surface_max_log_distance,
             "tensor_flops_domain_ood_count": float(tensor_domain_ood),
+            "micro_dag_vector_covered": float(
+                ENGINE_VECTOR in micro_dag_engine_coverage
+            ),
+            "micro_dag_scalar_covered": float(
+                ENGINE_SCALAR in micro_dag_engine_coverage
+            ),
+            "micro_dag_gpsimd_covered": float(
+                ENGINE_GPSIMD in micro_dag_engine_coverage
+            ),
+            "micro_dag_tensor_covered": float(
+                ENGINE_TENSOR in micro_dag_engine_coverage
+            ),
+            "micro_dag_static_dma_covered": float(
+                ENGINE_STATIC_DMA in micro_dag_engine_coverage
+            ),
+            "micro_dag_unsupported_engine_events": float(
+                micro_dag_unsupported_engine_events
+            ),
+            "micro_dag_timing_exact_count": float(
+                micro_dag_timing_matches.get("exact", 0)
+            ),
+            "micro_dag_timing_interpolated_count": float(
+                micro_dag_timing_matches.get("interpolated", 0)
+            ),
+            "micro_dag_timing_aggregate_count": float(
+                micro_dag_timing_matches.get("aggregate_calibration", 0)
+            ),
+            "static_dma_dependency_unknown": float(structural_static_ns > 0),
             "final": final_ns,
         },
     )

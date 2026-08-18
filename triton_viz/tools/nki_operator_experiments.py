@@ -20,6 +20,7 @@ from __future__ import annotations
 
 import argparse
 import csv
+import hashlib
 import importlib.util
 import json
 import os
@@ -74,8 +75,51 @@ _DTYPES = {
 }
 
 
+_ACTIVE_RNG: np.random.Generator | None = None
+
+
+def _rng() -> np.random.Generator:
+    return _ACTIVE_RNG or np.random.default_rng(0)
+
+
 def _randn(shape: tuple[int, ...], dtype: str) -> np.ndarray:
-    return np.random.randn(*shape).astype(_DTYPES[dtype])
+    return _rng().standard_normal(shape).astype(_DTYPES[dtype])
+
+
+def _array_sha256(value: np.ndarray) -> str:
+    digest = hashlib.sha256()
+    digest.update(str(value.dtype).encode())
+    digest.update(json.dumps(list(value.shape), separators=(",", ":")).encode())
+    digest.update(np.ascontiguousarray(value).tobytes())
+    return digest.hexdigest()
+
+
+def _write_input_manifest(path: Path, inputs: list[Any], seed: int) -> None:
+    payload = {
+        "schema": "triton-viz.nki-operator-inputs-v1",
+        "seed": seed,
+        "inputs": [
+            {
+                "index": index,
+                "kind": "ndarray",
+                "shape": list(value.shape),
+                "dtype": str(value.dtype),
+                "sha256": _array_sha256(value),
+            }
+            if isinstance(value, np.ndarray)
+            else {
+                "index": index,
+                "kind": "constant",
+                "type": type(value).__name__,
+                "value": value,
+            }
+            for index, value in enumerate(inputs)
+        ],
+    }
+    path.write_text(
+        json.dumps(payload, indent=2, sort_keys=True, default=str) + "\n",
+        encoding="utf-8",
+    )
 
 
 def _matmul_inputs(m: int, k: int, dtype: str) -> list[Any]:
@@ -115,7 +159,7 @@ def _tiled_attention_inputs(m_size: int, dv_size: int, dtype: str) -> list[Any]:
         _randn((batch, num_heads, m_size, d_size), dtype),
         _randn((batch, num_heads_k, n_size, d_size), dtype),
         _randn((batch, num_heads_v, n_size, dv_size), dtype),
-        np.empty(
+        np.zeros(
             (batch, num_heads, m_size, dv_size),
             dtype=_DTYPES[dtype],
         ),
@@ -142,7 +186,7 @@ OPERATORS: dict[str, dict[str, Any]] = {
         "kernel": "dropout_kernel",
         "inputs": lambda r, c, dt: [
             _randn((r, c), dt),
-            (np.random.rand(r, c) > 0.25).astype(_DTYPES[dt]),
+            (_rng().random((r, c)) > 0.25).astype(_DTYPES[dt]),
             0.25,
         ],
     },
@@ -247,6 +291,7 @@ CSV_COLUMNS = [
     "rows",
     "cols",
     "dtype",
+    "seed",
     "status",
     "error",
     "event_count",
@@ -369,15 +414,30 @@ def _resolve_platform_target() -> str:
     ``NEURON_PLATFORM_TARGET_OVERRIDE`` (highest priority), then an explicit
     target, then hardware auto-detection via ``neuron-ls``. This keeps the
     framework benchmark path identical on Inf2 (NeuronCore-v2, canonical
-    ``trn1``) and Trn2 (NeuronCore-v3, ``trn2``). Falls back to the env var or
-    ``trn2`` only if the resolver is unavailable.
+    ``trn1``) and Trn2 (NeuronCore-v3, ``trn2``). It deliberately does not
+    guess a target: a wrong fallback can produce an incompatible NEFF while
+    appearing to be a successful benchmark.
     """
     try:
         from nki.compiler.target import resolve_target
 
         return resolve_target()
-    except Exception:
-        return os.environ.get("NEURON_PLATFORM_TARGET_OVERRIDE") or "trn2"
+    except (ImportError, ModuleNotFoundError) as exc:
+        override = os.environ.get("NEURON_PLATFORM_TARGET_OVERRIDE")
+        aliases = {
+            "inf2": "trn1",
+            "trn1": "trn1",
+            "gen2": "trn1",
+            "trn2": "trn2",
+            "gen3": "trn2",
+        }
+        if override in aliases:
+            return aliases[override]
+        raise RuntimeError(
+            "Unable to resolve the Neuron compile target. Install an NKI "
+            "version with nki.compiler.target.resolve_target or set "
+            "NEURON_PLATFORM_TARGET_OVERRIDE to inf2/trn1/trn2."
+        ) from exc
 
 
 def _run_hardware_framework(
@@ -509,7 +569,9 @@ def run_case(
     hardware: bool,
     source_mapping: bool = False,
     compiler_load_cse: bool = False,
+    seed: int = 0,
 ) -> dict[str, Any]:
+    global _ACTIVE_RNG
     case_id = f"{op}__r{rows}__c{cols}__{dtype}"
     art = out_dir / case_id
     row: dict[str, Any] = {
@@ -517,6 +579,7 @@ def run_case(
         "rows": rows,
         "cols": cols,
         "dtype": dtype,
+        "seed": seed,
         "status": "unknown",
         "error": "",
     }
@@ -524,7 +587,13 @@ def run_case(
         if art.exists():
             shutil.rmtree(art)
         art.mkdir(parents=True, exist_ok=True)
-        inputs = OPERATORS[op]["inputs"](rows, cols, dtype)
+        previous_rng = _ACTIVE_RNG
+        _ACTIVE_RNG = np.random.default_rng(seed)
+        try:
+            inputs = OPERATORS[op]["inputs"](rows, cols, dtype)
+        finally:
+            _ACTIVE_RNG = previous_rng
+        _write_input_manifest(art / "inputs.json", inputs, seed)
         events = _trace_events(op, inputs, art / "trace.jsonl")
         dot_count = sum(
             1 for e in events if e.get("op") in ("dot", "tensor_transpose")
@@ -675,6 +744,12 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dma-queue-count", type=int, default=1)
     parser.add_argument("--warmup", type=int, default=10)
     parser.add_argument("--iters", type=int, default=50)
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=0,
+        help="Deterministic input seed, recorded with per-input SHA256 hashes.",
+    )
     parser.add_argument("--no-hardware", action="store_true")
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
@@ -810,14 +885,20 @@ def main(argv: list[str] | None = None) -> int:
         with results_path.open(encoding="utf-8", newline="") as file:
             rows = list(csv.DictReader(file))
     completed = {
-        (str(row["op"]), int(row["rows"]), int(row["cols"]), str(row["dtype"]))
+        (
+            str(row["op"]),
+            int(row["rows"]),
+            int(row["cols"]),
+            str(row["dtype"]),
+            int(row.get("seed") or 0),
+        )
         for row in rows
         if row.get("status") == "ok"
     }
     for op in args.ops:
         for r in args.rows:
             for c in args.cols:
-                key = (op, r, c, args.dtype)
+                key = (op, r, c, args.dtype, args.seed)
                 mapping_path = (
                     out_dir
                     / f"{op}__r{r}__c{c}__{args.dtype}"
@@ -839,6 +920,7 @@ def main(argv: list[str] | None = None) -> int:
                         int(row.get("rows", -1)),
                         int(row.get("cols", -1)),
                         str(row.get("dtype")),
+                        int(row.get("seed") or 0),
                     )
                     != key
                 ]
@@ -855,6 +937,7 @@ def main(argv: list[str] | None = None) -> int:
                     not args.no_hardware,
                     args.source_mapping,
                     args.compiler_load_cse,
+                    args.seed,
                 )
                 tail = ""
                 if row.get("error_vs_nc_pct") not in (None, ""):

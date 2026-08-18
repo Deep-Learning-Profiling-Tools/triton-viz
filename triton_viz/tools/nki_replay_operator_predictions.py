@@ -39,18 +39,38 @@ FIELDS = [
     "predicted_total_dma_us",
     "predicted_vector_us",
     "predicted_scalar_us",
+    "predicted_gpsimd_us",
     "predicted_tensor_us",
     "predicted_total_us",
     "predicted_compute_only_us",
     "predicted_compute_dma_us",
     "predicted_resource_overlap_us",
+    "predicted_without_completion_floor_us",
     "compute_only_error_pct",
     "compute_dma_error_pct",
     "resource_overlap_error_pct",
+    "without_completion_floor_error_pct",
     "hardware_nc_p50_us",
     "nc_error_pct",
     "hardware_tensor_active_us",
     "tensor_error_pct",
+    "hardware_vector_active_us",
+    "hardware_vector_payload_us",
+    "vector_payload_error_pct",
+    "vector_error_pct",
+    "hardware_scalar_active_us",
+    "hardware_scalar_payload_us",
+    "scalar_payload_error_pct",
+    "scalar_error_pct",
+    "hardware_gpsimd_active_us",
+    "hardware_gpsimd_payload_us",
+    "gpsimd_payload_error_pct",
+    "gpsimd_error_pct",
+    "hardware_dynamic_dma_us",
+    "hardware_dynamic_dma_reference",
+    "dynamic_dma_error_pct",
+    "hardware_static_dma_us",
+    "static_dma_error_pct",
     "hardware_total_dma_us",
     "dma_error_pct",
     "calibration_match",
@@ -61,6 +81,20 @@ FIELDS = [
     "dma_surface_ood_count",
     "dma_surface_max_log_distance",
     "tensor_flops_domain_ood_count",
+    "completion_exact_count",
+    "completion_interpolated_count",
+    "completion_ood_count",
+    "completion_excluded_partition_count",
+    "completion_floor_activated",
+    "micro_dag_vector_covered",
+    "micro_dag_scalar_covered",
+    "micro_dag_gpsimd_covered",
+    "micro_dag_tensor_covered",
+    "micro_dag_static_dma_covered",
+    "micro_dag_unsupported_engine_events",
+    "micro_dag_timing_exact_count",
+    "micro_dag_timing_interpolated_count",
+    "micro_dag_timing_aggregate_count",
 ]
 
 
@@ -77,6 +111,31 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime-overhead-csv", type=Path)
     parser.add_argument("--strided-dma-csv", type=Path)
     parser.add_argument("--strict-calibration", action="store_true")
+    parser.add_argument(
+        "--disable-structured-completion-floor",
+        action="store_true",
+        help="Ablation: report final latency without the structured completion floor.",
+    )
+    parser.add_argument(
+        "--completion-exclude-free-dim",
+        type=int,
+        action="append",
+        default=[],
+        help="Leave-one-F-out completion audit; repeat for multiple free dimensions.",
+    )
+    parser.add_argument(
+        "--completion-exclude-partition",
+        type=int,
+        action="append",
+        default=[],
+        help="Leave-one-partition-out completion audit.",
+    )
+    parser.add_argument(
+        "--completion-exclude-calibration-key",
+        action="append",
+        default=[],
+        help="Leave-one-grammar-control-out completion audit.",
+    )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
     source_rows = list(csv.DictReader((args.root / "operator_results.csv").open()))
@@ -144,6 +203,18 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 ),
                 strict_calibration=args.strict_calibration,
+                enable_structured_completion_floor=(
+                    not args.disable_structured_completion_floor
+                ),
+                completion_excluded_free_dims=frozenset(
+                    args.completion_exclude_free_dim
+                ),
+                completion_excluded_partition_counts=frozenset(
+                    args.completion_exclude_partition
+                ),
+                completion_excluded_calibration_keys=frozenset(
+                    args.completion_exclude_calibration_key
+                ),
             )
         case_name = (
             f"{source['op']}__r{source['rows']}__c{source['cols']}__{source['dtype']}"
@@ -181,8 +252,64 @@ def main(argv: list[str] | None = None) -> int:
         hardware_us = float(source["hardware_dma_active_us"])
         predicted_total_us = result.predicted_latency_ns / 1000.0
         predicted_tensor_us = result.engine_busy_ns.get("tensor", 0.0) / 1000.0
+        predicted_vector_us = result.engine_busy_ns.get("vector", 0.0) / 1000.0
+        predicted_scalar_us = result.engine_busy_ns.get("scalar", 0.0) / 1000.0
+        predicted_gpsimd_us = result.engine_busy_ns.get("gpsimd", 0.0) / 1000.0
         hardware_nc_us = float(source["hardware_nc_p50_us"])
         hardware_tensor_us = float(source.get("hardware_tensor_active_us") or 0.0)
+        hardware_vector_us = float(source.get("hardware_vector_active_us") or 0.0)
+        hardware_scalar_us = float(source.get("hardware_scalar_active_us") or 0.0)
+        summary_path = args.root / case_name / "hardware/explorer_summary.json"
+        profile = {}
+        if summary_path.is_file():
+            summary = json.loads(summary_path.read_text(encoding="utf-8"))
+            profile = next(iter(summary.values()), {})
+        hardware_gpsimd_us = float(
+            profile.get("gpsimd_engine_active_time") or 0.0
+        ) * 1e6
+        counter_dynamic_dma_us = (
+            float(profile.get("software_dynamic_dma_active_time") or 0.0)
+            + float(profile.get("hardware_dynamic_dma_active_time") or 0.0)
+        ) * 1e6
+        hardware_static_dma_us = float(
+            profile.get("static_dma_active_time") or 0.0
+        ) * 1e6
+        # Explorer exposes both explicit dynamic counters and the aggregate
+        # DMA decomposition. Use the larger physically reconciled value:
+        # older/compiler-specific profiles can under-report one of the dynamic
+        # counter families, while dma_active - static_dma is the corresponding
+        # aggregate residual. Preserve the choice in the CSV audit.
+        residual_dynamic_dma_us = max(0.0, hardware_us - hardware_static_dma_us)
+        hardware_dynamic_dma_us = max(
+            counter_dynamic_dma_us, residual_dynamic_dma_us
+        )
+        hardware_dynamic_dma_reference = (
+            "explicit_dynamic_counters"
+            if counter_dynamic_dma_us >= residual_dynamic_dma_us
+            else "dma_active_minus_static"
+        )
+        mapping_audit_path = (
+            args.root / case_name / "hardware/source_mapping/audit.json"
+        )
+        mapping_audit = (
+            json.loads(mapping_audit_path.read_text(encoding="utf-8"))
+            if mapping_audit_path.is_file()
+            else {}
+        )
+
+        def payload_us(engine: str) -> float:
+            return (
+                float(
+                    (mapping_audit.get("engines", {}).get(engine, {})).get(
+                        "payload_active_ns", 0.0
+                    )
+                )
+                / 1000.0
+            )
+
+        hardware_vector_payload_us = payload_us("vector")
+        hardware_scalar_payload_us = payload_us("scalar")
+        hardware_gpsimd_payload_us = payload_us("gpsimd")
         components = result.components_ns
         has_tensor_events = any(
             event.get("op") in {"dot", "tensor_transpose"}
@@ -208,15 +335,18 @@ def main(argv: list[str] | None = None) -> int:
                 "predicted_dynamic_dma_us": dynamic_us,
                 "predicted_static_dma_us": static_us,
                 "predicted_total_dma_us": predicted_us,
-                "predicted_vector_us": result.engine_busy_ns.get("vector", 0.0)
-                / 1000.0,
-                "predicted_scalar_us": result.engine_busy_ns.get("scalar", 0.0)
-                / 1000.0,
+                "predicted_vector_us": predicted_vector_us,
+                "predicted_scalar_us": predicted_scalar_us,
+                "predicted_gpsimd_us": predicted_gpsimd_us,
                 "predicted_tensor_us": predicted_tensor_us,
                 "predicted_total_us": predicted_total_us,
                 "predicted_compute_only_us": components["compute_only"] / 1000.0,
                 "predicted_compute_dma_us": components["compute_plus_dma"] / 1000.0,
                 "predicted_resource_overlap_us": components["resource_overlap_makespan"]
+                / 1000.0,
+                "predicted_without_completion_floor_us": components[
+                    "without_structured_completion_floor"
+                ]
                 / 1000.0,
                 "compute_only_error_pct": (components["compute_only"] / 1000.0 - hardware_nc_us)
                 / hardware_nc_us
@@ -226,6 +356,12 @@ def main(argv: list[str] | None = None) -> int:
                 * 100,
                 "resource_overlap_error_pct": (
                     components["resource_overlap_makespan"] / 1000.0 - hardware_nc_us
+                )
+                / hardware_nc_us
+                * 100,
+                "without_completion_floor_error_pct": (
+                    components["without_structured_completion_floor"] / 1000.0
+                    - hardware_nc_us
                 )
                 / hardware_nc_us
                 * 100,
@@ -241,6 +377,71 @@ def main(argv: list[str] | None = None) -> int:
                     / hardware_tensor_us
                     * 100
                     if hardware_tensor_us and has_tensor_events
+                    else ""
+                ),
+                "hardware_vector_active_us": hardware_vector_us,
+                "hardware_vector_payload_us": hardware_vector_payload_us,
+                "vector_payload_error_pct": (
+                    (predicted_vector_us - hardware_vector_payload_us)
+                    / hardware_vector_payload_us
+                    * 100
+                    if hardware_vector_payload_us
+                    else ""
+                ),
+                "vector_error_pct": (
+                    (predicted_vector_us - hardware_vector_us)
+                    / hardware_vector_us
+                    * 100
+                    if hardware_vector_us
+                    else ""
+                ),
+                "hardware_scalar_active_us": hardware_scalar_us,
+                "hardware_scalar_payload_us": hardware_scalar_payload_us,
+                "scalar_payload_error_pct": (
+                    (predicted_scalar_us - hardware_scalar_payload_us)
+                    / hardware_scalar_payload_us
+                    * 100
+                    if hardware_scalar_payload_us
+                    else ""
+                ),
+                "scalar_error_pct": (
+                    (predicted_scalar_us - hardware_scalar_us)
+                    / hardware_scalar_us
+                    * 100
+                    if hardware_scalar_us
+                    else ""
+                ),
+                "hardware_gpsimd_active_us": hardware_gpsimd_us,
+                "hardware_gpsimd_payload_us": hardware_gpsimd_payload_us,
+                "gpsimd_payload_error_pct": (
+                    (predicted_gpsimd_us - hardware_gpsimd_payload_us)
+                    / hardware_gpsimd_payload_us
+                    * 100
+                    if hardware_gpsimd_payload_us
+                    else ""
+                ),
+                "gpsimd_error_pct": (
+                    (predicted_gpsimd_us - hardware_gpsimd_us)
+                    / hardware_gpsimd_us
+                    * 100
+                    if hardware_gpsimd_us
+                    else ""
+                ),
+                "hardware_dynamic_dma_us": hardware_dynamic_dma_us,
+                "hardware_dynamic_dma_reference": hardware_dynamic_dma_reference,
+                "dynamic_dma_error_pct": (
+                    (dynamic_us - hardware_dynamic_dma_us)
+                    / hardware_dynamic_dma_us
+                    * 100
+                    if hardware_dynamic_dma_us
+                    else ""
+                ),
+                "hardware_static_dma_us": hardware_static_dma_us,
+                "static_dma_error_pct": (
+                    (static_us - hardware_static_dma_us)
+                    / hardware_static_dma_us
+                    * 100
+                    if hardware_static_dma_us
                     else ""
                 ),
                 "hardware_total_dma_us": hardware_us,
@@ -264,6 +465,48 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "tensor_flops_domain_ood_count": int(
                     components.get("tensor_flops_domain_ood_count", 0)
+                ),
+                "completion_exact_count": int(
+                    components.get("completion_exact_count", 0)
+                ),
+                "completion_interpolated_count": int(
+                    components.get("completion_interpolated_count", 0)
+                ),
+                "completion_ood_count": int(
+                    components.get("completion_ood_count", 0)
+                ),
+                "completion_excluded_partition_count": int(
+                    components.get("completion_excluded_partition_count", 0)
+                ),
+                "completion_floor_activated": int(
+                    components.get("structured_completion_floor_activated", 0)
+                ),
+                "micro_dag_vector_covered": int(
+                    components.get("micro_dag_vector_covered", 0)
+                ),
+                "micro_dag_scalar_covered": int(
+                    components.get("micro_dag_scalar_covered", 0)
+                ),
+                "micro_dag_gpsimd_covered": int(
+                    components.get("micro_dag_gpsimd_covered", 0)
+                ),
+                "micro_dag_tensor_covered": int(
+                    components.get("micro_dag_tensor_covered", 0)
+                ),
+                "micro_dag_static_dma_covered": int(
+                    components.get("micro_dag_static_dma_covered", 0)
+                ),
+                "micro_dag_unsupported_engine_events": int(
+                    components.get("micro_dag_unsupported_engine_events", 0)
+                ),
+                "micro_dag_timing_exact_count": int(
+                    components.get("micro_dag_timing_exact_count", 0)
+                ),
+                "micro_dag_timing_interpolated_count": int(
+                    components.get("micro_dag_timing_interpolated_count", 0)
+                ),
+                "micro_dag_timing_aggregate_count": int(
+                    components.get("micro_dag_timing_aggregate_count", 0)
                 ),
             }
         )

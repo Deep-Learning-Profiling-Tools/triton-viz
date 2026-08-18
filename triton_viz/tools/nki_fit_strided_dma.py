@@ -13,6 +13,8 @@ FIELDS = [
     "partition_count",
     "free_dim",
     "dma_active_ns",
+    "dynamic_dma_active_ns",
+    "static_dma_active_ns",
     "nc_completion_ns",
     "case",
     "compiler_version",
@@ -28,6 +30,15 @@ def collect(results_jsonl: Path) -> list[dict]:
         case = Path(result["dir"])
         profile = next(iter(json.loads((case / "explorer_summary.json").read_text()).values()))
         dma_ns = float(profile["dma_active_time"]) * 1e9
+        static_dma_ns = float(profile.get("static_dma_active_time") or 0.0) * 1e9
+        dynamic_dma_ns = max(
+            (
+                float(profile.get("software_dynamic_dma_active_time") or 0.0)
+                + float(profile.get("hardware_dynamic_dma_active_time") or 0.0)
+            )
+            * 1e9,
+            dma_ns - static_dma_ns,
+        )
         spec = result["spec"]
         rows.append(
             {
@@ -36,6 +47,8 @@ def collect(results_jsonl: Path) -> list[dict]:
                 "partition_count": spec["p"],
                 "free_dim": spec["f"],
                 "dma_active_ns": dma_ns,
+                "dynamic_dma_active_ns": dynamic_dma_ns,
+                "static_dma_active_ns": static_dma_ns,
                 "nc_completion_ns": float(
                     result["latency_percentiles"]["nc_latency"]["p50_us"]
                 )

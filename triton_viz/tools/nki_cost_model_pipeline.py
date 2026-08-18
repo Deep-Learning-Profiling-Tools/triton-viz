@@ -271,6 +271,8 @@ def fit(root: Path, dry_run: bool) -> None:
             root / "controls",
             "--compute-calibration-csv",
             compute,
+            "--audit-output",
+            calibration / "structured_compute_audit.csv",
             "--output",
             structured,
         ),
@@ -530,6 +532,7 @@ def evaluate(root: Path, dry_run: bool) -> None:
         "compute_only_mape_pct": "compute_only_error_pct",
         "compute_plus_dma_mape_pct": "compute_dma_error_pct",
         "resource_overlap_mape_pct": "resource_overlap_error_pct",
+        "without_completion_floor_mape_pct": "without_completion_floor_error_pct",
         "final_nc_p50_mape_pct": "nc_error_pct",
     }
     auxiliary_rows = rows_by_split.get("auxiliary_bf16_v1", [])
@@ -590,6 +593,67 @@ def evaluate(root: Path, dry_run: bool) -> None:
     report["full_bf16_compute_calibration_matches"] = sorted(
         {row["calibration_match"] for row in full_bf16_rows}
     )
+    mechanism_rows = full_rows + full_bf16_rows + tensor_rows + attention_rows
+    report["mechanism_busy_mape_pct"] = {
+        name: statistics.mean(
+            abs(float(row[field]))
+            for row in mechanism_rows
+            if row.get(field) not in (None, "")
+        )
+        for name, field in {
+            "dynamic_dma": "dynamic_dma_error_pct",
+            "static_dma": "static_dma_error_pct",
+            "vector_payload": "vector_payload_error_pct",
+            "scalar_payload": "scalar_payload_error_pct",
+            "gpsimd_payload": "gpsimd_payload_error_pct",
+            "tensor": "tensor_error_pct",
+        }.items()
+        if any(row.get(field) not in (None, "") for row in mechanism_rows)
+    }
+    report["mechanism_coverage"] = {}
+    for name, field, coverage_field in (
+        ("vector", "vector_payload_error_pct", "micro_dag_vector_covered"),
+        ("scalar", "scalar_payload_error_pct", "micro_dag_scalar_covered"),
+        ("gpsimd", "gpsimd_payload_error_pct", "micro_dag_gpsimd_covered"),
+        ("tensor", "tensor_error_pct", "micro_dag_tensor_covered"),
+        ("static_dma", "static_dma_error_pct", "micro_dag_static_dma_covered"),
+    ):
+        measured = [
+            row
+            for row in mechanism_rows
+            if row.get(field) not in (None, "")
+        ]
+        covered = [
+            row for row in measured if int(row.get(coverage_field) or 0)
+        ]
+        report["mechanism_coverage"][name] = {
+            "measured_cases": len(measured),
+            "covered_cases": len(covered),
+            "coverage_rate": len(covered) / len(measured) if measured else 0.0,
+            "covered_case_mape_pct": (
+                statistics.mean(abs(float(row[field])) for row in covered)
+                if covered
+                else None
+            ),
+        }
+    report["micro_dag_audit"] = {
+        "unsupported_engine_events": sum(
+            int(row.get("micro_dag_unsupported_engine_events") or 0)
+            for row in mechanism_rows
+        ),
+        "timing_exact_events": sum(
+            int(row.get("micro_dag_timing_exact_count") or 0)
+            for row in mechanism_rows
+        ),
+        "timing_interpolated_events": sum(
+            int(row.get("micro_dag_timing_interpolated_count") or 0)
+            for row in mechanism_rows
+        ),
+        "timing_aggregate_events": sum(
+            int(row.get("micro_dag_timing_aggregate_count") or 0)
+            for row in mechanism_rows
+        ),
+    }
     report["tensor_nc_p50_mape_pct"] = statistics.mean(
         abs(float(row["nc_error_pct"])) for row in tensor_rows
     )
@@ -658,6 +722,19 @@ def evaluate(root: Path, dry_run: bool) -> None:
     report["formal_fp32_dma_surface_max_log_distance"] = max(
         float(row["dma_surface_max_log_distance"]) for row in formal_rows
     )
+    report["formal_fp32_completion_audit"] = {
+        "exact": sum(int(row["completion_exact_count"]) for row in formal_rows),
+        "interpolated": sum(
+            int(row["completion_interpolated_count"]) for row in formal_rows
+        ),
+        "ood": sum(int(row["completion_ood_count"]) for row in formal_rows),
+        "activated_cases": sum(
+            int(row["completion_floor_activated"]) for row in formal_rows
+        ),
+        "activation_rate": statistics.mean(
+            int(row["completion_floor_activated"]) for row in formal_rows
+        ),
+    }
     report["formal_fp32_operator_mape_pct"] = {
         operator: statistics.mean(
             abs(float(row["nc_error_pct"]))

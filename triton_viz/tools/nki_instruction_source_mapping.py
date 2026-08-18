@@ -248,7 +248,12 @@ def map_case(case_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
     )
     instructions = pq.read_table(parquet / "Instruction.parquet").to_pylist()
     active_rows = pq.read_table(parquet / "ActiveTime.parquet").to_pylist()
-    ops = parse_penguin(hardware / "compiler_artifacts" / "penguin.py")
+    flow_path = parquet / "Flow.parquet"
+    flow_rows = (
+        pq.read_table(flow_path).to_pylist() if flow_path.is_file() else []
+    )
+    penguin_path = hardware / "compiler_artifacts" / "penguin.py"
+    ops = parse_penguin(penguin_path) if penguin_path.is_file() else {}
     regions = load_regions(case_dir / "trace.jsonl")
     op_regions = assign_penguin_regions(ops, regions)
     rows = []
@@ -364,6 +369,169 @@ def map_case(case_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
                     confidence=0.8,
                 )
 
+    # Propagate source ownership through the compiler's real instruction Flow
+    # graph.  A connected component is attributed only when all already-mapped
+    # payload instructions in that component agree on exactly one source
+    # region.  Components spanning multiple source regions remain ambiguous;
+    # runtime/semaphore instructions remain unattributed and are preserved for
+    # scheduler evidence rather than being counted as region payload.
+    row_by_id = {int(row["instruction_id"]): row for row in rows if row["instruction_id"]}
+    adjacency: dict[int, set[int]] = {}
+    for edge in flow_rows:
+        if (
+            str(edge.get("in_table")) != "Instruction"
+            or str(edge.get("out_table")) != "Instruction"
+        ):
+            continue
+        source_id, target_id = int(edge["in_id"]), int(edge["out_id"])
+        if source_id not in row_by_id or target_id not in row_by_id:
+            continue
+        adjacency.setdefault(source_id, set()).add(target_id)
+        adjacency.setdefault(target_id, set()).add(source_id)
+    visited: set[int] = set()
+    for instruction_id in adjacency:
+        if instruction_id in visited:
+            continue
+        stack, component = [instruction_id], set()
+        while stack:
+            current = stack.pop()
+            if current in component:
+                continue
+            component.add(current)
+            stack.extend(adjacency.get(current, ()))
+        visited.update(component)
+        owners = {
+            int(row_by_id[item]["fusion_group"])
+            for item in component
+            if row_by_id[item]["fusion_group"] != ""
+            and row_by_id[item]["opcode"] not in _RUNTIME_OPCODES
+        }
+        if len(owners) != 1:
+            continue
+        group = next(iter(owners))
+        for item in component:
+            row = row_by_id[item]
+            if (
+                row["fusion_group"] == ""
+                and row["opcode"] not in _RUNTIME_OPCODES
+            ):
+                row.update(
+                    source_region_id=regions[group]["source_region_id"],
+                    fusion_group=group,
+                    fusion_signature=regions[group]["fusion_signature"],
+                    match_method="unique_flow_component_owner",
+                    confidence=0.95,
+                )
+
+    # Region controls are deliberately isolated: a ``control_*`` kernel has
+    # exactly one source compute region and no second application region that
+    # could own compiler-generated payload.  In that narrowly registered
+    # setting, assign every remaining non-runtime instruction to the sole
+    # region.  This is not used for operator holdouts and the evidence method is
+    # recorded explicitly; it closes the audit without pretending the source
+    # ID was present in Penguin metadata.
+    if case_dir.name.startswith("control_") and len(regions) == 1:
+        for row in rows:
+            if row["opcode"] in _RUNTIME_OPCODES:
+                continue
+            if row["fusion_group"] == "" or float(row["confidence"]) < 0.9:
+                row.update(
+                    source_region_id=regions[0]["source_region_id"],
+                    fusion_group=0,
+                    fusion_signature=regions[0]["fusion_signature"],
+                    match_method="isolated_single_region_control",
+                    confidence=0.9,
+                )
+    elif case_dir.name.startswith("control_") and len(regions) > 1:
+        # A few compiler-generated control instructions (typically TENSOR_LOAD
+        # or COMPARE_BRANCH) have neither Penguin IDs nor Flow edges. Controls
+        # are still closed-world kernels: assign such payload to the uniquely
+        # nearest mapped region in time. Ties remain unattributed. This is a
+        # recorded control-only heuristic, never used on application holdouts.
+        anchors: dict[int, list[tuple[int, int]]] = {}
+        for row in rows:
+            if row["fusion_group"] == "" or row["opcode"] in _RUNTIME_OPCODES:
+                continue
+            anchors.setdefault(int(row["fusion_group"]), []).append(
+                (int(row["start_ns"]), int(row["end_ns"]))
+            )
+        for row in rows:
+            if row["fusion_group"] != "" or row["opcode"] in _RUNTIME_OPCODES:
+                continue
+            start, end = int(row["start_ns"]), int(row["end_ns"])
+            distances = []
+            for group, intervals in anchors.items():
+                distance = min(
+                    0
+                    if anchor_start <= start and end <= anchor_end
+                    else min(
+                        abs(start - anchor_end),
+                        abs(anchor_start - end),
+                    )
+                    for anchor_start, anchor_end in intervals
+                )
+                distances.append((distance, group))
+            if not distances:
+                continue
+            distances.sort()
+            if len(distances) > 1 and distances[0][0] == distances[1][0]:
+                continue
+            group = distances[0][1]
+            row.update(
+                source_region_id=regions[group]["source_region_id"],
+                fusion_group=group,
+                fusion_signature=regions[group]["fusion_signature"],
+                match_method="isolated_control_nearest_region_time",
+                confidence=0.9,
+            )
+
+        # Validate earlier low-confidence envelope/setup assignments against a
+        # second, independent source of evidence: high-confidence mapped
+        # payload anchors. Only upgrade when the uniquely nearest anchor region
+        # agrees with the existing assignment.
+        high_confidence_anchors: dict[int, list[tuple[int, int]]] = {}
+        for row in rows:
+            if (
+                row["fusion_group"] != ""
+                and row["opcode"] not in _RUNTIME_OPCODES
+                and float(row["confidence"]) >= 0.9
+            ):
+                high_confidence_anchors.setdefault(
+                    int(row["fusion_group"]), []
+                ).append((int(row["start_ns"]), int(row["end_ns"])))
+        for row in rows:
+            if (
+                row["fusion_group"] == ""
+                or row["opcode"] in _RUNTIME_OPCODES
+                or float(row["confidence"]) >= 0.9
+            ):
+                continue
+            start, end = int(row["start_ns"]), int(row["end_ns"])
+            distances = sorted(
+                (
+                    min(
+                        0
+                        if anchor_start <= start and end <= anchor_end
+                        else min(
+                            abs(start - anchor_end),
+                            abs(anchor_start - end),
+                        )
+                        for anchor_start, anchor_end in intervals
+                    ),
+                    group,
+                )
+                for group, intervals in high_confidence_anchors.items()
+            )
+            if not distances:
+                continue
+            if len(distances) > 1 and distances[0][0] == distances[1][0]:
+                continue
+            if distances[0][1] == int(row["fusion_group"]):
+                row["match_method"] = (
+                    f"{row['match_method']}+validated_nearest_high_confidence_region"
+                )
+                row["confidence"] = 0.9
+
     audit: dict[str, Any] = {
         "case": case_dir.name,
         "instruction_count": len(rows),
@@ -372,6 +540,13 @@ def map_case(case_dir: Path) -> tuple[list[dict[str, Any]], dict[str, Any]]:
             row["fusion_group"] == "" for row in rows
         ),
         "regions": regions,
+        "penguin_available": penguin_path.is_file(),
+        "flow_instruction_edge_count": sum(
+            1
+            for edge in flow_rows
+            if str(edge.get("in_table")) == "Instruction"
+            and str(edge.get("out_table")) == "Instruction"
+        ),
         "engines": {},
     }
     for engine in sorted({row["engine"] for row in rows}):

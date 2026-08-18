@@ -165,6 +165,50 @@ def test_load_transpose2d_matches_masked_load_then_transpose():
     assert cast_result.data.dtype == np.float64
 
 
+@pytest.mark.parametrize("dtype", [np.float32, np.int32])
+def test_masked_sum_max_min_use_reduction_identities(dtype):
+    builder = Builder()
+    values = NDArray(value=np.asarray([[1, 9, 3], [7, 2, 8]], dtype=dtype))
+    mask = NDArray(
+        value=np.asarray([[True, False, True], [False, True, False]])
+    )
+
+    assert np.array_equal(
+        builder.sum(values, axis=1, mask=mask).data,
+        np.asarray([4, 2], dtype=dtype),
+    )
+    assert np.array_equal(
+        builder.max(values, axis=1, mask=mask).data,
+        np.asarray([3, 2], dtype=dtype),
+    )
+    assert np.array_equal(
+        builder.min(values, axis=1, mask=mask).data,
+        np.asarray([1, 2], dtype=dtype),
+    )
+
+
+def test_masked_mean_divides_by_active_lane_count_and_all_false_is_nan():
+    builder = Builder()
+    values = NDArray(value=np.asarray([[1.0, 100.0, 3.0], [5.0, 6.0, 7.0]]))
+    mask = NDArray(
+        value=np.asarray([[True, False, True], [False, False, False]])
+    )
+
+    result = builder.mean(values, axis=1, mask=mask).data
+    assert result[0] == pytest.approx(2.0)
+    assert np.isnan(result[1])
+
+
+def test_masked_reduction_supports_bfloat16_when_available():
+    ml_dtypes = pytest.importorskip("ml_dtypes")
+    builder = Builder()
+    values = NDArray(
+        value=np.asarray([[1, 9, 3]], dtype=ml_dtypes.bfloat16)
+    )
+    mask = NDArray(value=np.asarray([[True, False, True]]))
+    assert float(builder.max(values, axis=1, mask=mask).data[0]) == 3.0
+
+
 if __name__ == "__main__":
     test_ndarray_creation()
     test_slicing()

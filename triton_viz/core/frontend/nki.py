@@ -10,6 +10,7 @@ from triton_viz.core.data import (
     ProgramId,
     ReduceSum,
     Store,
+    TensorTranspose,
 )
 from triton_viz.core.data import NkiCompute
 
@@ -53,6 +54,12 @@ def _nki_reduce_sum_adapter(
     return AdapterResult(input_tensor, axis, keep_dims)
 
 
+def _nki_transpose_adapter(
+    src: Any, *_args: Any, engine: Any = None, **_kwargs: Any
+) -> AdapterResult:
+    return AdapterResult(src, engine or getattr(src, "_nki_transpose_engine", "tensor"))
+
+
 NKI_ADAPTERS: dict[type[Op], Callable[..., AdapterResult]] = {}
 NKI_NAMESPACES: dict[Any, dict[str, type[Op]]] = {}
 if HAS_NKI:
@@ -66,6 +73,7 @@ if HAS_NKI:
             "store": Store,
             "matmul": Dot,
             "nc_matmul": Dot,
+            "nc_transpose": TensorTranspose,
             "sum": ReduceSum,
             "arange": MakeRange,
             # Elementwise/reduction/activation compute APIs -> one general record.
@@ -93,6 +101,8 @@ if HAS_NKI:
             "minimum": NkiCompute,
             "greater": NkiCompute,
             "where": NkiCompute,
+            "broadcast_to": NkiCompute,
+            "static_cast": NkiCompute,
             "max": NkiCompute,
             "min": NkiCompute,
             "mean": NkiCompute,
@@ -115,6 +125,7 @@ if HAS_NKI:
         ),
         Dot: _nki_dot_adapter,
         ReduceSum: _nki_reduce_sum_adapter,
+        TensorTranspose: _nki_transpose_adapter,
         # NkiCompute uses the default passthrough adapter: the tracer reconstructs
         # operands/engine from metadata attached to the result NDArray, so it does
         # not depend on each op's positional signature.

@@ -36,19 +36,46 @@ def test_operator_mape_combines_multiple_results_files(tmp_path, capsys):
 
 def test_operator_mape_reads_frozen_evaluation_csvs(tmp_path, capsys):
     path = tmp_path / "evaluation.csv"
-    fields = ["nc_error_pct", "tensor_error_pct", "dma_error_pct"]
+    fields = ["case", "dtype", "nc_error_pct", "tensor_error_pct", "dma_error_pct"]
     with path.open("w", newline="") as file:
         writer = csv.DictWriter(file, fieldnames=fields)
         writer.writeheader()
-        writer.writerow(dict(zip(fields, (10.0, 2.0, -4.0))))
-        writer.writerow(dict(zip(fields, (-20.0, "", 4.0))))
+        writer.writerow(dict(zip(fields, ("a", "float32", 10.0, 2.0, -4.0))))
+        writer.writerow(dict(zip(fields, ("b", "float32", -20.0, "", 4.0))))
 
     assert main([str(path)]) == 0
     output = capsys.readouterr().out
     assert "points=2" in output
+    assert "unique_cases=2" in output
+    assert "duplicate_rows=0" in output
     assert "nc_error_pct=15.0000" in output
     assert "tensor_error_pct=2.0000" in output
     assert "dma_error_pct=4.0000" in output
+
+
+def test_operator_mape_reports_row_weighted_and_unique_case_metrics(
+    tmp_path, capsys
+):
+    first = tmp_path / "formal.csv"
+    second = tmp_path / "full.csv"
+    fields = ["case", "dtype", "nc_error_pct", "tensor_error_pct", "dma_error_pct"]
+    with first.open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow(dict(zip(fields, ("a", "float32", 10, "", 4))))
+    with second.open("w", newline="") as file:
+        writer = csv.DictWriter(file, fieldnames=fields)
+        writer.writeheader()
+        writer.writerow(dict(zip(fields, ("a", "float32", 10, "", 4))))
+        writer.writerow(dict(zip(fields, ("b", "float32", 40, "", 8))))
+
+    assert main([str(first), str(second)]) == 0
+    output = capsys.readouterr().out
+    assert "rows=3" in output
+    assert "unique_cases=2" in output
+    assert "duplicate_rows=1" in output
+    assert "split_weighted_rows_nc_error_pct=20.0000" in output
+    assert "unique_case_nc_error_pct=25.0000" in output
 
 
 def test_operator_mape_rejects_results_without_successful_rows(tmp_path):

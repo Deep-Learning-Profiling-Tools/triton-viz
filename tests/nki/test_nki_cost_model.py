@@ -721,6 +721,100 @@ def test_structured_multi_reduction_completion_is_operator_agnostic_floor():
     assert calibration.predict_completion_ns(non_reduction) == 0.0
 
 
+def test_completion_lookup_reports_exact_ood_and_exclusions():
+    region = {
+        "dtype": "float32",
+        "free_dim": 512,
+        "logical_free_dim": 512,
+        "partition_count": 128,
+        "reduction_count": 1,
+        "op_histogram": {"reduce_sum": 1},
+    }
+    key = structural_calibration_key(region)
+    calibration = StructuredControlCalibration(
+        points={},
+        completion_points={(key, "float32"): [(128, 10_000), (512, 20_000)]},
+    )
+    assert calibration.completion_lookup(region) == (20_000, "exact")
+    assert calibration.completion_lookup(
+        region, excluded_free_dims={512}
+    ) == (0.0, "ood")
+    assert calibration.completion_lookup(
+        region, excluded_calibration_keys={key}
+    ) == (0.0, "excluded_grammar")
+
+
+def test_exact_micro_dag_uses_flow_predecessors_and_calibrated_engine_work():
+    region = {
+        "dtype": "float32",
+        "free_dim": 128,
+        "logical_free_dim": 128,
+        "partition_count": 128,
+        "reduction_count": 1,
+        "op_histogram": {"reduce_sum": 1},
+    }
+    key = structural_calibration_key(region)
+    dag = {
+        "schema": "triton-viz.nki-micro-dag-v1",
+        "unsupported_unmapped_payload": False,
+        "nodes": [
+            {
+                "id": "v",
+                "engine": "vector",
+                "opcode_family": "TENSOR_REDUCE",
+                "is_sync": False,
+                "timing": {"completion_latency_ns": 100.0},
+            },
+            {
+                "id": "s",
+                "engine": "scalar",
+                "opcode_family": "ACTIVATE",
+                "is_sync": False,
+                "timing": {"completion_latency_ns": 200.0},
+            },
+        ],
+        "edges": [["v", "s"]],
+    }
+    structured = StructuredControlCalibration(
+        points={
+            (key, "vector", "float32"): [(128, 2.0, 2, 0.0)],
+            (key, "scalar", "float32"): [(128, 1.0, 1, 0.0)],
+        },
+        completion_points={},
+        micro_dags={(key, "float32", 128): dag},
+    )
+    level_b = ComputeCalibration(
+        {
+            ("vector", "float32", 2): (10.0, 1.0),
+            ("scalar", "float32", 1): (5.0, 0.5),
+        }
+    )
+    event = {
+        "seq": 1,
+        "op": "reduce_sum",
+        "api_op": "reduce_sum",
+        "engine": "vector",
+        "input_shape": [128, 128],
+        "output_shape": [128, 1],
+        "output_dtype": "float32",
+        "fusion_signature": "reduce_sum",
+        "fusion_group": 0,
+        "region_ir": region,
+    }
+    result = simulate(
+        [event],
+        CostModel(
+            compute_calibration=level_b,
+            structured_control_lowering=structured,
+        ),
+    )
+    assert len(result.timeline["vector"]) >= 1
+    assert len(result.timeline["scalar"]) == 1
+    assert result.timeline["scalar"][0].start >= result.timeline["vector"][0].end
+    assert result.components_ns["micro_dag_vector_covered"] == 1
+    assert result.components_ns["micro_dag_scalar_covered"] == 1
+
+
 def test_tilebench_matmul_builder_uses_rows_as_square_output_and_cols_as_k():
     from triton_viz.tools.nki_operator_experiments import _matmul_inputs
 

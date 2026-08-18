@@ -463,15 +463,17 @@ class Builder:
     def silu(self, x: NDArray, **kwargs):
         # SiLU(x) = x * sigmoid(x)
         sigmoid_x = 1 / (1 + np.exp(-x.data))
-        return NDArray(value=x.data * sigmoid_x, name=f"{x.name}_silu", **kwargs)
+        nd = NDArray(value=x.data * sigmoid_x, name=f"{x.name}_silu", **kwargs)
+        return self._tag(nd, "silu", "scalar", (x,))
 
     def gelu(self, x: NDArray, **kwargs):
         # GELU(x) = 0.5 * x * (1 + tanh(sqrt(2/pi) * (x + 0.044715 * x^3)))
         sqrt_2_pi = np.sqrt(2 / np.pi)
         inner = sqrt_2_pi * (x.data + 0.044715 * np.power(x.data, 3))
-        return NDArray(
+        nd = NDArray(
             value=0.5 * x.data * (1 + np.tanh(inner)), name=f"{x.name}_gelu", **kwargs
         )
+        return self._tag(nd, "gelu", "scalar", (x,))
 
     def sqrt(self, x: NDArray, **kwargs):
         return self._unary_op(x, np.sqrt, "sqrt", **kwargs)
@@ -526,7 +528,15 @@ class Builder:
         source storage, so later ``Dot``/load dependencies still resolve through
         the same allocation identity.
         """
-        return NDArray(value=src.data.T, name=f"{src.name}_nc_transpose", **kwargs)
+        engine = kwargs.pop("engine", "tensor")
+        nd = NDArray(
+            value=src.data.T,
+            name=f"{src.name}_nc_transpose",
+            buffer=kwargs.pop("buffer", nl.psum),
+            **kwargs,
+        )
+        nd._nki_transpose_engine = engine
+        return nd
 
     def nc_matmul(
         self,
@@ -550,10 +560,16 @@ class Builder:
         )
 
     def sum(self, x: NDArray, *args, mask=None, **kwargs):
-        if mask is not None:
-            kwargs["where"] = mask.data
-        return NDArray(
-            value=x.data.sum(*args, **kwargs), name=f"{x.name}_sum", **kwargs
+        axis = args[0] if args else kwargs.pop("axis", None)
+        keepdims = kwargs.pop("keepdims", kwargs.pop("keep_dims", False))
+        return self._reduce(
+            x,
+            np.sum,
+            "reduce_sum",
+            axis=axis,
+            keepdims=keepdims,
+            dtype=kwargs.pop("dtype", None),
+            mask=mask,
         )
 
     def square(self, x: NDArray, **kwargs):
@@ -617,19 +633,67 @@ class Builder:
     def greater(self, x, y, *, dtype=None, mask=None, **kwargs):
         return self._binary(x, y, np.greater, "greater", dtype=dtype)
 
-    def _reduce(self, x: NDArray, np_func, op_name, *, axis=None, keepdims=False,
-                dtype=None, mask=None, **kwargs):
+    @staticmethod
+    def _reduction_identity(dtype: np.dtype, op_name: str):
+        """Return the value used by a masked-out reduction lane."""
+        dtype = np.dtype(dtype)
+        if op_name in {"reduce_sum", "mean"}:
+            return dtype.type(0)
+        if np.issubdtype(dtype, np.bool_):
+            return False if op_name == "max" else True
+        if np.issubdtype(dtype, np.floating):
+            return -np.inf if op_name == "max" else np.inf
+        if np.issubdtype(dtype, np.integer):
+            info = np.iinfo(dtype)
+            return info.min if op_name == "max" else info.max
+        # NumPy does not classify ml_dtypes.bfloat16 as np.floating, but it
+        # supports infinities and the same reduction identities.
+        if dtype.name == "bfloat16":
+            return dtype.type(-np.inf if op_name == "max" else np.inf)
+        raise TypeError(f"Unsupported masked reduction dtype: {dtype}")
+
+    def _reduce(
+        self,
+        x: NDArray,
+        np_func,
+        op_name,
+        *,
+        axis=None,
+        keepdims=False,
+        dtype=None,
+        mask=None,
+        **kwargs,
+    ):
         data = x.data
+        active_mask = None
         if mask is not None:
-            # Reductions over masked tiles ignore out-of-range lanes; callers
-            # supply an identity fill via nl.where, so honoring the mask here is
-            # belt-and-suspenders and keeps parity with the real API surface.
-            data = np.where(self._as_np(mask), data, data)
-        result = np_func(data, axis=axis, keepdims=keepdims)
+            active_mask = np.broadcast_to(
+                np.asarray(self._as_np(mask), dtype=bool), data.shape
+            )
+        if op_name == "mean" and active_mask is not None:
+            summed = np.sum(
+                np.where(active_mask, data, self._reduction_identity(data.dtype, op_name)),
+                axis=axis,
+                keepdims=keepdims,
+            )
+            count = np.sum(active_mask, axis=axis, keepdims=keepdims)
+            result = np.divide(
+                summed,
+                count,
+                out=np.full(np.shape(summed), np.nan, dtype=np.result_type(summed, float)),
+                where=count != 0,
+            )
+        else:
+            if active_mask is not None:
+                data = np.where(
+                    active_mask, data, self._reduction_identity(data.dtype, op_name)
+                )
+            result = np_func(data, axis=axis, keepdims=keepdims)
         if dtype is not None:
             result = result.astype(dtype)
         nd = NDArray(value=result, name=f"{x.name}_{op_name}")
-        return self._tag(nd, op_name, "vector", (x,))
+        inputs = (x, mask) if isinstance(mask, NDArray) else (x,)
+        return self._tag(nd, op_name, "vector", inputs)
 
     def max(self, x: NDArray, *, axis=None, keepdims=False, dtype=None, mask=None, **kwargs):
         return self._reduce(x, np.max, "max", axis=axis, keepdims=keepdims, dtype=dtype, mask=mask)
@@ -652,10 +716,12 @@ class Builder:
         return self.ndarray(shape, value.dtype, buffer=buffer, name=name, value=value)
 
     def broadcast_to(self, x: NDArray, shape, **kwargs):
-        return x.broadcast_to(shape)
+        nd = x.broadcast_to(shape)
+        return self._tag(nd, "broadcast_to", "vector", (x,))
 
     def static_cast(self, x: NDArray, dtype, **kwargs):
-        return NDArray(value=x.data.astype(dtype), name=f"{x.name}_static_cast")
+        nd = NDArray(value=x.data.astype(dtype), name=f"{x.name}_static_cast")
+        return self._tag(nd, "static_cast", "vector", (x,))
 
     def range(self, stop):
         return range(stop)
