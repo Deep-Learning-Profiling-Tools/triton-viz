@@ -102,3 +102,79 @@ def test_model_manifest_checks_source_fingerprints_and_file_hashes(tmp_path):
 
     with pytest.raises(ValueError, match="hash mismatch"):
         validate_model_manifest(manifest, calibration_files=[table])
+
+
+def test_model_manifest_audits_repository_only_source_changes(tmp_path, monkeypatch):
+    calibration = tmp_path / "calibration"
+    calibration.mkdir()
+    table = calibration / "compute.csv"
+    table.write_text("engine,dtype\nvector,float32\n")
+    clean = tmp_path / "clean.json"
+    dirty = tmp_path / "dirty.json"
+    clean.write_text(json.dumps({"compiler_fingerprint": _fingerprint()}))
+    dirty.write_text(
+        json.dumps(
+            {
+                "compiler_fingerprint": _fingerprint(
+                    repository_dirty=True,
+                    repository_diff_digest="trace-only-change",
+                )
+            }
+        )
+    )
+    builder = _fingerprint(repository_revision="builder")
+    monkeypatch.setattr(
+        nki_provenance, "collect_compiler_fingerprint", lambda root: builder
+    )
+
+    manifest = write_model_manifest(
+        calibration,
+        calibration_files=[table],
+        source_manifests=[clean, dirty],
+    )
+    data = json.loads(manifest.read_text())
+    assert data["compatibility_policy"] == (
+        "compiler_hardware_exact_model_builder_exact"
+    )
+    assert data["calibration_source_compatibility"] == [
+        {
+            "status": "repository_changed",
+            "changed": {
+                "repository_dirty": {"reference": False, "candidate": True},
+                "repository_diff_digest": {
+                    "reference": "",
+                    "candidate": "trace-only-change",
+                },
+            },
+            "requires_canary": True,
+        }
+    ]
+    assert data["model_builder_fingerprint"] == builder
+
+
+def test_model_manifest_rejects_compiler_source_changes(tmp_path):
+    calibration = tmp_path / "calibration"
+    calibration.mkdir()
+    table = calibration / "compute.csv"
+    table.write_text("engine,dtype\nvector,float32\n")
+    first = tmp_path / "first.json"
+    second = tmp_path / "second.json"
+    first.write_text(json.dumps({"compiler_fingerprint": _fingerprint()}))
+    second.write_text(
+        json.dumps(
+            {
+                "compiler_fingerprint": _fingerprint(
+                    packages={"neuronx-cc": "2.0", "triton": "3.0"}
+                )
+            }
+        )
+    )
+
+    import pytest
+
+    with pytest.raises(ValueError, match="incompatible compiler fingerprints"):
+        write_model_manifest(
+            calibration,
+            calibration_files=[table],
+            source_manifests=[first, second],
+        )

@@ -93,10 +93,47 @@ def test_run_one_uses_per_test_folder_and_work_metadata(tmp_path):
     # Monkeypatch by skipping actual Neuron execution: use skip-existing path.
     bench_dir = tmp_path / "latency_pointer_chase" / "ptr_chase__hbm_index_chain__dtypeuint32__ring_length1024__stride1__repeat2"
     bench_dir.mkdir(parents=True)
-    (bench_dir / "manifest.json").write_text("{}")
+    (bench_dir / "manifest.json").write_text(json.dumps({"status": "ok"}))
     row = run_one(spec, tmp_path, warmup=1, iters=1, profile_export="none", explorer_timeout_s=1, skip_existing=True)
     assert row["status"] == "skipped_existing"
     assert "latency_pointer_chase" in row["dir"]
+
+
+def test_run_one_does_not_skip_failed_existing_manifest(tmp_path, monkeypatch):
+    from microbench.inf2_nki.harness import run_microbench
+
+    spec = {
+        "name": "ptr_chase",
+        "kind": "pointer_chase",
+        "dtype": "uint32",
+        "ring_length": 1024,
+        "stride": 1,
+        "repeat": 2,
+        "mode": "hbm_index_chain",
+    }
+    bench_dir = (
+        tmp_path
+        / "latency_pointer_chase"
+        / "ptr_chase__hbm_index_chain__dtypeuint32__ring_length1024__stride1__repeat2"
+    )
+    bench_dir.mkdir(parents=True)
+    (bench_dir / "manifest.json").write_text(json.dumps({"status": "error"}))
+
+    def fail_instantiate(_spec):
+        raise RuntimeError("reran failed case")
+
+    monkeypatch.setattr(run_microbench, "_instantiate", fail_instantiate)
+    row = run_one(
+        spec,
+        tmp_path,
+        warmup=1,
+        iters=1,
+        profile_export="none",
+        explorer_timeout_s=1,
+        skip_existing=True,
+    )
+    assert row["status"] == "error"
+    assert "reran failed case" in row["error"]
 
 
 def test_skip_existing_counts_as_success_for_resumable_runs(tmp_path, monkeypatch):
@@ -130,7 +167,7 @@ def test_skip_existing_counts_as_success_for_resumable_runs(tmp_path, monkeypatc
         / "ptr__hbm_index_chain__dtypeuint32__ring_length16__stride1__repeat1"
     )
     bench_dir.mkdir(parents=True)
-    (bench_dir / "manifest.json").write_text("{}")
+    (bench_dir / "manifest.json").write_text(json.dumps({"status": "ok"}))
     monkeypatch.setattr(run_microbench, "_collect_versions", lambda: {})
     assert (
         run_microbench.main(

@@ -211,6 +211,33 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
             _run(command, dry_run)
 
 
+def _microbench_source_manifests(root: Path) -> list[Path]:
+    manifests = []
+    for run_manifest in sorted((root / "microbench").glob("*/run_manifest.json")):
+        run_data = json.loads(run_manifest.read_text(encoding="utf-8"))
+        if run_data.get("num_ok") == run_data.get("num_benchmarks"):
+            manifests.append(run_manifest)
+            continue
+
+        # A failed --resume attempt may legitimately use a different local
+        # compiler environment and replace the suite-level manifest.  It must
+        # not invalidate (or provide provenance for) successful, frozen
+        # artifacts from an earlier run.  Case manifests prove which artifacts
+        # succeeded but do not carry a compiler fingerprint, so exclude this
+        # failed attempt from the model's collection-source set.
+        case_manifests = sorted(run_manifest.parent.glob("**/manifest.json"))
+        successful = [
+            path
+            for path in case_manifests
+            if json.loads(path.read_text(encoding="utf-8")).get("status") == "ok"
+        ]
+        if not successful:
+            raise ValueError(
+                f"Incomplete microbench run has no successful artifacts: {run_manifest}"
+            )
+    return manifests
+
+
 def fit(root: Path, dry_run: bool) -> None:
     calibration = root / "calibration"
     calibration.mkdir(parents=True, exist_ok=True)
@@ -346,7 +373,7 @@ def fit(root: Path, dry_run: bool) -> None:
                 control_root / "experiment_manifest.json"
                 for control_root in control_roots
             ],
-            *sorted((root / "microbench").glob("*/run_manifest.json")),
+            *_microbench_source_manifests(root),
         ]
         write_model_manifest(
             calibration,

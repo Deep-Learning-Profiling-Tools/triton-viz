@@ -7,12 +7,17 @@ import csv
 import json
 from pathlib import Path
 
-from triton_viz.tools.nki_region_ir import match_structural_family
+from triton_viz.tools.nki_region_ir import (
+    match_structural_family,
+    structural_calibration_key,
+)
 
 FIELDS = [
     "case",
+    "structural_calibration_sequence",
     "structural_rule_sequence",
     "element_bytes",
+    "partition_count",
     "logical_free_dim",
     "static_dma_ns",
 ]
@@ -53,10 +58,16 @@ def collect_case(case: Path) -> dict[str, object] | None:
     model = next(iter(json.loads(summary.read_text()).values()))
     return {
         "case": case.name,
+        "structural_calibration_sequence": ";".join(
+            structural_calibration_key(regions[group]) for group in sorted(regions)
+        ),
         "structural_rule_sequence": ";".join(
             match_structural_family(regions[group]).rule_id for group in sorted(regions)
         ),
         "element_bytes": element_bytes,
+        "partition_count": max(
+            int(region.get("partition_count") or 1) for region in regions.values()
+        ),
         "logical_free_dim": max(
             int(region.get("logical_free_dim") or 0) for region in regions.values()
         ),

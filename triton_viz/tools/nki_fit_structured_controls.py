@@ -291,8 +291,8 @@ def collect(
                 if group == 0:
                     fixed_ns = max(
                         0.0,
-                        float(engine_audit["explorer_active_ns"])
-                        - float(engine_audit["mapped_active_ns"]),
+                        float(engine_audit.get("payload_active_ns") or 0.0)
+                        - float(engine_audit.get("mapped_payload_active_ns") or 0.0),
                     )
                 rows.append(
                     {

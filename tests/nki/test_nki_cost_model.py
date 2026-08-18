@@ -815,6 +815,73 @@ def test_exact_micro_dag_uses_flow_predecessors_and_calibrated_engine_work():
     assert result.components_ns["micro_dag_scalar_covered"] == 1
 
 
+def test_micro_dag_opcode_timing_preserves_calibrated_engine_totals():
+    region = {
+        "dtype": "float32",
+        "free_dim": 128,
+        "logical_free_dim": 128,
+        "partition_count": 128,
+        "reduction_count": 1,
+        "op_histogram": {"reduce_sum": 1},
+    }
+    key = structural_calibration_key(region)
+    dag = {
+        "unsupported_unmapped_payload": False,
+        "nodes": [
+            {
+                "id": "v0",
+                "engine": "vector",
+                "opcode_family": "REDUCE",
+                "is_sync": False,
+                "timing": {"completion_latency_ns": 100.0},
+            },
+            {
+                "id": "v1",
+                "engine": "vector",
+                "opcode_family": "ACTIVATE",
+                "is_sync": False,
+                "timing": {"completion_latency_ns": 200.0},
+            },
+        ],
+        "edges": [["v0", "v1"]],
+    }
+    structured = StructuredControlCalibration(
+        points={(key, "vector", "float32"): [(128, 2.0, 2, 0.0)]},
+        completion_points={},
+        micro_dags={(key, "float32", 128): dag},
+        opcode_timing_points={
+            ("vector", "float32", "REDUCE"): [(128, 1000.0)],
+            ("vector", "float32", "ACTIVATE"): [(128, 3000.0)],
+        },
+    )
+    level_b = ComputeCalibration({("vector", "float32", 2): (10.0, 1.0)})
+    event = {
+        "seq": 1,
+        "op": "reduce_sum",
+        "api_op": "reduce_sum",
+        "engine": "vector",
+        "input_shape": [128, 128],
+        "output_shape": [128, 1],
+        "output_dtype": "float32",
+        "fusion_signature": "reduce_sum",
+        "fusion_group": 0,
+        "region_ir": region,
+    }
+
+    result = simulate(
+        [event],
+        CostModel(
+            compute_calibration=level_b,
+            structured_control_lowering=structured,
+        ),
+    )
+
+    # Level-B is 138 ns/instruction and Level-A requests two instructions.
+    assert result.engine_busy_ns["vector"] == pytest.approx(276.0)
+    durations = [item.end - item.start for item in result.timeline["vector"]]
+    assert durations == pytest.approx([69.0, 207.0, 0.0])
+
+
 def test_tilebench_matmul_builder_uses_rows_as_square_output_and_cols_as_k():
     from triton_viz.tools.nki_operator_experiments import _matmul_inputs
 
@@ -1018,6 +1085,8 @@ def test_tensor_calibration_is_dtype_throughput_without_shape_lookup(tmp_path):
     assert calibration.flops_per_ns("bf16") == pytest.approx(80_000.0)
     assert calibration.startup_ns("float32") == pytest.approx(1000.0)
     assert calibration.startup_ns("bf16") == pytest.approx(500.0)
+    assert calibration.active_ns("float32", 1e9) == pytest.approx(51_000.0)
+    assert calibration.active_ns("float32", 1.5e9) == pytest.approx(76_000.0)
     # Throughput-only: no per-dot table and no tile-shape key may exist.
     assert not hasattr(calibration, "ns_per_dot")
     assert not hasattr(calibration, "shape_points")

@@ -298,24 +298,31 @@ class StaticDmaCalibrationSurface:
 class StructuralStaticDmaCalibration:
     """Compiler-generated Static DMA busy time keyed by structural grammar."""
 
-    points: dict[tuple[str, int, int], float]
+    points: dict[tuple[str, int, int, int], float]
 
     @classmethod
     def from_csv(cls, path: str | Path) -> StructuralStaticDmaCalibration:
-        points: dict[tuple[str, int, int], float] = {}
+        samples: dict[tuple[str, int, int, int], list[float]] = {}
         with Path(path).open(encoding="utf-8", newline="") as file:
             for row in csv.DictReader(file):
                 try:
-                    key = (
+                    sequences = {
                         row["structural_rule_sequence"],
-                        int(row["element_bytes"]),
-                        int(row["logical_free_dim"]),
-                    )
+                        row.get("structural_calibration_sequence") or "",
+                    }
+                    element_bytes = int(row["element_bytes"])
+                    partitions = int(row.get("partition_count") or 0)
+                    free_dim = int(row["logical_free_dim"])
                     value = float(row["static_dma_ns"])
                 except (KeyError, TypeError, ValueError):
                     continue
-                if key[0] and min(key[1:]) > 0 and value >= 0:
-                    points[key] = value
+                for sequence in sequences:
+                    key = (sequence, element_bytes, partitions, free_dim)
+                    if sequence and element_bytes > 0 and free_dim > 0 and value >= 0:
+                        samples.setdefault(key, []).append(value)
+        points = {
+            key: statistics.median(values) for key, values in samples.items()
+        }
         if not points:
             raise ValueError(f"No structural Static DMA calibration rows in {path}")
         return cls(points)
@@ -333,23 +340,38 @@ class StructuralStaticDmaCalibration:
                     element_bytes = nbytes // lanes
         if not regions or element_bytes <= 0:
             return 0.0
-        from triton_viz.tools.nki_region_ir import match_structural_family
+        from triton_viz.tools.nki_region_ir import (
+            match_structural_family,
+            structural_calibration_key,
+        )
 
-        sequence = ";".join(
+        calibration_sequence = ";".join(
+            structural_calibration_key(regions[group]) for group in sorted(regions)
+        )
+        rule_sequence = ";".join(
             match_structural_family(regions[group]).rule_id for group in sorted(regions)
         )
         free_dim = max(
             int(region.get("logical_free_dim") or 0) for region in regions.values()
         )
-        candidates = [
-            (point_free_dim, value)
-            for (
-                point_sequence,
-                point_bytes,
-                point_free_dim,
-            ), value in self.points.items()
-            if point_sequence == sequence and point_bytes == element_bytes
-        ]
+        partition_count = max(
+            int(region.get("partition_count") or 1) for region in regions.values()
+        )
+        candidates = []
+        for sequence in (calibration_sequence, rule_sequence):
+            candidates = [
+                (point_free_dim, value)
+                for (
+                    point_sequence,
+                    point_bytes,
+                    point_partitions,
+                    point_free_dim,
+                ), value in self.points.items()
+                if point_sequence == sequence and point_bytes == element_bytes
+                and point_partitions in {0, partition_count}
+            ]
+            if candidates:
+                break
         if not candidates or free_dim <= 0:
             return 0.0
         return min(
@@ -373,6 +395,9 @@ class TensorCalibrationSurface:
 
     points: dict[str, tuple[float, float]]
     flops_domain: dict[str, tuple[float, float]]
+    active_time_points: dict[str, list[tuple[float, float]]] = field(
+        default_factory=dict
+    )
 
     @staticmethod
     def _normalize_dtype(dtype: str) -> str:
@@ -453,7 +478,14 @@ class TensorCalibrationSurface:
             flops_domain[dtype] = (measured_flops[0], measured_flops[-1])
         if not points:
             raise ValueError(f"No tensor_matmul calibration rows in {path}")
-        return cls(points, flops_domain)
+        active_time_points = {
+            dtype: [
+                (float(flops), float(statistics.median(by_flops[flops])))
+                for flops in sorted(by_flops)
+            ]
+            for dtype, by_flops in samples.items()
+        }
+        return cls(points, flops_domain, active_time_points)
 
     def _lookup(self, dtype: str, *, strict: bool) -> tuple[float, float]:
         dtype = self._normalize_dtype(dtype)
@@ -476,6 +508,28 @@ class TensorCalibrationSurface:
     def startup_ns(self, dtype: str, *, strict: bool = False) -> float:
         """Return the once-per-kernel TensorE startup intercept."""
         return self._lookup(dtype, strict=strict)[1]
+
+    def active_ns(self, dtype: str, flops: float, *, strict: bool = False) -> float:
+        """Interpolate total TensorE active time on the control FLOP surface."""
+        normalized = self._normalize_dtype(dtype)
+        rows = sorted(self.active_time_points.get(normalized, ()))
+        if not rows:
+            throughput, startup = self._lookup(dtype, strict=strict)
+            return startup + max(0.0, flops) / throughput
+        if len(rows) == 1:
+            return rows[0][1]
+        exact = [active for measured, active in rows if measured == flops]
+        if exact:
+            return statistics.median(exact)
+        if flops <= rows[0][0]:
+            lower, upper = rows[0], rows[1]
+        elif flops >= rows[-1][0]:
+            lower, upper = rows[-2], rows[-1]
+        else:
+            lower = max(row for row in rows if row[0] <= flops)
+            upper = min(row for row in rows if row[0] >= flops)
+        weight = (flops - lower[0]) / (upper[0] - lower[0])
+        return max(0.0, lower[1] + weight * (upper[1] - lower[1]))
 
     def domain_match(self, dtype: str, flops: float) -> str:
         """Classify one Dot's FLOPs against the fitted control domain."""
@@ -1457,7 +1511,7 @@ class CostModel:
         """Return the estimated duration in ns for one trace event."""
         op = event.get("op")
         engine = _canonical_engine(event.get("engine", ""), op or "")
-        if op in ("dot", "tensor_transpose"):
+        if op == "dot":
             flops = event.get("flops") or 0
             if self.tensor_calibration is not None:
                 dtype = _tensor_dtype(event)
@@ -1466,6 +1520,10 @@ class CostModel:
                 )
                 return flops / flops_per_ns
             return self.tensor_startup_ns + flops / self.tensor_flops_per_ns
+        if op == "tensor_transpose":
+            # Transpose FLOPs are an accounting proxy, not matmul arithmetic;
+            # do not feed them through the independently fitted Dot surface.
+            return (event.get("flops") or 0) / self.tensor_flops_per_ns
         if op in ("binary", "compute", "reduce_sum"):
             free_dim = _free_dim(event)
             # Level-B calibrated path: cost one lowered instruction from the
@@ -2031,6 +2089,11 @@ def _expand_lowering_groups(
                 bool(opcode_timing)
                 and all(match != "ood" for _value, match in opcode_timing.values())
             )
+            opcode_weight_by_engine: dict[str, float] = Counter()
+            if use_opcode_timing:
+                for node_id, (value, _match) in opcode_timing.items():
+                    opcode_weight_by_engine[node_engine[node_id]] += max(0.0, value)
+            normalize_opcode_totals = int(region_ir.get("reduction_count") or 0) > 0
             for node_index, node in enumerate(dag.get("nodes", [])):
                 node_id = str(node["id"])
                 timing = node.get("timing") or {}
@@ -2041,7 +2104,26 @@ def _expand_lowering_groups(
                 duration_ns = 0.0
                 timing_match = "not_applicable"
                 if node_id in opcode_timing and use_opcode_timing:
-                    duration_ns, timing_match = opcode_timing[node_id]
+                    opcode_ns, timing_match = opcode_timing[node_id]
+                    denominator = opcode_weight_by_engine.get(engine, 0.0)
+                    if (
+                        normalize_opcode_totals
+                        and engine in predicted_engine_ns
+                        and denominator > 0
+                    ):
+                        # Reduction lowering is context-sensitive: opcode
+                        # durations define relative placement while Level-A/B
+                        # supplies the independently calibrated region total.
+                        duration_ns = (
+                            predicted_engine_ns[engine]
+                            * max(0.0, opcode_ns)
+                            / denominator
+                        )
+                    else:
+                        # Straight-line opcodes have an independent timing
+                        # surface and may execute on engines (notably GpSimdE)
+                        # that have no aggregate Level-B instruction model.
+                        duration_ns = max(0.0, opcode_ns)
                 elif engine in predicted_engine_ns:
                     denominator = observed_by_engine.get(engine, 0.0)
                     duration_ns = (
@@ -2328,9 +2410,12 @@ def simulate(
             event.get("micro_dag_unsupported_engines") or ()
         )
     if model.tensor_calibration is not None:
-        if tensor_events:
+        calibrated_dot_events = [
+            event for event in tensor_events if event.get("op") == "dot"
+        ]
+        if calibrated_dot_events:
             dtype = Counter(
-                _tensor_dtype(event) for event in tensor_events
+                _tensor_dtype(event) for event in calibrated_dot_events
             ).most_common(1)[0][0]
             tensor_startup_ns = max(
                 0.0,
@@ -2338,9 +2423,31 @@ def simulate(
                     dtype, strict=model.strict_calibration
                 ),
             )
+            total_tensor_flops = sum(
+                max(0, int(event.get("flops") or 0))
+                for event in calibrated_dot_events
+            )
+            calibrated_tensor_active_ns = model.tensor_calibration.active_ns(
+                dtype,
+                total_tensor_flops,
+                strict=model.strict_calibration,
+            )
+            tensor_startup_ns = min(
+                tensor_startup_ns, calibrated_tensor_active_ns
+            )
+            tensor_work_ns = max(
+                0.0, calibrated_tensor_active_ns - tensor_startup_ns
+            )
+            if total_tensor_flops > 0:
+                for event in calibrated_dot_events:
+                    event["scheduler_duration_override_ns"] = (
+                        tensor_work_ns
+                        * max(0, int(event.get("flops") or 0))
+                        / total_tensor_flops
+                    )
         tensor_domain_ood = sum(
             1
-            for event in tensor_events
+            for event in calibrated_dot_events
             if (flops := int(event.get("flops") or 0)) > 0
             and model.tensor_calibration.domain_match(
                 _tensor_dtype(event), flops

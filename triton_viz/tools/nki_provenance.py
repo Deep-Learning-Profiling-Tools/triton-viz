@@ -267,13 +267,15 @@ def write_model_manifest(
             {"path": str(manifest_path), "sha256": _file_sha256(manifest_path)}
         )
     reference = fingerprints[0]
+    source_compatibility = []
     for candidate in fingerprints[1:]:
         comparison = compare_fingerprints(reference, candidate)
-        if comparison["status"] != "exact":
+        if comparison["status"] not in {"exact", "repository_changed"}:
             raise ValueError(
                 "Calibration sources have incompatible compiler fingerprints: "
                 f"{comparison}"
             )
+        source_compatibility.append(comparison)
     files = {}
     for path in calibration_files:
         if not path.is_file():
@@ -281,12 +283,18 @@ def write_model_manifest(
         files[path.name] = _file_sha256(path)
     payload = {
         "schema": "triton-viz.nki-model-bundle-v1",
-        "compatibility_policy": "exact",
+        "compatibility_policy": "compiler_hardware_exact_model_builder_exact",
         # Hardware/control artifacts must agree with each other. The code that
         # fits and consumes those frozen artifacts is a separate compatibility
         # boundary: a trace/evaluation fix after collection must not require
         # recompiling hardware, but evaluate must exactly match the builder.
         "calibration_source_fingerprint": reference,
+        # Source manifests may span repository-only changes when the hardware
+        # kernel artifacts have been audited as unchanged. Preserve those
+        # differences instead of pretending all collection happened from one
+        # worktree. Compiler stack, hardware and Region IR schema differences
+        # remain fatal above.
+        "calibration_source_compatibility": source_compatibility,
         "model_builder_fingerprint": collect_compiler_fingerprint(
             Path(__file__).resolve().parents[2]
         ),

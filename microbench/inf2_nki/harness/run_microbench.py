@@ -479,8 +479,18 @@ def run_one(
     run_dir = run_dir.resolve()
     bench_id = _bench_id(spec)
     bench_dir = run_dir / _bench_folder(spec) / bench_id
-    if skip_existing and (bench_dir / "manifest.json").exists():
-        return {"id": bench_id, "status": "skipped_existing", "dir": str(bench_dir)}
+    manifest_path = bench_dir / "manifest.json"
+    if skip_existing and manifest_path.exists():
+        try:
+            previous = json.loads(manifest_path.read_text(encoding="utf-8"))
+        except (OSError, json.JSONDecodeError):
+            previous = {}
+        if previous.get("status") == "ok":
+            return {
+                "id": bench_id,
+                "status": "skipped_existing",
+                "dir": str(bench_dir),
+            }
     if bench_dir.exists():
         shutil.rmtree(bench_dir)
     bench_dir.mkdir(parents=True)

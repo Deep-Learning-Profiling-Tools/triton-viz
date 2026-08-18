@@ -3,10 +3,26 @@ import json
 import pytest
 
 from triton_viz.tools.nki_cost_model_pipeline import (
+    _microbench_source_manifests,
     _split_case_count,
     _validate_command_contract,
     main,
 )
+
+
+def test_incomplete_resume_does_not_become_a_calibration_source(tmp_path):
+    run = tmp_path / "microbench" / "dma"
+    good = run / "case_good" / "manifest.json"
+    bad = run / "case_bad" / "manifest.json"
+    good.parent.mkdir(parents=True)
+    bad.parent.mkdir(parents=True)
+    good.write_text(json.dumps({"status": "ok"}))
+    bad.write_text(json.dumps({"status": "error"}))
+    (run / "run_manifest.json").write_text(
+        json.dumps({"num_ok": 1, "num_benchmarks": 2})
+    )
+
+    assert _microbench_source_manifests(tmp_path) == []
 
 
 def test_pipeline_dry_run_keeps_controls_and_holdouts_separate(tmp_path, capsys):
