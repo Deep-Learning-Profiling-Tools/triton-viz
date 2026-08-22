@@ -38,6 +38,8 @@ from microbench.inf2_nki.tests.engine_ops.kernels import (
     tensor_matmul_factory,
     tensor_matmul_small_factory,
     tensor_matmul_small_work_units,
+    tensor_matmul_transpose_pipeline_factory,
+    tensor_matmul_transpose_pipeline_work_units,
     tensor_matmul_tiled_factory,
     tensor_matmul_tiled_work_units,
     vector_add_factory,
@@ -143,6 +145,12 @@ BENCHMARKS = {
         "folder": "engine_ops",
         "factory": tensor_matmul_small_factory,
         "work": tensor_matmul_small_work_units,
+        "input": "default",
+    },
+    "tensor_matmul_transpose_pipeline": {
+        "folder": "engine_ops",
+        "factory": tensor_matmul_transpose_pipeline_factory,
+        "work": tensor_matmul_transpose_pipeline_work_units,
         "input": "default",
     },
     # Cross-resource interaction and SPMD mapping probes.

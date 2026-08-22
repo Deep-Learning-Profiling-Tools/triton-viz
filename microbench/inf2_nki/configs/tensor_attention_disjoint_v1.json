@@ -1,0 +1,19 @@
+{
+  "suite": "inf2_tensor_attention_disjoint_v1",
+  "description": "Independent 3x transpose + 2x dot primitive controls; geometry is disjoint from tiled-attention holdout.",
+  "warmup": 2,
+  "iters": 20,
+  "benchmarks": [
+    {
+      "name": "tensor_attention_disjoint",
+      "kind": "tensor_matmul_transpose_pipeline",
+      "matrix": {
+        "dtype": ["float32"],
+        "m": [96],
+        "k": [96],
+        "n": [96, 192, 320, 448],
+        "repeat": [1]
+      }
+    }
+  ]
+}

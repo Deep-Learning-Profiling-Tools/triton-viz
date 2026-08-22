@@ -1,0 +1,18 @@
+{
+  "suite": "inf2_tensor_geometry_disjoint_v1",
+  "description": "TensorE lowering-density controls at n=768, disjoint from n=512 holdout and n=1024 base calibration.",
+  "warmup": 2,
+  "iters": 20,
+  "benchmarks": [
+    {
+      "name": "tensor_geometry_disjoint",
+      "kind": "tensor_matmul_tiled",
+      "matrix": {
+        "dtype": ["float32", "bfloat16"],
+        "m": [256, 384],
+        "n": [768],
+        "k": [768, 1536, 3072]
+      }
+    }
+  ]
+}

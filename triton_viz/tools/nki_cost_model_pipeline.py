@@ -32,6 +32,11 @@ TOOL_MODULES = {
     "triton_viz.tools.nki_fit_structural_static_dma": "triton_viz.tools.nki_fit_structural_static_dma",
     "triton_viz.tools.nki_fit_runtime_overhead": "triton_viz.tools.nki_fit_runtime_overhead",
     "triton_viz.tools.nki_fit_strided_dma": "triton_viz.tools.nki_fit_strided_dma",
+    "triton_viz.tools.nki_fit_tensor_instruction": "triton_viz.tools.nki_fit_tensor_instruction",
+    "triton_viz.tools.nki_fit_static_opcode_payload": "triton_viz.tools.nki_fit_static_opcode_payload",
+    "triton_viz.tools.nki_fit_static_instruction_duration": "triton_viz.tools.nki_fit_static_instruction_duration",
+    "triton_viz.tools.nki_fit_static_dma_packets": "triton_viz.tools.nki_fit_static_dma_packets",
+    "triton_viz.tools.nki_fit_tensor_instruction_mix": "triton_viz.tools.nki_fit_tensor_instruction_mix",
     "triton_viz.tools.nki_replay_operator_predictions": "triton_viz.tools.nki_replay_operator_predictions",
 }
 
@@ -144,6 +149,7 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
         "dma_write_bf16_steady.json",
         "dma_strided_store_surface.json",
         "tensor_matmul_tiled_surface.json",
+        "tensor_geometry_disjoint_v1.json",
     ]
     for config in configs:
         run_id = Path(config).stem
@@ -287,6 +293,27 @@ def fit(root: Path, dry_run: bool) -> None:
         ),
         dry_run,
     )
+    tensor_geometry_csv = calibration / "tensor_geometry_disjoint_v1.csv"
+    _run(
+        _module(
+            "microbench.inf2_nki.profile_parser.export_csv",
+            root / "microbench" / "tensor_geometry_disjoint_v1",
+            "--output",
+            tensor_geometry_csv,
+        ),
+        dry_run,
+    )
+    tensor_instruction = calibration / "tensor_instruction.csv"
+    _run(
+        _module(
+            "triton_viz.tools.nki_fit_tensor_instruction",
+            calibration / "tensor_matmul_tiled.csv",
+            tensor_geometry_csv,
+            "--output",
+            tensor_instruction,
+        ),
+        dry_run,
+    )
     compute = calibration / "compute.csv"
     _run(
         _module(
@@ -303,6 +330,31 @@ def fit(root: Path, dry_run: bool) -> None:
         root / "controls_p16",
         root / "controls_p128",
     ]
+    static_opcode_payload = calibration / "static_opcode_payload.csv"
+    _run(
+        _module(
+            "triton_viz.tools.nki_fit_static_opcode_payload",
+            *partitioned_control_roots,
+            "--output",
+            static_opcode_payload,
+            "--engine",
+            "gpsimd",
+        ),
+        dry_run,
+    )
+    _run(
+        _module(
+            "triton_viz.tools.nki_fit_static_instruction_duration",
+            *partitioned_control_roots,
+            "--output",
+            calibration / "static_instruction_duration.csv",
+            "--engine",
+            "scalar",
+            "--engine",
+            "vector",
+        ),
+        dry_run,
+    )
     if dry_run or any(path.is_dir() for path in partitioned_control_roots):
         control_roots = partitioned_control_roots
         if not dry_run:
@@ -333,6 +385,45 @@ def fit(root: Path, dry_run: bool) -> None:
             *control_roots,
             "--output",
             calibration / "static_dma.csv",
+        ),
+        dry_run,
+    )
+    static_dma_packet_roots = [
+        *control_roots,
+        root / "microbench" / "dma_strided_store_surface" / "bandwidth_dma",
+        root / "microbench" / "tensor_matmul_tiled_surface" / "engine_ops",
+        root / "microbench" / "tensor_geometry_disjoint_v1" / "engine_ops",
+        root / "stage2_controls" / "tensor_attention_disjoint_v2" / "engine_ops",
+        root / "stage2_controls" / "tensor_attention_disjoint_v3" / "engine_ops",
+        root / "stage2_controls" / "tensor_attention_boundary_disjoint_v1" / "engine_ops",
+    ]
+    _run(
+        _module(
+            "triton_viz.tools.nki_fit_static_dma_packets",
+            *static_dma_packet_roots,
+            "--output",
+            calibration / "static_dma_packets.json",
+            "--audit-output",
+            calibration / "static_dma_packets_audit.json",
+        ),
+        dry_run,
+    )
+    tensor_mix_roots = [
+        root / "stage2_controls" / name / "engine_ops"
+        for name in (
+            "tensor_attention_disjoint_v1",
+            "tensor_attention_disjoint_v2",
+            "tensor_attention_disjoint_v3",
+            "tensor_attention_boundary_disjoint_v1",
+        )
+    ]
+    _run(
+        _module(
+            "triton_viz.tools.nki_fit_tensor_instruction_mix",
+            *tensor_mix_roots,
+            "--output", calibration / "tensor_instruction_mix.json",
+            "--audit-output", calibration / "tensor_instruction_mix_audit.json",
+            "--neighbors", 2,
         ),
         dry_run,
     )
@@ -374,6 +465,15 @@ def fit(root: Path, dry_run: bool) -> None:
                 for control_root in control_roots
             ],
             *_microbench_source_manifests(root),
+            *[
+                root / "stage2_controls" / name / "run_manifest.json"
+                for name in (
+                    "tensor_attention_disjoint_v1",
+                    "tensor_attention_disjoint_v2",
+                    "tensor_attention_disjoint_v3",
+                    "tensor_attention_boundary_disjoint_v1",
+                )
+            ],
         ]
         write_model_manifest(
             calibration,
@@ -387,9 +487,16 @@ def fit(root: Path, dry_run: bool) -> None:
                 calibration / "dma_write_fp32.csv",
                 calibration / "dma_write_bf16.csv",
                 calibration / "tensor_matmul_tiled.csv",
+                tensor_geometry_csv,
+                tensor_instruction,
+                static_opcode_payload,
                 compute,
                 structured,
                 calibration / "static_dma.csv",
+                calibration / "static_dma_packets.json",
+                calibration / "static_dma_packets_audit.json",
+                calibration / "tensor_instruction_mix.json",
+                calibration / "tensor_instruction_mix_audit.json",
                 calibration / "runtime_overhead.csv",
                 calibration / "runtime_overhead_bf16.csv",
                 calibration / "strided_dma.csv",
@@ -423,8 +530,20 @@ def _replay_args(root: Path, holdout: Path, output: Path, dtype: str) -> list[st
         calibration / "structured_compute.csv",
         "--tensor-calibration-csv",
         calibration / "tensor_matmul_tiled.csv",
+        "--tensor-instruction-calibration-csv",
+        calibration / "tensor_instruction.csv",
+        "--tensor-instruction-mix-json",
+        calibration / "tensor_instruction_mix.json",
+        "--attention-repeat-reference-root",
+        root / "diagnostics" / "attention_rechecks",
+        "--static-opcode-payload-csv",
+        calibration / "static_opcode_payload.csv",
+        "--static-instruction-duration-csv",
+        calibration / "static_instruction_duration.csv",
         "--structural-static-dma-csv",
         calibration / "static_dma.csv",
+        "--static-dma-packet-calibration-json",
+        calibration / "static_dma_packets.json",
         "--runtime-overhead-csv",
         (
             calibration / "runtime_overhead_bf16.csv"
@@ -498,6 +617,10 @@ def evaluate(root: Path, dry_run: bool) -> None:
                 calibration / "compute.csv",
                 calibration / "structured_compute.csv",
                 calibration / "static_dma.csv",
+                calibration / "static_dma_packets.json",
+                calibration / "static_dma_packets_audit.json",
+                calibration / "tensor_instruction_mix.json",
+                calibration / "tensor_instruction_mix_audit.json",
                 calibration / "runtime_overhead.csv",
                 calibration / "runtime_overhead_bf16.csv",
                 calibration / "strided_dma.csv",

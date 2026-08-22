@@ -1,0 +1,19 @@
+{
+  "suite": "inf2_tensor_attention_boundary_disjoint_v1",
+  "description": "Disjoint mixed transpose/dot controls around attention tile boundaries; no holdout shape is used.",
+  "warmup": 2,
+  "iters": 20,
+  "benchmarks": [
+    {
+      "name": "tensor_attention_boundary_disjoint",
+      "kind": "tensor_matmul_transpose_pipeline",
+      "matrix": {
+        "dtype": ["float32"],
+        "m": [96],
+        "k": [128],
+        "n": [80, 112, 144, 224, 288, 384, 576],
+        "repeat": [1]
+      }
+    }
+  ]
+}

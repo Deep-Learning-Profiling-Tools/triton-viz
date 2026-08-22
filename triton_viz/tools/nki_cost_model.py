@@ -21,6 +21,7 @@ from __future__ import annotations
 import csv
 import json
 import math
+import re
 import statistics
 from collections import Counter
 from collections.abc import Iterable
@@ -543,6 +544,220 @@ class TensorCalibrationSurface:
         if flops > high:
             return "above_domain"
         return "in_domain"
+
+
+@dataclass
+class TensorInstructionCalibration:
+    """Tensor active-time fits keyed by static compiler lowering density.
+
+    ``instructions_per_dot`` is derived only from compiler Instruction metadata
+    and the source trace. Active-time coefficients remain control-only.
+    """
+
+    points: dict[tuple[str, float], tuple[float, float, int, int]]
+
+    @classmethod
+    def from_csv(cls, path: str | Path) -> "TensorInstructionCalibration":
+        points: dict[tuple[str, float], tuple[float, float, int, int]] = {}
+        with Path(path).open(encoding="utf-8", newline="") as file:
+            for row in csv.DictReader(file):
+                try:
+                    key = (
+                        TensorCalibrationSurface._normalize_dtype(row["dtype"]),
+                        float(row["instructions_per_dot"]),
+                    )
+                    value = (
+                        float(row["intercept_ns"]),
+                        float(row["instruction_ns"]),
+                        int(row["instruction_count_min"]),
+                        int(row["instruction_count_max"]),
+                    )
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if value[1] > 0 and value[2] > 0 and value[3] >= value[2]:
+                    points[key] = value
+        if not points:
+            raise ValueError(f"No Tensor instruction calibration rows in {path}")
+        return cls(points)
+
+    def active_ns(
+        self, dtype: str, instruction_count: float, dot_count: int
+    ) -> tuple[float, str]:
+        if instruction_count <= 0 or dot_count <= 0:
+            return 0.0, "missing_static_instructions"
+        normalized = TensorCalibrationSurface._normalize_dtype(dtype)
+        ratio = instruction_count / dot_count
+        exact = self.points.get((normalized, ratio))
+        if exact is None:
+            return 0.0, "missing_lowering_bucket"
+        intercept, instruction_ns, low, high = exact
+        match = "exact" if low <= instruction_count <= high else "extrapolated"
+        return max(0.0, intercept + instruction_ns * instruction_count), match
+
+
+@dataclass
+class StaticOpcodePayloadCalibration:
+    """Busy-time lookup from timing-free compiler opcode fingerprints."""
+
+    points: dict[tuple[str, str], list[tuple[dict[str, int], float]]]
+
+    @classmethod
+    def from_csv(cls, path: str | Path) -> "StaticOpcodePayloadCalibration":
+        points: dict[tuple[str, str], list[tuple[dict[str, int], float]]] = {}
+        with Path(path).open(encoding="utf-8", newline="") as file:
+            for row in csv.DictReader(file):
+                try:
+                    key = (
+                        str(row["engine"]),
+                        TensorCalibrationSurface._normalize_dtype(row["dtype"]),
+                    )
+                    fingerprint = {
+                        str(name): int(value)
+                        for name, value in json.loads(row["opcode_counts_json"]).items()
+                    }
+                    payload_ns = float(row["payload_active_ns"])
+                except (KeyError, TypeError, ValueError, json.JSONDecodeError):
+                    continue
+                if fingerprint and payload_ns > 0:
+                    points.setdefault(key, []).append((fingerprint, payload_ns))
+        if not points:
+            raise ValueError(f"No static opcode payload rows in {path}")
+        return cls(points)
+
+    @staticmethod
+    def _distance(lhs: dict[str, int], rhs: dict[str, int]) -> float:
+        return math.sqrt(
+            sum(
+                (math.log1p(lhs.get(name, 0)) - math.log1p(rhs.get(name, 0))) ** 2
+                for name in set(lhs) | set(rhs)
+            )
+        )
+
+    def predict_ns(
+        self, engine: str, dtype: str, opcode_counts: dict[str, int]
+    ) -> tuple[float, str]:
+        rows = self.points.get(
+            (engine, TensorCalibrationSurface._normalize_dtype(dtype)), []
+        )
+        if not rows or not opcode_counts:
+            return 0.0, "missing"
+        exact = [value for fingerprint, value in rows if fingerprint == opcode_counts]
+        if exact:
+            return statistics.median(exact), "exact"
+        distances = [(self._distance(opcode_counts, fingerprint), value) for fingerprint, value in rows]
+        minimum = min(distance for distance, _value in distances)
+        nearest = [value for distance, value in distances if math.isclose(distance, minimum)]
+        return statistics.median(nearest), "nearest"
+
+
+@dataclass
+class StaticInstructionDurationCalibration:
+    """Level-B busy time from timing-free rich instruction semantics."""
+
+    exact_ns: dict[tuple[str, str], float]
+    opcode_ns: dict[tuple[str, str], float]
+    family_points: dict[tuple[str, str], list[tuple[int, float]]] = field(
+        default_factory=dict
+    )
+
+    @staticmethod
+    def normalize_operands(value: object) -> str:
+        text = re.sub(r"0x[0-9a-fA-F]+", "ADDR", str(value or ""))
+        text = re.sub(r"S\[\d+\]", "S[]", text)
+        text = re.sub(
+            r"S\[\]\s+\([^)]*\)(?:>=\d+|\+\+@complete)", "", text
+        )
+        text = re.sub(r"\$R\[\d+\]", "$R[]", text)
+        text = re.sub(r"label_id=\d+", "label_id=[]", text)
+        return " ".join(text.split())
+
+    @classmethod
+    def signature(cls, row: dict[str, Any]) -> str:
+        return "|".join(
+            (
+                str(row.get("opcode") or ""),
+                str(row.get("scalar_activation_fn") or ""),
+                cls.normalize_operands(row.get("operands")),
+            )
+        )
+
+    @classmethod
+    def family_key(cls, row: dict[str, Any]) -> tuple[str, int]:
+        signature = cls.signature(row)
+        dimensions = [
+            int(value)
+            for value in re.findall(r"\[(\d+),1,1\]", signature)
+        ]
+        free_dim = max(dimensions, default=0)
+        family = re.sub(r"\[\d+,1,1\]", "[F,1,1]", signature)
+        family = re.sub(r"channels=\d+", "channels=[]", family)
+        return family, free_dim
+
+    @classmethod
+    def from_csv(cls, path: str | Path) -> "StaticInstructionDurationCalibration":
+        exact_ns, opcode_ns, family_points = {}, {}, {}
+        with Path(path).open(encoding="utf-8", newline="") as file:
+            for row in csv.DictReader(file):
+                try:
+                    engine = str(row["engine"])
+                    value = float(row["duration_ns"])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if value <= 0:
+                    continue
+                if row.get("signature"):
+                    exact_ns[(engine, row["signature"])] = value
+                if row.get("opcode"):
+                    opcode_ns[(engine, row["opcode"])] = value
+                if row.get("family") and row.get("free_dim"):
+                    family_points.setdefault((engine, row["family"]), []).append(
+                        (int(row["free_dim"]), value)
+                    )
+        if not exact_ns:
+            raise ValueError(f"No rich instruction duration rows in {path}")
+        for key in family_points:
+            family_points[key].sort()
+        return cls(exact_ns, opcode_ns, family_points)
+
+    def predict_ns(
+        self, engine: str, rows: Iterable[dict[str, Any]]
+    ) -> tuple[float, int, int]:
+        total = 0.0
+        exact = count = 0
+        for row in rows:
+            if str(row.get("engine") or "").lower() != engine:
+                continue
+            opcode = str(row.get("opcode") or "")
+            if opcode in {
+                "NOTIFY", "DRAIN", "HALT", "NOP", "EVENT", "WRITE",
+                "EVENT_SEMAPHORE", "EVENT_SEMAPHORE_RANGE_CLEAR",
+                "SET_ORDERING_MODE", "COMPARE_BRANCH", "MODIFY_POOL_CONFIG",
+            }:
+                continue
+            count += 1
+            value = self.exact_ns.get((engine, self.signature(row)))
+            if value is not None:
+                exact += 1
+            else:
+                family, free_dim = self.family_key(row)
+                points = self.family_points.get((engine, family), [])
+                if free_dim > 0 and len(points) >= 2:
+                    if free_dim <= points[0][0]:
+                        lower, upper = points[0], points[1]
+                    elif free_dim >= points[-1][0]:
+                        lower, upper = points[-2], points[-1]
+                    else:
+                        lower = max(point for point in points if point[0] <= free_dim)
+                        upper = min(point for point in points if point[0] >= free_dim)
+                    if lower[0] == upper[0]:
+                        value = lower[1]
+                    else:
+                        weight = (free_dim - lower[0]) / (upper[0] - lower[0])
+                        value = max(0.0, lower[1] + weight * (upper[1] - lower[1]))
+                else:
+                    value = self.opcode_ns.get((engine, opcode), 0.0)
+            total += value
+        return total, exact, count
 
 
 @dataclass
@@ -1376,6 +1591,7 @@ class CostModel:
     runtime_overhead_calibration: RuntimeOverheadCalibration | None = None
     strided_dma_calibration: StridedDmaCalibration | None = None
     tensor_calibration: TensorCalibrationSurface | None = None
+    tensor_instruction_calibration: TensorInstructionCalibration | None = None
     strict_calibration: bool = False
     enable_structured_completion_floor: bool = True
     completion_excluded_free_dims: frozenset[int] = field(default_factory=frozenset)
@@ -1513,6 +1729,19 @@ class CostModel:
         engine = _canonical_engine(event.get("engine", ""), op or "")
         if op == "dot":
             flops = event.get("flops") or 0
+            instruction_count = float(event.get("tensor_instruction_count") or 0.0)
+            dot_count = int(event.get("tensor_dot_count") or 0)
+            if (
+                self.tensor_instruction_calibration is not None
+                and instruction_count > 0
+                and dot_count > 0
+            ):
+                total_ns, match = self.tensor_instruction_calibration.active_ns(
+                    _tensor_dtype(event), instruction_count, dot_count
+                )
+                if total_ns > 0:
+                    event["tensor_instruction_calibration_match"] = match
+                    return total_ns / dot_count
             if self.tensor_calibration is not None:
                 dtype = _tensor_dtype(event)
                 flops_per_ns = self.tensor_calibration.flops_per_ns(
@@ -2409,6 +2638,7 @@ def simulate(
         micro_dag_unsupported_engine_events += len(
             event.get("micro_dag_unsupported_engines") or ()
         )
+    tensor_instruction_surface_used = False
     if model.tensor_calibration is not None:
         calibrated_dot_events = [
             event for event in tensor_events if event.get("op") == "dot"
@@ -2417,24 +2647,52 @@ def simulate(
             dtype = Counter(
                 _tensor_dtype(event) for event in calibrated_dot_events
             ).most_common(1)[0][0]
-            tensor_startup_ns = max(
-                0.0,
-                model.tensor_calibration.startup_ns(
-                    dtype, strict=model.strict_calibration
-                ),
-            )
             total_tensor_flops = sum(
                 max(0, int(event.get("flops") or 0))
                 for event in calibrated_dot_events
             )
-            calibrated_tensor_active_ns = model.tensor_calibration.active_ns(
-                dtype,
-                total_tensor_flops,
-                strict=model.strict_calibration,
+            static_instruction_count = float(
+                calibrated_dot_events[0].get("tensor_instruction_count") or 0.0
             )
-            tensor_startup_ns = min(
-                tensor_startup_ns, calibrated_tensor_active_ns
+            static_dot_count = int(
+                calibrated_dot_events[0].get("tensor_dot_count") or 0
             )
+            calibrated_tensor_active_ns = 0.0
+            if (
+                model.tensor_instruction_calibration is not None
+                and static_instruction_count > 0
+                and static_dot_count == len(calibrated_dot_events)
+            ):
+                calibrated_tensor_active_ns, _match = (
+                    model.tensor_instruction_calibration.active_ns(
+                        dtype, static_instruction_count, static_dot_count
+                    )
+                )
+                tensor_instruction_surface_used = calibrated_tensor_active_ns > 0
+            if tensor_instruction_surface_used:
+                tensor_startup_ns = 0.0
+                # The fitted target is Explorer's whole TensorE active union,
+                # including compiler-created transpose/load-weight work. Once
+                # that total is assigned across Dot events, source transpose
+                # proxies must not be charged a second time.
+                for tensor_event in tensor_events:
+                    if tensor_event.get("op") != "dot":
+                        tensor_event["scheduler_duration_override_ns"] = 0.0
+            else:
+                tensor_startup_ns = max(
+                    0.0,
+                    model.tensor_calibration.startup_ns(
+                        dtype, strict=model.strict_calibration
+                    ),
+                )
+                calibrated_tensor_active_ns = model.tensor_calibration.active_ns(
+                    dtype,
+                    total_tensor_flops,
+                    strict=model.strict_calibration,
+                )
+                tensor_startup_ns = min(
+                    tensor_startup_ns, calibrated_tensor_active_ns
+                )
             tensor_work_ns = max(
                 0.0, calibrated_tensor_active_ns - tensor_startup_ns
             )
@@ -2721,6 +2979,9 @@ def simulate(
             ),
             "dma_surface_max_log_distance": dma_surface_max_log_distance,
             "tensor_flops_domain_ood_count": float(tensor_domain_ood),
+            "tensor_instruction_surface_used": float(
+                tensor_instruction_surface_used
+            ),
             "micro_dag_vector_covered": float(
                 ENGINE_VECTOR in micro_dag_engine_coverage
             ),

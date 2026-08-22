@@ -19,6 +19,9 @@ try:
         StridedDmaCalibration,
         StructuredControlCalibration,
         TensorCalibrationSurface,
+        TensorInstructionCalibration,
+        StaticOpcodePayloadCalibration,
+        StaticInstructionDurationCalibration,
         simulate,
     )
     from triton_viz.tools.nki_region_ir import structural_calibration_key
@@ -1154,3 +1157,102 @@ def test_tensor_calibration_mixed_small_and_tiled_controls_fit_startup(tmp_path)
     assert calibration.flops_per_ns("float32") == pytest.approx(20_000.0, rel=1e-6)
     assert calibration.startup_ns("float32") == pytest.approx(800.0, rel=1e-6)
     assert calibration.domain_match("float32", 4_194_304) == "in_domain"
+
+
+def test_tensor_instruction_calibration_uses_static_lowering_bucket(tmp_path):
+    path = tmp_path / "tensor_instruction.csv"
+    path.write_text(
+        "dtype,instructions_per_dot,intercept_ns,instruction_ns,"
+        "instruction_count_min,instruction_count_max,sample_count\n"
+        "float32,4,-2000,320,48,288,6\n"
+    )
+    calibration = TensorInstructionCalibration.from_csv(path)
+    assert calibration.active_ns("float32", 128, 32) == (38960.0, "exact")
+    assert calibration.active_ns("float32", 512, 128) == (
+        161840.0,
+        "extrapolated",
+    )
+    assert calibration.active_ns("float32", 96, 32) == (
+        0.0,
+        "missing_lowering_bucket",
+    )
+
+    model = CostModel(tensor_instruction_calibration=calibration)
+    event = {
+        "op": "dot",
+        "engine": "tensor",
+        "input_dtypes": ["float32", "float32"],
+        "tensor_instruction_count": 128,
+        "tensor_dot_count": 32,
+        "flops": 1,
+    }
+    assert model.cost_ns(event) == pytest.approx(38960.0 / 32)
+    assert event["tensor_instruction_calibration_match"] == "exact"
+
+    flops_surface = TensorCalibrationSurface(
+        points={"float32": (1.0, 0.0)},
+        flops_domain={"float32": (1.0, 1.0)},
+        active_time_points={"float32": [(1.0, 1.0)]},
+    )
+    simulated = simulate(
+        [
+            {"op": "tensor_transpose", "engine": "tensor", "flops": 1e9, "seq": -1},
+            *[dict(event, seq=index) for index in range(32)],
+        ],
+        CostModel(
+            tensor_calibration=flops_surface,
+            tensor_instruction_calibration=calibration,
+        ),
+    )
+    assert simulated.engine_busy_ns["tensor"] == pytest.approx(38960.0)
+    assert simulated.components_ns["tensor_instruction_surface_used"] == 1.0
+
+
+def test_static_opcode_payload_calibration_exact_and_nearest(tmp_path):
+    path = tmp_path / "static_opcode.csv"
+    path.write_text(
+        "case,engine,dtype,opcode_counts_json,payload_active_ns\n"
+        'a,gpsimd,float32,"{""IOTA"":1,""TENSOR_LOAD"":2}",1000\n'
+        'b,gpsimd,float32,"{""IOTA"":2,""TENSOR_LOAD"":4}",2000\n'
+    )
+    calibration = StaticOpcodePayloadCalibration.from_csv(path)
+    assert calibration.predict_ns(
+        "gpsimd", "float32", {"IOTA": 1, "TENSOR_LOAD": 2}
+    ) == (1000.0, "exact")
+    value, match = calibration.predict_ns(
+        "gpsimd", "float32", {"IOTA": 1, "TENSOR_LOAD": 3}
+    )
+    assert match == "nearest"
+    assert value in {1000.0, 2000.0}
+
+
+def test_static_instruction_duration_ignores_dependency_ids_and_extrapolates_f(tmp_path):
+    base = {
+        "engine": "Scalar",
+        "opcode": "ACTIVATE",
+        "scalar_activation_fn": "SIGMOID",
+        "operands": (
+            "S[3] (Vector)>=7 SIGMOID src=fp32@0x123[1,1,1][2048,1,1] "
+            "dst=fp32@0x456[1,1,1][2048,1,1] channels=16"
+        ),
+    }
+    family, _ = StaticInstructionDurationCalibration.family_key(base)
+    exact = StaticInstructionDurationCalibration.signature(base)
+    path = tmp_path / "duration.csv"
+    with path.open("w", newline="") as file:
+        writer = csv.DictWriter(
+            file,
+            fieldnames=["engine", "signature", "opcode", "family", "free_dim", "duration_ns"],
+        )
+        writer.writeheader()
+        writer.writerows([
+            {"engine": "scalar", "signature": exact, "duration_ns": 1600},
+            {"engine": "scalar", "family": family, "free_dim": 1024, "duration_ns": 850},
+            {"engine": "scalar", "family": family, "free_dim": 2048, "duration_ns": 1600},
+            {"engine": "scalar", "opcode": "ACTIVATE", "duration_ns": 600},
+        ])
+    calibration = StaticInstructionDurationCalibration.from_csv(path)
+    changed_dependency = dict(base, operands=base["operands"].replace("S[3] (Vector)>=7", "S[9] (Tensor)>=22"))
+    assert calibration.predict_ns("scalar", [changed_dependency]) == (1600.0, 1, 1)
+    f4096 = dict(base, operands=base["operands"].replace("2048", "4096"))
+    assert calibration.predict_ns("scalar", [f4096]) == (3100.0, 0, 1)

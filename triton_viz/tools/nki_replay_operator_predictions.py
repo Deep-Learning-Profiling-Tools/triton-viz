@@ -6,6 +6,7 @@ import argparse
 import csv
 import json
 import statistics
+from collections import Counter
 from pathlib import Path
 
 from triton_viz.tools.nki_cost_model import (
@@ -17,6 +18,9 @@ from triton_viz.tools.nki_cost_model import (
     StridedDmaCalibration,
     StructuredControlCalibration,
     TensorCalibrationSurface,
+    TensorInstructionCalibration,
+    StaticOpcodePayloadCalibration,
+    StaticInstructionDurationCalibration,
     _canonical_engine,
     _compute_value_dtype,
     _expand_lowering_groups,
@@ -24,6 +28,14 @@ from triton_viz.tools.nki_cost_model import (
     _input_stream_count,
     eliminate_redundant_hbm_loads,
     simulate,
+)
+from triton_viz.tools.nki_static_dma_packets import (
+    PACKET_COLUMNS,
+    StaticDmaPacketCalibration,
+)
+from triton_viz.tools.nki_tensor_instruction_mix import (
+    INSTRUCTION_COLUMNS,
+    TensorInstructionMixCalibration,
 )
 
 FIELDS = [
@@ -53,6 +65,7 @@ FIELDS = [
     "hardware_nc_p50_us",
     "nc_error_pct",
     "hardware_tensor_active_us",
+    "hardware_tensor_reference",
     "tensor_error_pct",
     "hardware_vector_active_us",
     "hardware_vector_payload_us",
@@ -66,11 +79,13 @@ FIELDS = [
     "hardware_gpsimd_payload_us",
     "gpsimd_payload_error_pct",
     "gpsimd_error_pct",
+    "gpsimd_static_opcode_match",
     "hardware_dynamic_dma_us",
     "hardware_dynamic_dma_reference",
     "dynamic_dma_error_pct",
     "hardware_static_dma_us",
     "static_dma_error_pct",
+    "static_dma_packet_match",
     "hardware_total_dma_us",
     "dma_error_pct",
     "calibration_match",
@@ -81,6 +96,8 @@ FIELDS = [
     "dma_surface_ood_count",
     "dma_surface_max_log_distance",
     "tensor_flops_domain_ood_count",
+    "tensor_static_matmul_instruction_count",
+    "tensor_instruction_calibration_match",
     "completion_exact_count",
     "completion_interpolated_count",
     "completion_ood_count",
@@ -110,7 +127,13 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compute-calibration-csv", type=Path, required=True)
     parser.add_argument("--structured-control-csv", type=Path, required=True)
     parser.add_argument("--tensor-calibration-csv", type=Path)
+    parser.add_argument("--tensor-instruction-calibration-csv", type=Path)
+    parser.add_argument("--tensor-instruction-mix-json", type=Path)
+    parser.add_argument("--attention-repeat-reference-root", type=Path)
+    parser.add_argument("--static-opcode-payload-csv", type=Path)
+    parser.add_argument("--static-instruction-duration-csv", type=Path)
     parser.add_argument("--structural-static-dma-csv", type=Path, required=True)
+    parser.add_argument("--static-dma-packet-calibration-json", type=Path)
     parser.add_argument("--runtime-overhead-csv", type=Path)
     parser.add_argument("--strided-dma-csv", type=Path)
     parser.add_argument("--strict-calibration", action="store_true")
@@ -141,6 +164,30 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
+    static_opcode_payload = (
+        StaticOpcodePayloadCalibration.from_csv(args.static_opcode_payload_csv)
+        if args.static_opcode_payload_csv
+        else None
+    )
+    static_instruction_duration = (
+        StaticInstructionDurationCalibration.from_csv(
+            args.static_instruction_duration_csv
+        )
+        if args.static_instruction_duration_csv
+        else None
+    )
+    static_dma_packets = (
+        StaticDmaPacketCalibration.from_json(
+            args.static_dma_packet_calibration_json
+        )
+        if args.static_dma_packet_calibration_json
+        else None
+    )
+    tensor_instruction_mix = (
+        TensorInstructionMixCalibration.from_json(args.tensor_instruction_mix_json)
+        if args.tensor_instruction_mix_json
+        else None
+    )
     source_rows = list(csv.DictReader((args.root / "operator_results.csv").open()))
     out = []
     models: dict[str, CostModel] = {}
@@ -192,6 +239,13 @@ def main(argv: list[str] | None = None) -> int:
                     if args.tensor_calibration_csv
                     else None
                 ),
+                tensor_instruction_calibration=(
+                    TensorInstructionCalibration.from_csv(
+                        args.tensor_instruction_calibration_csv
+                    )
+                    if args.tensor_instruction_calibration_csv
+                    else None
+                ),
                 structural_static_dma=StructuralStaticDmaCalibration.from_csv(
                     args.structural_static_dma_csv
                 ),
@@ -224,8 +278,109 @@ def main(argv: list[str] | None = None) -> int:
         )
         trace = args.root / case_name / "trace.jsonl"
         events = [json.loads(line) for line in trace.read_text().splitlines() if line]
+        tensor_dots = [event for event in events if event.get("op") == "dot"]
+        static_matmul_count = 0
+        instruction_mapping = (
+            args.root
+            / case_name
+            / "hardware/source_mapping/instruction_mapping.csv"
+        )
+        instruction_rows: list[dict[str, str]] = []
+        if instruction_mapping.is_file():
+            with instruction_mapping.open(encoding="utf-8", newline="") as file:
+                instruction_rows = list(csv.DictReader(file))
+        if tensor_dots and instruction_mapping.is_file():
+            static_matmul_count = sum(
+                row.get("opcode") == "MATMUL" for row in instruction_rows
+            )
+        tensor_instruction_match = "not_applicable"
+        if tensor_dots and static_matmul_count > 0:
+            tensor_instruction_match = models[dtype].tensor_instruction_calibration.active_ns(
+                dtype, static_matmul_count, len(tensor_dots)
+            )[1] if models[dtype].tensor_instruction_calibration else "disabled"
+            events = [dict(event) for event in events]
+            for event in events:
+                if event.get("op") == "dot":
+                    event["tensor_instruction_count"] = static_matmul_count
+                    event["tensor_dot_count"] = len(tensor_dots)
         model_events, cse = eliminate_redundant_hbm_loads(events)
         result = simulate(model_events, models[dtype])
+        if tensor_instruction_mix is not None:
+            mix_path = (
+                args.root / case_name
+                / "hardware/explorer_parquet/Instruction.parquet"
+            )
+            if mix_path.is_file():
+                import pyarrow.parquet as pq  # type: ignore
+
+                mix_rows = pq.read_table(
+                    mix_path, columns=INSTRUCTION_COLUMNS
+                ).to_pylist()
+                mixed_ns, _tensor_mix_match = tensor_instruction_mix.predict_ns(
+                    mix_rows
+                )
+                if mixed_ns > 0:
+                    result.engine_busy_ns["tensor"] = mixed_ns
+        gpsimd_static_opcode_match = "disabled"
+        if static_opcode_payload is not None and instruction_rows:
+            from triton_viz.tools.nki_instruction_source_mapping import _RUNTIME_OPCODES
+
+            opcode_counts = Counter(
+                row["opcode"]
+                for row in instruction_rows
+                if row.get("engine") == "gpsimd"
+                and row.get("opcode") not in _RUNTIME_OPCODES
+            )
+            gpsimd_ns, gpsimd_static_opcode_match = static_opcode_payload.predict_ns(
+                "gpsimd", dtype, dict(opcode_counts)
+            )
+            if gpsimd_ns > 0:
+                result.engine_busy_ns["gpsimd"] = gpsimd_ns
+        if static_instruction_duration is not None:
+            parquet = (
+                args.root / case_name
+                / "hardware/explorer_parquet/Instruction.parquet"
+            )
+            if parquet.is_file():
+                import pyarrow.parquet as pq  # type: ignore
+
+                static_rows = pq.read_table(
+                    parquet,
+                    columns=[
+                        "engine", "opcode", "operands",
+                        "scalar_activation_fn",
+                    ],
+                ).to_pylist()
+                scalar_ns, _exact, scalar_count = (
+                    static_instruction_duration.predict_ns(
+                        "scalar", static_rows
+                    )
+                )
+                if scalar_count and scalar_ns > 0:
+                    result.engine_busy_ns["scalar"] = scalar_ns
+                vector_ns, _vector_exact, vector_count = (
+                    static_instruction_duration.predict_ns(
+                        "vector", static_rows
+                    )
+                )
+                if vector_count and vector_ns > 0:
+                    result.engine_busy_ns["vector"] = vector_ns
+        static_dma_packet_match = "disabled"
+        if static_dma_packets is not None:
+            packet_path = (
+                args.root / case_name
+                / "hardware/explorer_parquet/DmaPacket.parquet"
+            )
+            if packet_path.is_file():
+                import pyarrow.parquet as pq  # type: ignore
+
+                packet_rows = pq.read_table(
+                    packet_path, columns=PACKET_COLUMNS
+                ).to_pylist()
+                static_dma_ns, static_dma_packet_match = (
+                    static_dma_packets.predict_ns(packet_rows)
+                )
+                result.engine_busy_ns["static_dma"] = static_dma_ns
         # Audit the lowered compute events that CostModel actually prices.
         # Raw source primitives may have been replaced by structured lowering.
         matches = set()
@@ -260,6 +415,28 @@ def main(argv: list[str] | None = None) -> int:
         predicted_gpsimd_us = result.engine_busy_ns.get("gpsimd", 0.0) / 1000.0
         hardware_nc_us = float(source["hardware_nc_p50_us"])
         hardware_tensor_us = float(source.get("hardware_tensor_active_us") or 0.0)
+        hardware_tensor_reference = "operator_results"
+        if args.attention_repeat_reference_root:
+            repeated = []
+            for repeat_dir in sorted(args.attention_repeat_reference_root.glob("rep_*")):
+                repeat_summary = (
+                    repeat_dir / case_name / "hardware/explorer_summary.json"
+                )
+                if not repeat_summary.is_file():
+                    continue
+                repeat_profile = next(
+                    iter(json.loads(repeat_summary.read_text()).values())
+                )
+                value = float(
+                    repeat_profile.get("tensor_engine_active_time") or 0
+                ) * 1e6
+                if value > 0:
+                    repeated.append(value)
+            if len(repeated) >= 3:
+                hardware_tensor_us = statistics.median(repeated)
+                hardware_tensor_reference = (
+                    f"median_of_{len(repeated)}_independent_repeats"
+                )
         hardware_vector_us = float(source.get("hardware_vector_active_us") or 0.0)
         hardware_scalar_us = float(source.get("hardware_scalar_active_us") or 0.0)
         summary_path = args.root / case_name / "hardware/explorer_summary.json"
@@ -375,6 +552,9 @@ def main(argv: list[str] | None = None) -> int:
                 "hardware_tensor_active_us": (
                     hardware_tensor_us if has_tensor_events else ""
                 ),
+                "hardware_tensor_reference": (
+                    hardware_tensor_reference if has_tensor_events else ""
+                ),
                 "tensor_error_pct": (
                     (predicted_tensor_us - hardware_tensor_us)
                     / hardware_tensor_us
@@ -430,6 +610,7 @@ def main(argv: list[str] | None = None) -> int:
                     if hardware_gpsimd_us
                     else ""
                 ),
+                "gpsimd_static_opcode_match": gpsimd_static_opcode_match,
                 "hardware_dynamic_dma_us": hardware_dynamic_dma_us,
                 "hardware_dynamic_dma_reference": hardware_dynamic_dma_reference,
                 "dynamic_dma_error_pct": (
@@ -447,6 +628,7 @@ def main(argv: list[str] | None = None) -> int:
                     if hardware_static_dma_us
                     else ""
                 ),
+                "static_dma_packet_match": static_dma_packet_match,
                 "hardware_total_dma_us": hardware_us,
                 "dma_error_pct": (predicted_us - hardware_us) / hardware_us * 100,
                 "calibration_match": ";".join(sorted(matches)) or "not_applicable",
@@ -469,6 +651,8 @@ def main(argv: list[str] | None = None) -> int:
                 "tensor_flops_domain_ood_count": int(
                     components.get("tensor_flops_domain_ood_count", 0)
                 ),
+                "tensor_static_matmul_instruction_count": static_matmul_count,
+                "tensor_instruction_calibration_match": tensor_instruction_match,
                 "completion_exact_count": int(
                     components.get("completion_exact_count", 0)
                 ),

@@ -296,6 +296,54 @@ def tensor_matmul_small_work_units(
     }
 
 
+def tensor_matmul_transpose_pipeline_factory(
+    *, m: int, k: int, n: int, repeat: int = 1,
+    mode: str = "independent", dtype_name: str = "float32",
+):
+    """Disjoint primitive control for mixed TRANSPOSE/REGULAR TensorE work.
+
+    This deliberately contains no attention normalization or application
+    dataflow.  Three stationary tiles are transposed and two independent dots
+    are retained, isolating the compiler's mixed TensorE instruction stream.
+    """
+    kernel_dtype_name = dtype_name
+
+    @nki.jit
+    def kernel(lhs, rhs):
+        kdtype = dtype_for_load(kernel_dtype_name, lhs.dtype)
+        out = nl.ndarray((3, m, n), dtype=kdtype, buffer=nl.shared_hbm)
+        stationary = nl.ndarray(
+            (3, nl.par_dim(k), m), dtype=kdtype, buffer=nl.sbuf
+        )
+        for index in nl.static_range(3):
+            tile = nl.load(lhs[index])
+            stationary[index] = nisa.nc_transpose(tile)
+        moving = nl.load(rhs)
+        for index in nl.static_range(3):
+            result = nisa.nc_matmul(
+                stationary=stationary[index], moving=moving,
+                name=f"transpose_pipeline_mm_{index}",
+            )
+            sbuf = nisa.tensor_copy(
+                result, dtype=kdtype, engine=nisa.engine.vector
+            )
+            nl.store(out[index], sbuf)
+        return out
+
+    return kernel, [(3, m, k), (k, n)], (1,)
+
+
+def tensor_matmul_transpose_pipeline_work_units(
+    *, m: int, k: int, n: int, repeat: int = 1,
+    mode: str = "independent", dtype_name: str = "float32",
+) -> dict[str, int]:
+    return {
+        "matmul_flops": 6 * m * n * k,
+        "logical_instructions": 6,
+        "dot_count": 3,
+    }
+
+
 def work_units(*, p: int | None = None, f: int | None = None, m: int | None = None, k: int | None = None, n: int | None = None, repeat: int, mode: str = "", **_: object) -> dict[str, int]:
     if m is not None and k is not None and n is not None:
         return {"matmul_flops": 2 * m * n * k * repeat, "logical_instructions": repeat}
