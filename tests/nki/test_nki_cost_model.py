@@ -16,6 +16,7 @@ try:
         LoweringExpansionCalibration,
         RuntimeOverheadCalibration,
         StaticDmaCalibrationSurface,
+        StructuralStaticDmaCalibration,
         StridedDmaCalibration,
         StructuredControlCalibration,
         TensorCalibrationSurface,
@@ -492,6 +493,30 @@ def test_static_dma_surface_loads_paired_incremental_latency(tmp_path):
         "static_dma_group_x": 4, "static_dma_group_y": 8,
     }
     assert model.cost_ns(event) == pytest.approx(375)
+
+
+def test_structural_static_dma_uses_source_visible_padded_geometry(tmp_path):
+    path = tmp_path / "padded_static.csv"
+    path.write_text(
+        "calibration_mode,element_bytes,logical_partition_count,"
+        "logical_free_dim,static_dma_ns\n"
+        "padded_partition_shape,2,1,128,321.5\n",
+        encoding="utf-8",
+    )
+    calibration = StructuralStaticDmaCalibration.from_csv(path)
+    events = [
+        {"op": "load", "active_lanes": 128, "bytes": 256},
+        {
+            "op": "compute",
+            "fusion_group": 0,
+            "region_ir": {
+                "partition_count": 128,
+                "logical_free_dim": 128,
+                "tokens": ["multiply"],
+            },
+        },
+    ]
+    assert calibration.predict_ns(events) == pytest.approx(321.5)
 
 
 def test_disjoint_ranges_same_base_run_in_parallel():
@@ -1051,6 +1076,33 @@ def test_compositional_lowering_uses_region_features_without_signature_row():
                            "two_input_elementwise_count": 2}}
     result = simulate([event], CostModel(compute_calibration=level_b, compositional_lowering=structured))
     assert result.engine_busy_ns["vector"] == pytest.approx(557.0)
+
+
+def test_compositional_runtime_baseline_is_reported_separately_from_payload():
+    from triton_viz.tools.nki_cost_model import CompositionalLoweringCalibration
+
+    level_b = ComputeCalibration({("vector", "float32", 2): (10.0, 1.0)})
+    structured = CompositionalLoweringCalibration({
+        ("vector", "float32", "effective_count"): {"intercept": 1.0},
+        ("vector", "float32", "runtime_baseline_ns"): {"partition_p128": 400.0},
+        ("scalar", "float32", "runtime_baseline_ns"): {"partition_p128": 25.0},
+    })
+    event = {
+        "op": "compute", "api_op": "add", "input_shape": [128, 100],
+        "output_shape": [128, 100], "output_dtype": "float32",
+        "partition_count": 128,
+        "region_ir": {"dtype": "float32", "partition_count": 128,
+                      "logical_free_dim": 100},
+    }
+    result = simulate(
+        [event],
+        CostModel(compute_calibration=level_b, compositional_lowering=structured),
+    )
+    assert result.engine_busy_ns["vector"] == pytest.approx(510.0)
+    assert result.components_ns["vector_runtime_baseline_ns"] == pytest.approx(400.0)
+    assert result.engine_busy_ns["scalar"] == pytest.approx(25.0)
+    assert result.components_ns["scalar_runtime_baseline_ns"] == pytest.approx(25.0)
+    assert result.components_ns["gpsimd_runtime_baseline_ns"] == 0.0
 
 
 def test_tensor_calibration_is_dtype_throughput_without_shape_lookup(tmp_path):

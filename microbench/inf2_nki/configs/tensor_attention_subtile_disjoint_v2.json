@@ -1,0 +1,19 @@
+{
+  "suite": "inf2_tensor_attention_subtile_disjoint_v2",
+  "description": "Operator-free transpose-plus-dot controls at sub-tile widths disjoint from all tiled-attention holdout shapes.",
+  "warmup": 3,
+  "iters": 30,
+  "benchmarks": [
+    {
+      "name": "tensor_attention_subtile_disjoint",
+      "kind": "tensor_matmul_transpose_pipeline",
+      "matrix": {
+        "dtype": ["float32"],
+        "m": [128],
+        "k": [128],
+        "n": [80, 96, 112, 144, 160, 192, 224, 288, 320, 384, 448, 576],
+        "repeat": [1]
+      }
+    }
+  ]
+}

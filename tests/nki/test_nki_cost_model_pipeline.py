@@ -62,16 +62,13 @@ def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, caps
     fit_output = capsys.readouterr().out
     assert "nki_fit_strided_dma" in fit_output
     assert "nki_fit_runtime_overhead" in fit_output
-    assert "nki_fit_tensor_instruction" in fit_output
-    assert "nki_fit_static_opcode_payload" in fit_output
-    assert "nki_fit_static_instruction_duration" in fit_output
-    assert "nki_fit_static_dma_packets" in fit_output
-    assert "nki_fit_tensor_instruction_mix" in fit_output
-    assert "tensor_instruction_mix_audit.json" in fit_output
-    assert "static_dma_packets.json" in fit_output
-    assert "tensor_attention_disjoint_v2" in fit_output
-    assert "tensor_attention_disjoint_v3" in fit_output
-    assert "tensor_attention_boundary_disjoint_v1" in fit_output
+    assert "nki_fit_tensor_instruction" not in fit_output
+    assert "nki_fit_static_opcode_payload" not in fit_output
+    assert "nki_fit_static_instruction_duration" not in fit_output
+    assert "nki_fit_static_dma_packets" not in fit_output
+    assert "nki_fit_tensor_instruction_mix" not in fit_output
+    assert "tensor_instruction_mix_audit.json" not in fit_output
+    assert "static_dma_packets.json" not in fit_output
     assert "--min-payload-coverage 99.9" not in fit_output
     assert "--audit-output" in fit_output
     assert "structured_compute_audit.csv" in fit_output
@@ -90,12 +87,12 @@ def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, caps
     assert "--dma-write-surface-csv" in evaluate_output
     assert "--dma-transpose-surface-csv" in evaluate_output
     assert "--strided-dma-csv" in evaluate_output
-    assert "--tensor-instruction-calibration-csv" in evaluate_output
-    assert "--tensor-instruction-mix-json" in evaluate_output
+    assert "--tensor-instruction-calibration-csv" not in evaluate_output
+    assert "--tensor-instruction-mix-json" not in evaluate_output
     assert "--attention-repeat-reference-root" in evaluate_output
-    assert "--static-opcode-payload-csv" in evaluate_output
-    assert "--static-instruction-duration-csv" in evaluate_output
-    assert "--static-dma-packet-calibration-json" in evaluate_output
+    assert "--static-opcode-payload-csv" not in evaluate_output
+    assert "--static-instruction-duration-csv" not in evaluate_output
+    assert "--static-dma-packet-calibration-json" not in evaluate_output
     assert "--runtime-overhead-csv" in evaluate_output
     assert "runtime_overhead_bf16.csv" in evaluate_output
     assert evaluate_output.count("--strict-calibration") == 12

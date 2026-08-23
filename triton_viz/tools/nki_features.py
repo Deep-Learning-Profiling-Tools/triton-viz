@@ -83,9 +83,17 @@ class ComputeRegion:
         region = event.get("region_ir")
         if not region:
             return None
+        input_shape = event.get("input_shape") or event.get("output_shape") or []
         return cls(
             dtype=str(region.get("dtype") or event.get("output_dtype") or ""),
-            partition_count=max(1, int(region.get("partition_count") or 1)),
+            partition_count=max(
+                1,
+                int(
+                    region.get("partition_count")
+                    or event.get("partition_count")
+                    or (input_shape[0] if len(input_shape) > 1 else 1)
+                ),
+            ),
             logical_free_dim=max(
                 1,
                 int(

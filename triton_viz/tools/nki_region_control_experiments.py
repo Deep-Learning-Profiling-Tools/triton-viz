@@ -6,6 +6,7 @@ import argparse
 import csv
 import importlib.util
 import json
+import random
 from pathlib import Path
 
 import triton_viz
@@ -13,8 +14,6 @@ from microbench.inf2_nki.common.inputs import make_input
 from triton_viz.clients.tracer.tracer import Tracer
 from triton_viz.core.trace import launches
 from triton_viz.core.trace import trace as tv_trace
-from triton_viz.tools.nki_explorer import export_parquet
-from triton_viz.tools.nki_instruction_source_mapping import write_case
 from triton_viz.tools.nki_operator_experiments import _profile_summary, _run_hardware
 from triton_viz.tools.nki_provenance import write_experiment_manifest
 from triton_viz.tools.nki_trace_dump import _annotate_fusion_signature, write_jsonl
@@ -25,9 +24,57 @@ KINDS = [
     "elementwise_maximum",
     "elementwise_multiply",
     "elementwise_sigmoid",
+    "primitive_divide",
+    "primitive_add",
+    "primitive_subtract",
+    "primitive_multiply",
+    "primitive_where_bundle",
+    "primitive_exp",
+    "primitive_log",
+    "primitive_rsqrt",
+    "primitive_reduce_sum",
+    "sequence_add_multiply",
+    "sequence_multiply_add",
+    "sequence_subtract_multiply_add",
+    "sequence_multiply_subtract_multiply",
+    "sequence_exp_multiply_add",
+    "sequence_log_add_multiply",
+    "sequence_reduce_add_multiply",
+    "sequence_reduce_divide_multiply",
+    "sequence_two_reduce_add",
+    "sequence_two_reduce_multiply",
+    "sequence_rsqrt_multiply_add",
+    "sequence_add_multiply_wide_memory",
+    "sequence_subtract_multiply_add_wide_memory",
+    "sequence_exp_multiply_add_wide_memory",
+    "sequence_reduce_add_multiply_wide_memory",
+    "sequence_two_reduce_multiply_wide_memory",
+    "sequence_rsqrt_multiply_add_wide_memory",
+    "sequence_multiply_add_wide_memory",
+    "sequence_multiply_subtract_multiply_wide_memory",
+    "sequence_log_add_multiply_wide_memory",
+    "sequence_reduce_divide_multiply_wide_memory",
+    "sequence_two_reduce_add_wide_memory",
+    "sequence_perm2k_ams", "sequence_perm2k_asm", "sequence_perm2k_mas",
+    "sequence_perm2k_msa", "sequence_perm2k_sam", "sequence_perm2k_sma",
+    "sequence_perm2k_eam", "sequence_perm2k_aem", "sequence_perm2k_mea",
+    "sequence_perm2k_ram", "sequence_perm2k_arm", "sequence_perm2k_mra",
+    *[f"sequence_perm2k_long{i:02d}" for i in range(12)],
+    "sequence_deep2k_add", "sequence_deep2k_multiply",
+    "sequence_deep2k_add_multiply",
+    *[f"sequence_deepmixed2k_{i:02d}" for i in range(16)],
+    "sequence_randommixed2k",
+    "sequence_randomsemantic2k",
+    "sequence_randomdag2k",
+    "sequence_factorialdag2k",
+    "sequence_factorialdagaudit2k",
+    "sequence_factorialdaginterleave2k",
     "elementwise_maximum_masked",
     "elementwise_multiply_masked",
     "elementwise_sigmoid_masked",
+    "elementwise_maximum_wide_masked",
+    "elementwise_multiply_wide_masked",
+    "elementwise_sigmoid_wide_masked",
     "masked_log_reduction",
     "softmax_reduction",
     "elementwise_multiply2",
@@ -43,6 +90,19 @@ KINDS = [
     "mask_tail",
 ]
 KINDS += ["two_reductions_rsqrt_masked", "elementwise_mixed_masked"]
+KINDS += [
+    "padded_add",
+    "padded_multiply",
+    "padded_sigmoid",
+    "padded_mixed",
+    "padded_reduce_affine",
+    "padded_reduce_transcendental",
+    "padded_reduce_pair",
+    "padded_reduce_rsqrt",
+    "padded_maximum",
+    "padded_reduce_maximum",
+    "padded_randomdag",
+]
 
 
 def _case_name(kind: str, p: int, f: int, chain: int, dtype: str) -> str:
@@ -77,6 +137,12 @@ def refresh_dependency_trace(root: Path, row: dict) -> int:
     ]
     inputs.extend(extras)
     case = (root / str(row["case"])).resolve()
+    if kind.startswith("padded_"):
+        return len(
+            _declared_trace(
+                kind, p, f, chain, dtype, case / "dependency_trace.jsonl"
+            )
+        )
     return len(_trace(kernel, inputs, case / "dependency_trace.jsonl"))
 
 
@@ -86,22 +152,162 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
         "elementwise_maximum_masked",
         "elementwise_multiply_masked",
         "elementwise_sigmoid_masked",
+        "elementwise_maximum_wide_masked",
+        "elementwise_multiply_wide_masked",
+        "elementwise_sigmoid_wide_masked",
+        "sequence_add_multiply_wide_memory",
+        "sequence_subtract_multiply_add_wide_memory",
+        "sequence_exp_multiply_add_wide_memory",
+        "sequence_reduce_add_multiply_wide_memory",
+        "sequence_two_reduce_multiply_wide_memory",
+        "sequence_rsqrt_multiply_add_wide_memory",
+        "sequence_multiply_add_wide_memory",
+        "sequence_multiply_subtract_multiply_wide_memory",
+        "sequence_log_add_multiply_wide_memory",
+        "sequence_reduce_divide_multiply_wide_memory",
+        "sequence_two_reduce_add_wide_memory",
         "mask_tail",
         "two_pass_reduce_affine",
         "two_pass_reduce_multiply",
         "two_reductions_rsqrt_masked",
         "elementwise_mixed_masked",
+        "padded_add",
+        "padded_multiply",
+        "padded_sigmoid",
+        "padded_mixed",
+        "padded_reduce_affine",
+        "padded_reduce_transcendental",
+        "padded_reduce_pair",
+        "padded_reduce_rsqrt",
+        "padded_maximum",
+        "padded_reduce_maximum",
+        "padded_randomdag",
     }
-    mask_provided = kind in explicit_mask_kinds
+    mask_provided = kind in explicit_mask_kinds or kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k"))
     tile = (
-        min(2048, f)
-        if kind == "mask_tail" or f > 2048
+        2048
+        if kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k"))
+        else
+        (16384 if "wide_memory" in kind else min(2048, f))
+        if kind == "mask_tail" or "wide_masked" in kind or "wide_memory" in kind or f > 2048
         else (
-            2048 if kind.endswith("_masked") or kind == "two_pass_reduce_affine" else f
+            (16384 if "wide_masked" in kind else 2048)
+            if kind.endswith("_masked") or kind == "two_pass_reduce_affine" else f
         )
     )
     item_bytes = 2 if dtype == "bfloat16" else 4
     events = [{"seq": 0, "op": "grid", "record_type": "Grid", "grid_idx": [0, 0, 0]}]
+    if kind.startswith("padded_"):
+        # These controls deliberately use a PMAX physical partition tile while
+        # only ``p`` logical rows are active.  The CPU masked-load simulator
+        # cannot index beyond the backing NumPy extent even under a mask, so we
+        # write the exact source declaration instead of executing that load.
+        physical_p = 128
+        events.append(
+            {
+                "seq": 1,
+                "op": "load",
+                "record_type": "Load",
+                "bytes": p * f * item_bytes,
+                "active_lanes": p * f,
+                "partition_count": physical_p,
+                "offsets_shape": [physical_p, f],
+                "mem_src": "HBM",
+                "mem_dst": "SBUF",
+                "mask_provided": True,
+            }
+        )
+        token_map = {
+            "padded_add": [("add", 1)],
+            "padded_multiply": [("multiply", 1)],
+            "padded_sigmoid": [("sigmoid", 1)],
+            "padded_mixed": [("subtract", 2), ("multiply", 2), ("add", 2)],
+            "padded_reduce_affine": [
+                ("reduce_sum", 1), ("multiply", 1), ("add", 2)
+            ],
+            "padded_reduce_transcendental": [
+                ("multiply", 1), ("exp", 1), ("reduce_sum", 1),
+                ("add", 1), ("divide", 2),
+            ],
+            "padded_reduce_pair": [
+                ("reduce_sum", 1), ("multiply", 1), ("reduce_sum", 1),
+                ("add", 2), ("multiply", 1), ("add", 2),
+            ],
+            "padded_reduce_rsqrt": [
+                ("multiply", 1), ("reduce_sum", 1), ("add", 1),
+                ("rsqrt", 1), ("multiply", 2),
+            ],
+            "padded_maximum": [("maximum", 1)],
+            "padded_reduce_maximum": [
+                ("reduce_sum", 1), ("subtract", 2), ("maximum", 1),
+            ],
+        }
+        if kind == "padded_randomdag":
+            rng = random.Random(0x4DA6_2100 + int(chain))
+            actions = [
+                rng.choice((
+                    "a_add", "a_multiply", "a_exp", "b_subtract",
+                    "b_maximum", "b_rsqrt", "cross_add", "cross_multiply",
+                ))
+                for _ in range(rng.randint(8, 18))
+            ]
+            actions.extend(("a_reduce", "b_reduce", "cross_add"))
+            rng.shuffle(actions)
+            action_tokens = {
+                "a_add": ("add", 1), "a_multiply": ("multiply", 1),
+                "a_exp": ("exp", 1), "b_subtract": ("subtract", 1),
+                "b_maximum": ("maximum", 1), "b_rsqrt": ("rsqrt", 1),
+                "cross_add": ("add", 2), "cross_multiply": ("multiply", 2),
+                "a_reduce": ("reduce_sum", 1),
+                "b_reduce": ("reduce_sum", 1),
+            }
+            selected_tokens = [action_tokens[action] for action in actions]
+        else:
+            selected_tokens = token_map[kind]
+        previous = 100
+        for token, arity in selected_tokens:
+            output = previous + 1
+            reduction = token == "reduce_sum"
+            events.append(
+                {
+                    "seq": len(events),
+                    "op": "reduce_sum" if reduction else "compute",
+                    "api_op": None if reduction else token,
+                    "record_type": "ReduceSum" if reduction else "NkiCompute",
+                    "input_ptrs": [previous] if arity == 1 else [previous, 2],
+                    "output_ptr": output,
+                    "input_shape": [physical_p, f],
+                    "output_shape": [physical_p, 1 if reduction else f],
+                    "output_dtype": dtype,
+                    "input_dtypes": [dtype] * arity,
+                    "mask_provided": True,
+                }
+            )
+            previous = output
+        events.append(
+            {
+                "seq": len(events),
+                "op": "store",
+                "record_type": "Store",
+                "bytes": p * f * item_bytes,
+                "active_lanes": p * f,
+                "partition_count": physical_p,
+                "offsets_shape": [physical_p, f],
+                "mem_src": "SBUF",
+                "mem_dst": "HBM",
+                "mask_provided": True,
+            }
+        )
+        _annotate_fusion_signature(events)
+        for event in events:
+            if event.get("region_ir") is not None:
+                event["region_ir"]["logical_free_dim"] = f
+                event["region_ir"]["logical_active_partition_count"] = p
+        path.write_text(
+            "".join(json.dumps(event, sort_keys=True) + "\n" for event in events),
+            encoding="utf-8",
+        )
+        return events
     if kind == "two_pass_reduce_multiply" and f > 2048:
 
         def load(load_p):
@@ -327,11 +533,180 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
             tokens, arities = ["multiply"], [1]
         elif kind == "elementwise_sigmoid":
             tokens, arities = ["sigmoid"], [1]
+        elif kind.startswith("primitive_"):
+            token = kind.removeprefix("primitive_")
+            if token == "where_bundle":
+                tokens, arities = ["greater", "where"], [1, 3]
+            else:
+                tokens, arities = [token], [1 if token in {"exp", "log", "rsqrt", "reduce_sum"} else 2]
+        elif kind == "sequence_randommixed2k":
+            module_path = Path("microbench/inf2_nki/tests/region_controls/kernels.py").resolve()
+            module_spec = importlib.util.spec_from_file_location(
+                "nki_region_schedule_dynamic", module_path
+            )
+            schedule_module = importlib.util.module_from_spec(module_spec)
+            module_spec.loader.exec_module(schedule_module)
+            tokens, arities = ["add"], [1]
+            for token in schedule_module.random_mixed_schedule(chain):
+                if token == "reduce":
+                    tokens.extend(("reduce_sum", "multiply", "add"))
+                    arities.extend((1, 1, 2))
+                elif token == "exp":
+                    tokens.extend(("multiply", "exp"))
+                    arities.extend((1, 1))
+                else:
+                    tokens.append(token)
+                    arities.append(1)
+        elif kind == "sequence_randomsemantic2k":
+            module_path = Path("microbench/inf2_nki/tests/region_controls/kernels.py").resolve()
+            module_spec = importlib.util.spec_from_file_location(
+                "nki_region_semantic_schedule_dynamic", module_path
+            )
+            schedule_module = importlib.util.module_from_spec(module_spec)
+            module_spec.loader.exec_module(schedule_module)
+            tokens, arities = ["add"], [1]
+            for token in schedule_module.random_semantic_schedule(chain):
+                if token == "reduce":
+                    tokens.extend(("reduce_sum", "multiply", "add"))
+                    arities.extend((1, 1, 2))
+                elif token == "exp":
+                    tokens.extend(("multiply", "exp"))
+                    arities.extend((1, 1))
+                elif token == "where":
+                    tokens.extend(("greater", "multiply", "where"))
+                    arities.extend((1, 1, 3))
+                else:
+                    tokens.append(token)
+                    arities.append(1)
+        elif kind in {"sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k"}:
+            module_path = Path("microbench/inf2_nki/tests/region_controls/kernels.py").resolve()
+            module_spec = importlib.util.spec_from_file_location(
+                "nki_region_dag_schedule_dynamic", module_path
+            )
+            schedule_module = importlib.util.module_from_spec(module_spec)
+            module_spec.loader.exec_module(schedule_module)
+            # Emitted below with explicit two-branch pointer identity.
+            tokens, arities = [], []
+            next_ptr, a_ptr, b_ptr = 1000, None, None
+
+            def dag_op(token, inputs, reduction=False):
+                nonlocal next_ptr
+                next_ptr += 1
+                events.append({
+                    "seq": len(events),
+                    "op": "reduce_sum" if reduction else "compute",
+                    "api_op": None if reduction else token,
+                    "record_type": "ReduceSum" if reduction else "NkiCompute",
+                    "grid_idx": [0, 0, 0], "input_ptrs": list(inputs),
+                    "output_ptr": next_ptr, "input_shape": [p, tile],
+                    "output_shape": [p, 1 if reduction else tile],
+                    "output_dtype": dtype, "input_dtypes": [dtype] * len(inputs),
+                })
+                return next_ptr
+
+            a_ptr = dag_op("add", [10])
+            b_ptr = dag_op("multiply", [20])
+            schedule_fn = {
+                "sequence_randomdag2k": schedule_module.random_dag_schedule,
+                "sequence_factorialdag2k": schedule_module.factorial_dag_schedule,
+                "sequence_factorialdagaudit2k": schedule_module.factorial_dag_audit_schedule,
+                "sequence_factorialdaginterleave2k": schedule_module.factorial_dag_interleave_schedule,
+            }[kind]
+            for action in schedule_fn(chain):
+                if action == "a_add": a_ptr = dag_op("add", [a_ptr])
+                elif action == "a_multiply": a_ptr = dag_op("multiply", [a_ptr])
+                elif action == "a_exp":
+                    a_ptr = dag_op("multiply", [a_ptr]); a_ptr = dag_op("exp", [a_ptr])
+                elif action == "b_subtract": b_ptr = dag_op("subtract", [b_ptr])
+                elif action == "b_maximum": b_ptr = dag_op("maximum", [b_ptr])
+                elif action == "b_rsqrt": b_ptr = dag_op("rsqrt", [b_ptr])
+                elif action in {"a_reduce", "b_reduce"}:
+                    branch = a_ptr if action == "a_reduce" else b_ptr
+                    reduced = dag_op("reduce_sum", [branch], reduction=True)
+                    scaled = dag_op("multiply", [reduced])
+                    joined = dag_op("add", [branch, scaled])
+                    if action == "a_reduce": a_ptr = joined
+                    else: b_ptr = joined
+                elif action == "cross_add": a_ptr = dag_op("add", [a_ptr, b_ptr])
+                else: b_ptr = dag_op("multiply", [a_ptr, b_ptr])
+            dag_op("add", [a_ptr, b_ptr])
+        elif kind.startswith("sequence_deepmixed2k_"):
+            specs = {
+                "00": [("add",1),("multiply",1),("subtract",1),("exp",1),("multiply",1),("add",1),("reduce_sum",1),("multiply",2),("subtract",1),("multiply",1),("add",1),("multiply",1),("subtract",1)],
+                "01": [("multiply",1),("exp",1),("add",1),("subtract",1),("reduce_sum",1),("add",2),("multiply",1),("subtract",1),("add",1),("multiply",1),("add",1),("subtract",1),("multiply",1)],
+                "02": [("multiply",1),("add",1),("rsqrt",1),("multiply",1),("subtract",1),("add",1),("reduce_sum",1),("multiply",2),("add",1),("subtract",1),("multiply",1),("add",1),("multiply",1)],
+                "03": [("multiply",1),("add",1),("reduce_sum",1),("add",2),("multiply",1),("add",1),("rsqrt",1),("subtract",1),("multiply",1),("add",1),("multiply",1),("subtract",1),("add",1)],
+                "04": [("multiply",1),("add",1),("log",1),("multiply",1),("add",1),("reduce_sum",1),("subtract",2),("multiply",1),("add",1),("subtract",1),("multiply",1),("add",1)],
+                "05": [("add",1),("multiply",1),("reduce_sum",1),("multiply",2),("add",1),("log",1),("multiply",1),("subtract",1),("add",1),("multiply",1),("subtract",1)],
+                "06": [("multiply",1),("reduce_sum",1),("reduce_sum",1),("multiply",2),("add",2),("subtract",1),("multiply",1),("add",1),("multiply",1),("subtract",1),("add",1),("multiply",1),("add",1)],
+                "07": [("add",1),("multiply",1),("reduce_sum",1),("multiply",2),("reduce_sum",1),("add",2),("multiply",1),("subtract",1),("add",1),("multiply",1),("subtract",1),("add",1),("multiply",1)],
+                "08": [("add",1),("multiply",1),("reduce_sum",1),("add",2),("subtract",1),("exp",1),("multiply",1),("add",1),("subtract",1),("multiply",1),("add",1),("multiply",1)],
+                "09": [("subtract",1),("add",1),("multiply",1),("exp",1),("subtract",1),("multiply",1),("reduce_sum",1),("multiply",2),("add",1),("subtract",1),("multiply",1),("add",1)],
+                "10": [("add",1),("reduce_sum",1),("multiply",2),("subtract",1),("multiply",1),("add",1),("rsqrt",1),("multiply",1),("add",1),("subtract",1),("multiply",1),("add",1)],
+                "11": [("multiply",1),("add",1),("rsqrt",1),("subtract",1),("add",1),("multiply",1),("reduce_sum",1),("add",2),("multiply",1),("subtract",1),("add",1),("multiply",1)],
+                "12": [("add",1),("reduce_sum",1),("multiply",2),("multiply",1),("add",1),("log",1),("subtract",1),("multiply",1),("add",1),("subtract",1),("multiply",1),("add",1)],
+                "13": [("multiply",1),("add",1),("log",1),("multiply",1),("subtract",1),("reduce_sum",1),("add",2),("multiply",1),("add",1),("subtract",1),("multiply",1),("add",1)],
+                "14": [("reduce_sum",1),("add",2),("multiply",1),("subtract",1),("multiply",1),("reduce_sum",1),("multiply",2),("add",1),("subtract",1),("multiply",1),("add",1),("multiply",1)],
+                "15": [("multiply",1),("reduce_sum",1),("subtract",1),("multiply",2),("add",1),("reduce_sum",1),("add",2),("multiply",1),("subtract",1),("add",1),("multiply",1),("add",1)],
+            }[kind.rsplit("_", 1)[1]]
+            tokens, arities = map(list, zip(*specs))
+        elif kind.startswith("sequence_deep2k_"):
+            token = kind.removeprefix("sequence_deep2k_")
+            if token == "add_multiply":
+                tokens, arities = [value for _ in range(chain) for value in ("add", "multiply")], [1] * (2 * chain)
+            else:
+                tokens, arities = [token] * chain, [1] * chain
+        elif kind.startswith("sequence_"):
+            sequence = kind.removeprefix("sequence_").removesuffix("_wide_memory")
+            specs = {
+                "add_multiply": [("add", 2), ("multiply", 2)],
+                "multiply_add": [("multiply", 2), ("add", 2)],
+                "subtract_multiply_add": [("subtract", 2), ("multiply", 2), ("add", 2)],
+                "multiply_subtract_multiply": [("multiply", 2), ("subtract", 2), ("multiply", 2)],
+                "exp_multiply_add": [("exp", 1), ("multiply", 2), ("add", 2)],
+                "log_add_multiply": [("log", 1), ("add", 2), ("multiply", 2)],
+                "reduce_add_multiply": [("reduce_sum", 1), ("add", 1), ("multiply", 2)],
+                "reduce_divide_multiply": [("reduce_sum", 1), ("divide", 1), ("multiply", 2)],
+                "two_reduce_add": [("reduce_sum", 1), ("reduce_sum", 1), ("add", 2), ("multiply", 2)],
+                "two_reduce_multiply": [("multiply", 2), ("reduce_sum", 1), ("reduce_sum", 1), ("multiply", 2), ("multiply", 2)],
+                "rsqrt_multiply_add": [("rsqrt", 1), ("multiply", 2), ("add", 2)],
+                "perm2k_ams": [("add", 1), ("multiply", 1), ("subtract", 1)],
+                "perm2k_asm": [("add", 1), ("subtract", 1), ("multiply", 1)],
+                "perm2k_mas": [("multiply", 1), ("add", 1), ("subtract", 1)],
+                "perm2k_msa": [("multiply", 1), ("subtract", 1), ("add", 1)],
+                "perm2k_sam": [("subtract", 1), ("add", 1), ("multiply", 1)],
+                "perm2k_sma": [("subtract", 1), ("multiply", 1), ("add", 1)],
+                "perm2k_eam": [("exp", 1), ("add", 1), ("multiply", 1)],
+                "perm2k_aem": [("add", 1), ("exp", 1), ("multiply", 1)],
+                "perm2k_mea": [("multiply", 1), ("exp", 1), ("add", 1)],
+                "perm2k_ram": [("reduce_sum", 1), ("add", 1), ("multiply", 2)],
+                "perm2k_arm": [("add", 1), ("reduce_sum", 1), ("multiply", 2)],
+                "perm2k_mra": [("multiply", 1), ("reduce_sum", 1), ("add", 2)],
+                "perm2k_long00": [("add", 1), ("multiply", 1), ("subtract", 1), ("add", 1), ("multiply", 1), ("subtract", 1)],
+                "perm2k_long01": [("multiply", 1), ("subtract", 1), ("add", 1), ("multiply", 1), ("subtract", 1), ("add", 1)],
+                "perm2k_long02": [("subtract", 1), ("add", 1), ("multiply", 1), ("subtract", 1), ("add", 1), ("multiply", 1)],
+                "perm2k_long03": [("exp", 1), ("add", 1), ("multiply", 1), ("subtract", 1), ("multiply", 1), ("add", 1)],
+                "perm2k_long04": [("add", 1), ("exp", 1), ("add", 1), ("multiply", 1), ("subtract", 1), ("multiply", 1)],
+                "perm2k_long05": [("multiply", 1), ("exp", 1), ("add", 1), ("multiply", 1), ("subtract", 1), ("add", 1), ("multiply", 1)],
+                "perm2k_long06": [("reduce_sum", 1), ("add", 1), ("multiply", 1), ("subtract", 1), ("multiply", 1), ("add", 1)],
+                "perm2k_long07": [("add", 1), ("multiply", 1), ("reduce_sum", 1), ("add", 1), ("subtract", 1), ("multiply", 1)],
+                "perm2k_long08": [("multiply", 1), ("subtract", 1), ("add", 1), ("reduce_sum", 1), ("multiply", 1), ("add", 1)],
+                "perm2k_long09": [("reduce_sum", 1), ("multiply", 1), ("exp", 1), ("add", 1), ("subtract", 1), ("multiply", 1)],
+                "perm2k_long10": [("add", 1), ("reduce_sum", 1), ("multiply", 1), ("subtract", 1), ("exp", 1), ("multiply", 1)],
+                "perm2k_long11": [("multiply", 1), ("add", 1), ("reduce_sum", 1), ("subtract", 1), ("add", 1), ("multiply", 1)],
+            }[sequence]
+            tokens, arities = map(list, zip(*specs))
         elif kind == "elementwise_maximum_masked":
             tokens, arities = ["maximum"], [1]
         elif kind == "elementwise_multiply_masked":
             tokens, arities = ["multiply"], [1]
         elif kind == "elementwise_sigmoid_masked":
+            tokens, arities = ["sigmoid"], [1]
+        elif kind == "elementwise_maximum_wide_masked":
+            tokens, arities = ["maximum"], [1]
+        elif kind == "elementwise_multiply_wide_masked":
+            tokens, arities = ["multiply"], [1]
+        elif kind == "elementwise_sigmoid_wide_masked":
             tokens, arities = ["sigmoid"], [1]
         elif kind == "masked_log_reduction":
             tokens, arities = (
@@ -577,6 +952,7 @@ def run_case(
     warmup: int,
     iters: int,
     hardware: bool,
+    postcompile_audit: bool = False,
 ) -> dict:
     name = _case_name(kind, p, f, chain, dtype)
     case = (root / name).resolve()
@@ -592,7 +968,12 @@ def run_case(
     # and a separate runtime trace carrying physical SBUF dependency identity.
     # The two artifacts answer different questions and must not overwrite one
     # another.
-    dependency_events = _trace(kernel, inputs, case / "dependency_trace.jsonl")
+    if kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "padded_")):
+        dependency_events = _declared_trace(
+            kind, p, f, chain, dtype, case / "dependency_trace.jsonl"
+        )
+    else:
+        dependency_events = _trace(kernel, inputs, case / "dependency_trace.jsonl")
     # Nested nl.* expressions are intentionally flattened by Python syntax but
     # the simulator records only the outer call. Use the exact factory grammar
     # declaration so source-op count matches the written kernel; Penguin still
@@ -631,18 +1012,38 @@ def run_case(
                 "softmax", inputs, hardware_dir, warmup, iters, kernel=kernel
             )
             row["hardware_nc_p50_us"] = nc_p50_us
-        export_parquet(hardware_dir)
         row.update(
             vector_active_ns=float(profile.get("vector_engine_active_time", 0)) * 1e9,
             scalar_active_ns=float(profile.get("scalar_engine_active_time", 0)) * 1e9,
+            gpsimd_active_ns=float(profile.get("gpsimd_engine_active_time", 0)) * 1e9,
+            # Aggregate Explorer counters are labels for independent controls,
+            # not compiler instruction or DMA-packet features.  Keeping them
+            # in the control manifest lets strict source-only models be fit
+            # without opening any post-compile table.
+            dynamic_dma_active_ns=float(
+                profile.get(
+                    "software_dynamic_dma_active_time",
+                    profile.get("dynamic_dma_active_time", 0),
+                )
+            )
+            * 1e9,
+            static_dma_active_ns=float(profile.get("static_dma_active_time", 0))
+            * 1e9,
         )
-        audit = write_case(case)
-        row["vector_mapping_coverage_pct"] = audit["engines"]["vector"][
-            "mapped_payload_coverage_percent"
-        ]
-        row["scalar_mapping_coverage_pct"] = audit["engines"]["scalar"][
-            "mapped_payload_coverage_percent"
-        ]
+        if postcompile_audit:
+            # Optional control-only compiler audit. Strict source-only Stage-2
+            # collection leaves this disabled and records aggregate counters only.
+            from triton_viz.tools.nki_explorer import export_parquet
+            from triton_viz.tools.nki_instruction_source_mapping import write_case
+
+            export_parquet(hardware_dir)
+            audit = write_case(case)
+            row["vector_mapping_coverage_pct"] = audit["engines"]["vector"][
+                "mapped_payload_coverage_percent"
+            ]
+            row["scalar_mapping_coverage_pct"] = audit["engines"]["scalar"][
+                "mapped_payload_coverage_percent"
+            ]
     return row
 
 
@@ -664,6 +1065,11 @@ def main(argv=None):
     parser.add_argument("--warmup", type=int, default=5)
     parser.add_argument("--iters", type=int, default=20)
     parser.add_argument("--no-hardware", action="store_true")
+    parser.add_argument(
+        "--postcompile-audit",
+        action="store_true",
+        help="Control-only diagnostic; forbidden for strict source-only collection.",
+    )
     parser.add_argument("--resume", action="store_true")
     parser.add_argument(
         "--refresh-dependency-traces",
@@ -691,14 +1097,14 @@ def main(argv=None):
             dims = args.free_dims
             for kind in args.kinds:
                 chains = (
-                    args.chains if kind in {"elementwise_one", "elementwise_two"} else [1]
+                    args.chains if kind in {"elementwise_one", "elementwise_two", "sequence_deep2k_add", "sequence_deep2k_multiply", "sequence_deep2k_add_multiply", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "padded_randomdag"} else [1]
                 )
                 for f in dims:
                     if f > 2048 and kind not in {
                         "mask_tail",
                         "two_pass_reduce_affine",
                         "two_pass_reduce_multiply",
-                    }:
+                    } and not kind.startswith("padded_"):
                         continue
                     for chain in chains:
                         case_name = _case_name(kind, p, f, chain, dtype)
@@ -731,6 +1137,7 @@ def main(argv=None):
                                     args.warmup,
                                     args.iters,
                                     not args.no_hardware,
+                                    args.postcompile_audit,
                                 )
                             )
                         except Exception as exc:  # noqa: BLE001 - preserve all cases in the audit CSV

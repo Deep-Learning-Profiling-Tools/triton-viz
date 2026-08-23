@@ -435,17 +435,23 @@ class Builder:
         return NDArray(value=value.T, name=f"{src.name}_load_transpose2d", **kwargs)
 
     @staticmethod
-    def _tag(nd: "NDArray", api: str, engine: str, inputs) -> "NDArray":
+    def _tag(
+        nd: "NDArray", api: str, engine: str, inputs, *, compute_mask_provided=False
+    ) -> "NDArray":
         """Annotate a result NDArray so the tracer can emit an NkiCompute event."""
         nd._nki_api = api
         nd._nki_engine = engine
         nd._nki_inputs = tuple(i for i in inputs if isinstance(i, NDArray))
+        nd._nki_compute_mask_provided = bool(compute_mask_provided)
         return nd
 
     def _unary_op(self, x: NDArray, np_func, op_name, **kwargs):
         # Activation-class unary ops run on the ScalarE (activation) engine.
         nd = NDArray(value=np_func(x.data), name=f"{x.name}_{op_name}", **kwargs)
-        return self._tag(nd, op_name, "scalar", (x,))
+        return self._tag(
+            nd, op_name, "scalar", (x,),
+            compute_mask_provided=kwargs.get("mask") is not None,
+        )
 
     # Elementwise operator implementations
     def exp(self, x: NDArray, **kwargs):
@@ -585,14 +591,20 @@ class Builder:
                 name=f"{x.name}_multiply_{y.name}",
                 **kwargs,
             )
-            return self._tag(nd, "multiply", "vector", (x, y))
+            return self._tag(
+                nd, "multiply", "vector", (x, y),
+                compute_mask_provided=kwargs.get("mask") is not None,
+            )
         elif np.isscalar(y):
             nd = NDArray(
                 value=np.multiply(x.data, y),
                 name=f"{x.name}_multiply_scalar",
                 **kwargs,
             )
-            return self._tag(nd, "multiply", "vector", (x,))
+            return self._tag(
+                nd, "multiply", "vector", (x,),
+                compute_mask_provided=kwargs.get("mask") is not None,
+            )
         else:
             raise TypeError(f"Unsupported type for multiply: {type(y)}")
 
@@ -606,32 +618,35 @@ class Builder:
         """Return the raw NumPy payload for an NDArray or a passthrough scalar."""
         return value.data if isinstance(value, NDArray) else value
 
-    def _binary(self, x, y, np_func, op_name, *, dtype=None, **_kwargs):
+    def _binary(self, x, y, np_func, op_name, *, dtype=None, mask=None, **_kwargs):
         result = np_func(self._as_np(x), self._as_np(y))
         if dtype is not None:
             result = result.astype(dtype)
         xn = x.name if isinstance(x, NDArray) else "scalar"
         yn = y.name if isinstance(y, NDArray) else "scalar"
         nd = NDArray(value=result, name=f"{xn}_{op_name}_{yn}")
-        return self._tag(nd, op_name, "vector", (x, y))
+        return self._tag(
+            nd, op_name, "vector", (x, y),
+            compute_mask_provided=mask is not None,
+        )
 
     def add(self, x, y, *, dtype=None, mask=None, **kwargs):
-        return self._binary(x, y, np.add, "add", dtype=dtype)
+        return self._binary(x, y, np.add, "add", dtype=dtype, mask=mask)
 
     def subtract(self, x, y, *, dtype=None, mask=None, **kwargs):
-        return self._binary(x, y, np.subtract, "subtract", dtype=dtype)
+        return self._binary(x, y, np.subtract, "subtract", dtype=dtype, mask=mask)
 
     def divide(self, x, y, *, dtype=None, mask=None, **kwargs):
-        return self._binary(x, y, np.divide, "divide", dtype=dtype)
+        return self._binary(x, y, np.divide, "divide", dtype=dtype, mask=mask)
 
     def maximum(self, x, y, *, dtype=None, mask=None, **kwargs):
-        return self._binary(x, y, np.maximum, "maximum", dtype=dtype)
+        return self._binary(x, y, np.maximum, "maximum", dtype=dtype, mask=mask)
 
     def minimum(self, x, y, *, dtype=None, mask=None, **kwargs):
-        return self._binary(x, y, np.minimum, "minimum", dtype=dtype)
+        return self._binary(x, y, np.minimum, "minimum", dtype=dtype, mask=mask)
 
     def greater(self, x, y, *, dtype=None, mask=None, **kwargs):
-        return self._binary(x, y, np.greater, "greater", dtype=dtype)
+        return self._binary(x, y, np.greater, "greater", dtype=dtype, mask=mask)
 
     @staticmethod
     def _reduction_identity(dtype: np.dtype, op_name: str):
@@ -693,7 +708,10 @@ class Builder:
             result = result.astype(dtype)
         nd = NDArray(value=result, name=f"{x.name}_{op_name}")
         inputs = (x, mask) if isinstance(mask, NDArray) else (x,)
-        return self._tag(nd, op_name, "vector", inputs)
+        return self._tag(
+            nd, op_name, "vector", inputs,
+            compute_mask_provided=mask is not None,
+        )
 
     def max(self, x: NDArray, *, axis=None, keepdims=False, dtype=None, mask=None, **kwargs):
         return self._reduce(x, np.max, "max", axis=axis, keepdims=keepdims, dtype=dtype, mask=mask)

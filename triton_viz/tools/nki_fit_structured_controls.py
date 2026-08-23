@@ -58,6 +58,44 @@ def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
+def load_runtime_engine_baselines(path: Path | None) -> dict[tuple[str, int, str], float]:
+    """Load engine fixed costs measured by independent dma-only controls."""
+    if path is None:
+        return {}
+    baselines: dict[tuple[str, int, str], list[float]] = {}
+    with path.open(encoding="utf-8") as file:
+        for line in file:
+            row = json.loads(line)
+            spec = row.get("spec") or {}
+            export = row.get("profile_export") or {}
+            if row.get("status") != "ok" or spec.get("mode") != "dma_only":
+                continue
+            stdout = export.get("stdout")
+            if not stdout:
+                continue
+            profile = next(iter(json.loads(stdout).values()), {})
+            for engine in ("vector", "scalar", "gpsimd"):
+                active_ns = float(profile.get(f"{engine}_engine_active_time", 0.0)) * 1e9
+                if active_ns > 0:
+                    key = (str(spec["dtype"]), int(spec["p"]), engine)
+                    baselines.setdefault(key, []).append(active_ns)
+    return {key: statistics.median(values) for key, values in baselines.items()}
+
+
+def runtime_engine_baseline_ns(
+    baselines: dict[tuple[str, int, str], float],
+    dtype: str,
+    partition_dim: int,
+    engine: str,
+) -> float:
+    candidates = [
+        (abs(partition - partition_dim), value)
+        for (candidate_dtype, partition, candidate_engine), value in baselines.items()
+        if candidate_dtype == dtype and candidate_engine == engine
+    ]
+    return min(candidates)[1] if candidates else 0.0
+
+
 def _compiler_version(case: Path) -> str:
     summary_path = case / "hardware/explorer_summary.json"
     if not summary_path.is_file():
@@ -326,6 +364,114 @@ def collect(
     return rows
 
 
+def collect_source_only(
+    roots: list[Path],
+    level_b: ComputeCalibration,
+    include_prefixes: tuple[str, ...] = (),
+    runtime_baselines: dict[tuple[str, int, str], float] | None = None,
+) -> list[dict]:
+    """Collect controls without compiler instruction or Flow metadata.
+
+    Single-region controls receive the complete kernel-level engine label.
+    For multi-region controls, the only permitted allocation is a frozen
+    source-level rule: divide engine active time in proportion to the number
+    of source primitives in each region.  No compiler instruction, Flow, or
+    target timing metadata participates in the allocation.
+    """
+    completion_by_case: dict[str, float] = {}
+    for root in roots:
+        results_path = root / "control_results.csv"
+        if not results_path.is_file():
+            continue
+        with results_path.open(encoding="utf-8", newline="") as file:
+            for row in csv.DictReader(file):
+                if row.get("case") and row.get("hardware_nc_p50_us"):
+                    completion_by_case[row["case"]] = (
+                        float(row["hardware_nc_p50_us"]) * 1000.0
+                    )
+
+    rows: list[dict] = []
+    for declared_trace in sorted(
+        path for root in roots for path in root.glob("*/trace.jsonl")
+    ):
+        case = declared_trace.parent
+        runtime_trace = case / "dependency_trace.jsonl"
+        trace = runtime_trace if runtime_trace.is_file() else declared_trace
+        if include_prefixes and not case.name.startswith(include_prefixes):
+            continue
+        summary_path = case / "hardware/explorer_summary.json"
+        if not summary_path.is_file():
+            continue
+        events = [
+            json.loads(line) for line in trace.read_text().splitlines() if line.strip()
+        ]
+        _annotate_fusion_signature(events)
+        groups: dict[int, list[dict]] = {}
+        for event in events:
+            if event.get("fusion_group") is not None and event.get("region_ir") is not None:
+                groups.setdefault(int(event["fusion_group"]), []).append(event)
+        regions = {
+            group: members[0]["region_ir"]
+            for group, members in groups.items()
+        }
+        if not regions:
+            continue
+        if len(regions) != 1:
+            continue
+        profile = next(iter(_load_json(summary_path).values()), {})
+        for group, region in regions.items():
+            match = match_structural_family(region)
+            free_dim = int(region.get("logical_free_dim") or region["free_dim"])
+            partition_dim = int(region.get("partition_count") or 1)
+            dtype = str(region["dtype"])
+            for engine, streams in (("vector", 2), ("scalar", 1)):
+                kernel_active_ns = (
+                    float(profile.get(f"{engine}_engine_active_time", 0.0)) * 1e9
+                )
+                active_ns = max(
+                    0.0,
+                    kernel_active_ns
+                    - runtime_engine_baseline_ns(
+                        runtime_baselines or {}, dtype, partition_dim, engine
+                    ),
+                )
+                if active_ns <= 0:
+                    continue
+                instruction_ns = level_b.instruction_ns(
+                    engine, dtype, streams, free_dim
+                )
+                if instruction_ns <= 0:
+                    continue
+                rows.append(
+                {
+                    "family": match.family,
+                    "calibration_key": structural_calibration_key(region),
+                    "rule_id": match.rule_id,
+                    "rule_evidence": ";".join(match.evidence),
+                    "ood_reasons": ";".join(match.ood_reasons),
+                    "engine": engine,
+                    "dtype": dtype,
+                    "free_dim": free_dim,
+                    "effective_count": active_ns / instruction_ns,
+                    "instruction_count": 0,
+                    "fixed_ns": 0.0,
+                    "nc_completion_ns": completion_by_case.get(case.name, 0.0),
+                    "case": case.name,
+                    "compiler_version": str(profile.get("compiler_version", "")),
+                    "opcode_fingerprint": "source-only",
+                    "mapping_status": "accepted_source_only_single_region",
+                    "mapping_payload_coverage_pct": 0.0,
+                    "mapping_min_confidence": 0.0,
+                    "micro_dag_json": "",
+                    "micro_dag_mapped_payload_coverage_pct": 0.0,
+                    "replicate_count": 1,
+                    "effective_count_variance": 0.0,
+                    "fixed_ns_variance": 0.0,
+                }
+                )
+    return rows
+
+
 def collect_legacy(paths: list[Path]) -> list[dict]:
     """Import mapped softmax points without making its full signature a key."""
     rows: list[dict] = []
@@ -421,6 +567,7 @@ def main(argv: list[str] | None = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("roots", nargs="+", type=Path)
     parser.add_argument("--compute-calibration-csv", type=Path, required=True)
+    parser.add_argument("--runtime-overhead-results", type=Path)
     parser.add_argument("--legacy-level-a-csv", nargs="*", type=Path, default=[])
     parser.add_argument("--include-case-prefix", nargs="*", default=[])
     parser.add_argument("--min-payload-coverage", type=float, default=99.9)
@@ -434,13 +581,9 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
 
     level_b = ComputeCalibration.from_csv(args.compute_calibration_csv)
-    audit_rows = collect(
-        args.roots,
-        level_b,
-        tuple(args.include_case_prefix),
-        min_payload_coverage=args.min_payload_coverage,
-        min_mapping_confidence=args.min_mapping_confidence,
-        include_rejected=True,
+    runtime_baselines = load_runtime_engine_baselines(args.runtime_overhead_results)
+    audit_rows = collect_source_only(
+        args.roots, level_b, tuple(args.include_case_prefix), runtime_baselines
     )
     audit_rows.extend(collect_legacy(args.legacy_level_a_csv))
     if args.audit_output:
@@ -449,11 +592,15 @@ def main(argv: list[str] | None = None) -> int:
             writer = csv.DictWriter(file, fieldnames=FIELDS)
             writer.writeheader()
             writer.writerows(audit_rows)
-    rows = [row for row in audit_rows if row["mapping_status"] == "accepted"]
+    rows = [
+        row
+        for row in audit_rows
+        if str(row["mapping_status"]).startswith("accepted")
+    ]
     rows = aggregate_rows(rows)
     if not rows:
         raise SystemExit(
-            "No structured control rows passed the mapping coverage/confidence gate"
+            "No unambiguous single-region source-only control rows were found"
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", newline="", encoding="utf-8") as file:

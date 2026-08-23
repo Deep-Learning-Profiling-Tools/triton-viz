@@ -1,0 +1,18 @@
+{
+  "suite": "inf2_tensor_dot_count_low_disjoint_v1",
+  "description": "Low source-Dot-count controls with k disjoint from matmul holdouts.",
+  "warmup": 2,
+  "iters": 20,
+  "benchmarks": [
+    {
+      "name": "tensor_dot_count_low_disjoint",
+      "kind": "tensor_matmul_tiled",
+      "matrix": {
+        "dtype": ["float32", "bfloat16"],
+        "m": [128],
+        "n": [512],
+        "k": [384, 768, 1536, 3072, 6144]
+      }
+    }
+  ]
+}

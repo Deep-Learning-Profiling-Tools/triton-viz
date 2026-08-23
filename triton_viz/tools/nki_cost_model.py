@@ -300,12 +300,27 @@ class StructuralStaticDmaCalibration:
     """Compiler-generated Static DMA busy time keyed by structural grammar."""
 
     points: dict[tuple[str, int, int, int], float]
+    padded_points: dict[tuple[int, int, int], float] = field(default_factory=dict)
 
     @classmethod
     def from_csv(cls, path: str | Path) -> StructuralStaticDmaCalibration:
         samples: dict[tuple[str, int, int, int], list[float]] = {}
+        padded_samples: dict[tuple[int, int, int], list[float]] = {}
         with Path(path).open(encoding="utf-8", newline="") as file:
             for row in csv.DictReader(file):
+                if row.get("calibration_mode") == "padded_partition_shape":
+                    try:
+                        padded_key = (
+                            int(row["element_bytes"]),
+                            int(row["logical_partition_count"]),
+                            int(row["logical_free_dim"]),
+                        )
+                        padded_value = float(row["static_dma_ns"])
+                    except (KeyError, TypeError, ValueError):
+                        continue
+                    if min(padded_key) > 0 and padded_value >= 0:
+                        padded_samples.setdefault(padded_key, []).append(padded_value)
+                    continue
                 try:
                     sequences = {
                         row["structural_rule_sequence"],
@@ -324,9 +339,13 @@ class StructuralStaticDmaCalibration:
         points = {
             key: statistics.median(values) for key, values in samples.items()
         }
-        if not points:
+        padded_points = {
+            key: statistics.median(values)
+            for key, values in padded_samples.items()
+        }
+        if not points and not padded_points:
             raise ValueError(f"No structural Static DMA calibration rows in {path}")
-        return cls(points)
+        return cls(points, padded_points)
 
     def predict_ns(self, events: Iterable[dict[str, Any]]) -> float:
         regions: dict[int, dict[str, Any]] = {}
@@ -358,6 +377,25 @@ class StructuralStaticDmaCalibration:
         partition_count = max(
             int(region.get("partition_count") or 1) for region in regions.values()
         )
+        # PMAX-padded kernels expose their physical 128-row tile and mask in
+        # the source trace.  Recover logical rows from active lanes; this is an
+        # independently calibrated source geometry, not a target case key.
+        if self.padded_points and partition_count == 128 and free_dim > 0:
+            logical_partitions = max(
+                (
+                    int(event.get("active_lanes") or 0) // free_dim
+                    for event in events
+                    if event.get("op") in {"load", "store"}
+                    and int(event.get("active_lanes") or 0) >= free_dim
+                    and int(event.get("active_lanes") or 0) % free_dim == 0
+                ),
+                default=0,
+            )
+            padded = self.padded_points.get(
+                (element_bytes, logical_partitions, free_dim)
+            )
+            if padded is not None:
+                return padded
         candidates = []
         for sequence in (calibration_sequence, rule_sequence):
             candidates = [
@@ -544,6 +582,37 @@ class TensorCalibrationSurface:
         if flops > high:
             return "above_domain"
         return "in_domain"
+
+
+@dataclass
+class TensorDotCountCalibration:
+    """Control-only TensorE surface keyed by source-visible tiled-Dot geometry."""
+
+    points: dict[str, tuple[float, float, float, float, float]]
+
+    @classmethod
+    def from_csv(cls, path: str | Path) -> "TensorDotCountCalibration":
+        points = {}
+        with Path(path).open(encoding="utf-8", newline="") as file:
+            for row in csv.DictReader(file):
+                points[TensorCalibrationSurface._normalize_dtype(row["dtype"])] = (
+                    float(row["startup_ns"]), float(row["dot_ns"]),
+                    float(row.get("lhs_tile_ns") or 0.0),
+                    float(row.get("rhs_tile_ns") or 0.0),
+                    float(row.get("output_tile_ns") or 0.0),
+                )
+        if not points:
+            raise ValueError(f"No source-Dot Tensor calibration rows in {path}")
+        return cls(points)
+
+    def active_ns(self, dtype: str, dot_count: int, lhs_tiles: int = 0,
+                  rhs_tiles: int = 0, output_tiles: int = 0) -> tuple[float, str]:
+        point = self.points.get(TensorCalibrationSurface._normalize_dtype(dtype))
+        if point is None or dot_count <= 0:
+            return 0.0, "missing"
+        startup, dot_ns, lhs_ns, rhs_ns, output_ns = point
+        return (startup + dot_ns * dot_count + lhs_ns * lhs_tiles
+                + rhs_ns * rhs_tiles + output_ns * output_tiles), "source_geometry"
 
 
 @dataclass
@@ -1013,6 +1082,22 @@ class CompositionalLoweringCalibration:
             if count > 0:
                 result[engine] = (count, streams, value("fixed_ns"))
         return result
+
+    def runtime_baseline_ns(
+        self, dtype: str, partition_count: int
+    ) -> dict[str, float]:
+        normalized = ComputeCalibration._norm_dtype(dtype)
+        nearest = min((1, 16, 128), key=lambda value: abs(value - partition_count))
+        feature = f"partition_p{nearest}"
+        return {
+            engine: max(
+                0.0,
+                self.coefficients.get(
+                    (engine, normalized, "runtime_baseline_ns"), {}
+                ).get(feature, 0.0),
+            )
+            for engine in (ENGINE_VECTOR, ENGINE_SCALAR, ENGINE_GPSIMD)
+        }
 
 
 @dataclass
@@ -1591,6 +1676,7 @@ class CostModel:
     runtime_overhead_calibration: RuntimeOverheadCalibration | None = None
     strided_dma_calibration: StridedDmaCalibration | None = None
     tensor_calibration: TensorCalibrationSurface | None = None
+    tensor_dot_count_calibration: TensorDotCountCalibration | None = None
     tensor_instruction_calibration: TensorInstructionCalibration | None = None
     strict_calibration: bool = False
     enable_structured_completion_floor: bool = True
@@ -1731,6 +1817,16 @@ class CostModel:
             flops = event.get("flops") or 0
             instruction_count = float(event.get("tensor_instruction_count") or 0.0)
             dot_count = int(event.get("tensor_dot_count") or 0)
+            source_dot_count = int(event.get("tensor_source_dot_count") or 0)
+            if self.tensor_dot_count_calibration is not None and source_dot_count > 0:
+                total_ns, match = self.tensor_dot_count_calibration.active_ns(
+                    _tensor_dtype(event), source_dot_count,
+                    int(event.get("tensor_source_lhs_tile_count") or 0),
+                    int(event.get("tensor_source_rhs_tile_count") or 0),
+                    int(event.get("tensor_source_output_tile_count") or 0),
+                )
+                event["tensor_dot_count_calibration_match"] = match
+                return total_ns / source_dot_count
             if (
                 self.tensor_instruction_calibration is not None
                 and instruction_count > 0
@@ -2122,12 +2218,19 @@ def _expand_lowering_groups(
         )
         structured = {}
         lowering_free_dim = free_dim
+        region_ir = dict(event["region_ir"]) if event.get("region_ir") else {}
+        if region_ir:
+            compute_region = ComputeRegion.from_event(event)
+            if compute_region is not None:
+                region_ir["partition_count"] = compute_region.partition_count
+                region_ir["logical_free_dim"] = compute_region.logical_free_dim
+                lowering_free_dim = compute_region.logical_free_dim
         if (
             not targets
             and model.compositional_lowering is not None
             and event.get("region_ir")
         ):
-            structured = model.compositional_lowering.predict(event["region_ir"])
+            structured = model.compositional_lowering.predict(region_ir)
             targets = {
                 engine: (value[0], value[1]) for engine, value in structured.items()
             }
@@ -2136,7 +2239,6 @@ def _expand_lowering_groups(
             and model.structured_control_lowering is not None
             and event.get("region_ir")
         ):
-            region_ir = dict(event["region_ir"])
             # Normalize the lowering input through the shared, operator-agnostic
             # schema. This keeps partition/free geometry independent of an
             # operator name or structural calibration key.
@@ -2658,8 +2760,26 @@ def simulate(
                 calibrated_dot_events[0].get("tensor_dot_count") or 0
             )
             calibrated_tensor_active_ns = 0.0
+            source_dot_count = int(
+                calibrated_dot_events[0].get("tensor_source_dot_count") or 0
+            )
+            source_dot_surface_used = False
             if (
-                model.tensor_instruction_calibration is not None
+                model.tensor_dot_count_calibration is not None
+                and source_dot_count == len(calibrated_dot_events)
+            ):
+                calibrated_tensor_active_ns, _match = (
+                    model.tensor_dot_count_calibration.active_ns(
+                        dtype, source_dot_count,
+                        int(calibrated_dot_events[0].get("tensor_source_lhs_tile_count") or 0),
+                        int(calibrated_dot_events[0].get("tensor_source_rhs_tile_count") or 0),
+                        int(calibrated_dot_events[0].get("tensor_source_output_tile_count") or 0),
+                    )
+                )
+                source_dot_surface_used = calibrated_tensor_active_ns > 0
+            if (
+                not source_dot_surface_used
+                and model.tensor_instruction_calibration is not None
                 and static_instruction_count > 0
                 and static_dot_count == len(calibrated_dot_events)
             ):
@@ -2669,7 +2789,7 @@ def simulate(
                     )
                 )
                 tensor_instruction_surface_used = calibrated_tensor_active_ns > 0
-            if tensor_instruction_surface_used:
+            if tensor_instruction_surface_used or source_dot_surface_used:
                 tensor_startup_ns = 0.0
                 # The fitted target is Explorer's whole TensorE active union,
                 # including compiler-created transpose/load-weight work. Once
@@ -2729,6 +2849,10 @@ def simulate(
     readers: dict[int, list[tuple[float, float, float, str, int | None]]] = {}
     timeline: dict[str, list[TimelineEntry]] = {}
     engine_busy: dict[str, float] = {}
+    # Runtime/setup instructions are part of Explorer's engine ACTIVE counters,
+    # but not of the source-mapped payload labels.  Preserve the independently
+    # calibrated contribution so replay can compare like with like.
+    engine_runtime_baseline_ns: dict[str, float] = {}
     dma_surface_matches: Counter[str] = Counter()
     dma_calibration_paths: Counter[str] = Counter()
     dma_surface_max_log_distance = 0.0
@@ -2883,11 +3007,11 @@ def simulate(
             micro_event_end[str(micro_event_id)] = (end, engine)
 
     calibrated_nc_ns = None
+    max_partitions = max(
+        (int(event.get("partition_count") or 1) for event in source_events),
+        default=1,
+    )
     if model.runtime_overhead_calibration is not None:
-        max_partitions = max(
-            (int(event.get("partition_count") or 1) for event in source_events),
-            default=1,
-        )
         max_free_access = max(
             (
                 max(1, pattern.active_access_count // pattern.partition_count)
@@ -2913,6 +3037,25 @@ def simulate(
         )
     else:
         runtime_control_in_domain = None
+    if model.compositional_lowering is not None:
+        value_dtypes = [
+            str(value)
+            for event in source_events
+            for value in (
+                [event.get("output_dtype")]
+                + list(event.get("input_dtypes") or [])
+            )
+            if value and str(value).lower() not in {"bool", "boolean"}
+        ]
+        source_dtype = (
+            Counter(value_dtypes).most_common(1)[0][0]
+            if value_dtypes else "float32"
+        )
+        for engine, baseline_ns in model.compositional_lowering.runtime_baseline_ns(
+            source_dtype, max_partitions
+        ).items():
+            engine_busy[engine] = engine_busy.get(engine, 0.0) + baseline_ns
+            engine_runtime_baseline_ns[engine] = baseline_ns
     compute_critical_ns = max(
         engine_busy.get(ENGINE_VECTOR, 0.0),
         engine_busy.get(ENGINE_SCALAR, 0.0),
@@ -2967,6 +3110,15 @@ def simulate(
                 float(runtime_control_in_domain)
                 if runtime_control_in_domain is not None
                 else -1.0
+            ),
+            "vector_runtime_baseline_ns": engine_runtime_baseline_ns.get(
+                ENGINE_VECTOR, 0.0
+            ),
+            "scalar_runtime_baseline_ns": engine_runtime_baseline_ns.get(
+                ENGINE_SCALAR, 0.0
+            ),
+            "gpsimd_runtime_baseline_ns": engine_runtime_baseline_ns.get(
+                ENGINE_GPSIMD, 0.0
             ),
             "dma_surface_ood_count": float(
                 dma_surface_matches.get("ood_clamped", 0)

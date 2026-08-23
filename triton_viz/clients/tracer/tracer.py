@@ -407,7 +407,11 @@ class Tracer(Client):
                 output_shapes=(output_shape,) if output_shape else (),
                 input_dtypes=input_dtypes,
                 output_dtype=output_dtype,
-                attrs={},
+                attrs={
+                    "compute_mask_provided": bool(
+                        getattr(ret, "_nki_compute_mask_provided", False)
+                    )
+                },
                 input_storages=tuple(_storage(x) for x in inputs),
                 input_ranges=tuple(_range(x) for x in inputs),
                 input_versions=tuple(_version(x) for x in inputs),

@@ -1,0 +1,18 @@
+{
+  "suite": "inf2_tensor_geometry_disjoint_v4",
+  "description": "Second tile-aligned high-geometry TensorE suite for held-suite source-geometry CV.",
+  "warmup": 2,
+  "iters": 20,
+  "benchmarks": [
+    {
+      "name": "tensor_geometry_disjoint_v4",
+      "kind": "tensor_matmul_tiled",
+      "matrix": {
+        "dtype": ["float32", "bfloat16"],
+        "m": [256, 768],
+        "n": [1024],
+        "k": [768, 1536, 3072, 6144]
+      }
+    }
+  ]
+}

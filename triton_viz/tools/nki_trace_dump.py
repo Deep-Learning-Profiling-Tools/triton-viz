@@ -628,6 +628,9 @@ def record_to_event(
             ),
             "input_dtypes": list(record.input_dtypes),
             "output_dtype": record.output_dtype,
+            "compute_mask_provided": bool(
+                record.attrs.get("compute_mask_provided", False)
+            ),
         }
 
     if isinstance(record, TensorTranspose):

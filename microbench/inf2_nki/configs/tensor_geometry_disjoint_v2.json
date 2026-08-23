@@ -1,0 +1,18 @@
+{
+  "suite": "inf2_tensor_geometry_disjoint_v2",
+  "description": "Operator-free TensorE geometry controls disjoint from m=n=512 matmul holdouts.",
+  "warmup": 2,
+  "iters": 20,
+  "benchmarks": [
+    {
+      "name": "tensor_geometry_disjoint_v2",
+      "kind": "tensor_matmul_tiled",
+      "matrix": {
+        "dtype": ["float32", "bfloat16"],
+        "m": [320, 448],
+        "n": [640, 896],
+        "k": [640, 1280, 2560, 5120]
+      }
+    }
+  ]
+}

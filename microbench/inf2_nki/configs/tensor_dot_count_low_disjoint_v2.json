@@ -1,0 +1,18 @@
+{
+  "suite": "inf2_tensor_dot_count_low_disjoint_v2",
+  "description": "Second tile-aligned low-Dot-count suite for independent low-domain CV.",
+  "warmup": 2,
+  "iters": 20,
+  "benchmarks": [
+    {
+      "name": "tensor_dot_count_low_disjoint_v2",
+      "kind": "tensor_matmul_tiled",
+      "matrix": {
+        "dtype": ["float32", "bfloat16"],
+        "m": [256],
+        "n": [512],
+        "k": [384, 768, 1536, 3072, 6144]
+      }
+    }
+  ]
+}

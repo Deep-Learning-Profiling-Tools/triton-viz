@@ -112,6 +112,32 @@ def test_nl_storage_identity_builds_versioned_load_compute_store_chain():
     assert store_timing.start >= compute_timing.end
 
 
+def test_compute_mask_is_preserved_in_source_event():
+    triton_viz.clear()
+
+    @triton_viz.trace(client=Tracer(), frontend="nki")
+    def kernel(x_ptr, out_ptr):
+        offs = nl.arange(8)
+        mask = offs < 6
+        value = nl.load(x_ptr[offs], mask=mask)
+        result = nl.maximum(value, 0.0, mask=mask)
+        nl.store(out_ptr[offs], result, mask=mask)
+
+    x = NDArray(value=np.arange(8, dtype=np.float32))
+    out = NDArray(value=np.empty_like(x.data))
+    kernel[(1,)](x, out)
+
+    compute = next(
+        record for record in launches[-1].records if isinstance(record, NkiCompute)
+    )
+    event = next(
+        event for event in records_to_events(launches[-1].records)
+        if event.get("op") == "compute"
+    )
+    assert compute.attrs["compute_mask_provided"] is True
+    assert event["compute_mask_provided"] is True
+
+
 def test_inplace_assignment_retargets_compute_to_new_tensor_version():
     triton_viz.clear()
 

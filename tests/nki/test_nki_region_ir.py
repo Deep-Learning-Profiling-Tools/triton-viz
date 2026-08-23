@@ -65,6 +65,21 @@ def test_region_ir_encodes_structure_dag_shape_dtype_and_tail():
     assert compositional_features(ir)["rsqrt_newton_interaction"] == 0
 
 
+def test_compositional_features_preserve_logical_partition_under_pmax_padding():
+    region = build_region_ir(
+        [{
+            "op": "compute", "api_op": "multiply", "input_ptrs": [1],
+            "output_ptr": 2, "input_shape": [128, 128],
+            "output_shape": [128, 128], "output_dtype": "bfloat16",
+        }]
+    )
+    region["logical_active_partition_count"] = 1
+    features = compositional_features(region)
+    assert features["partition_p128"] == 1
+    assert features["logical_partition_p1"] == 1
+    assert features["logical_active_partition_count"] == 1
+
+
 def test_region_ir_key_ignores_pointer_values():
     a = [
         {
@@ -79,6 +94,31 @@ def test_region_ir_key_ignores_pointer_values():
     ]
     b = [{**a[0], "input_ptrs": [100, 200], "output_ptr": 300}]
     assert build_region_ir(a)["structural_key"] == build_region_ir(b)["structural_key"]
+
+
+def test_region_ir_exposes_source_only_branch_join_and_liveness_features():
+    def node(op, inputs, output):
+        return {
+            "op": "compute", "api_op": op, "input_ptrs": inputs,
+            "output_ptr": output, "input_shape": [128, 64],
+            "output_shape": [128, 64], "output_dtype": "float32",
+        }
+
+    ir = build_region_ir([
+        node("add", [1], 10),
+        node("multiply", [10], 11),
+        node("subtract", [10], 12),
+        node("add", [11, 12], 13),
+    ])
+    assert ir["dag_branch_value_count"] == 1
+    assert ir["dag_join_node_count"] == 1
+    assert ir["dag_max_fanout"] == 2
+    assert ir["dag_max_fanin"] == 2
+    assert ir["dag_max_live_values"] == 2
+    assert ir["dag_critical_path_length"] == 2
+    features = compositional_features(ir)
+    assert features["dag_branch_value_count"] == 1.0
+    assert features["dag_max_live_values"] == 2.0
 
 
 def test_calibration_key_separates_primitives_with_same_grammar_family():

@@ -1,0 +1,18 @@
+{
+  "suite": "inf2_tensor_geometry_disjoint_v3",
+  "description": "Tile-aligned operator-free TensorE controls, disjoint from m=n=512 matmul holdouts.",
+  "warmup": 2,
+  "iters": 20,
+  "benchmarks": [
+    {
+      "name": "tensor_geometry_disjoint_v3",
+      "kind": "tensor_matmul_tiled",
+      "matrix": {
+        "dtype": ["float32", "bfloat16"],
+        "m": [384, 640],
+        "n": [1536],
+        "k": [768, 1536, 3072, 6144]
+      }
+    }
+  ]
+}

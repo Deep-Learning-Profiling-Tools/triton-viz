@@ -137,6 +137,20 @@ def build_region_ir(
             producer[output] = index
             producer_shapes[output] = _shape(event, "output_shape")
 
+    indegree = Counter(target for _, target in edges)
+    outdegree = Counter(source for source, _ in edges)
+    last_consumer = {
+        source: max(target for edge_source, target in edges if edge_source == source)
+        for source in outdegree
+    }
+    max_live_values = max((
+        sum(source <= index < last for source, last in last_consumer.items())
+        for index in range(len(members))
+    ), default=0)
+    depths = [0] * len(members)
+    for source, target in edges:
+        depths[target] = max(depths[target], depths[source] + 1)
+
     context = context or []
     loads = [event for event in context if event.get("op") == "load"]
     stores = [event for event in context if event.get("op") == "store"]
@@ -149,6 +163,16 @@ def build_region_ir(
         default=free_dim,
     )
     logical_free = min(free_dim, logical_free) if logical_free else free_dim
+    logical_active_partitions = max(
+        (
+            int(event.get("active_lanes", 0)) // max(1, logical_free)
+            for event in loads
+            if int(event.get("active_lanes", 0)) >= logical_free
+            and int(event.get("active_lanes", 0)) % max(1, logical_free) == 0
+        ),
+        default=partition_count,
+    )
+    logical_active_partitions = min(partition_count, logical_active_partitions)
     tail = logical_free < free_dim
     has_explicit_mask = any(
         bool(event.get("mask_provided")) for event in loads + stores
@@ -190,8 +214,12 @@ def build_region_ir(
         "one_input_elementwise_count": one_input,
         "two_input_elementwise_count": two_input,
         "transcendental_count": sum(token in _TRANSCENDENTAL for token in tokens),
+        "compute_mask_count": sum(
+            bool(event.get("compute_mask_provided")) for event in members
+        ),
         "dtype": dtype,
         "partition_count": partition_count,
+        "logical_active_partition_count": logical_active_partitions,
         "free_dim": free_dim,
         "logical_free_dim": logical_free,
         "free_block_count": math.ceil(logical_free / block_elems),
@@ -216,6 +244,12 @@ def build_region_ir(
             for event in loads + stores
         ),
         "dag_edges": edges,
+        "dag_branch_value_count": sum(value > 1 for value in outdegree.values()),
+        "dag_join_node_count": sum(value > 1 for value in indegree.values()),
+        "dag_max_fanout": max(outdegree.values(), default=0),
+        "dag_max_fanin": max(indegree.values(), default=0),
+        "dag_max_live_values": max_live_values,
+        "dag_critical_path_length": max(depths, default=0),
         "has_explicit_mask": has_explicit_mask,
         "has_tail": tail,
     }
@@ -232,8 +266,15 @@ def compositional_features(region: dict[str, Any]) -> dict[str, float]:
         "two_input_elementwise_count",
         "transcendental_count",
         "free_block_count",
+        "dag_branch_value_count",
+        "dag_join_node_count",
+        "dag_max_fanout",
+        "dag_max_fanin",
+        "dag_max_live_values",
+        "dag_critical_path_length",
     ]
     features = {name: float(region.get(name, 0)) for name in names}
+    features["compute_mask_count"] = float(region.get("compute_mask_count", 0))
     features["intercept"] = 1.0
     features["log2_free_dim"] = math.log2(
         max(1, int(region.get("logical_free_dim", 1)))
@@ -241,6 +282,10 @@ def compositional_features(region: dict[str, Any]) -> dict[str, float]:
     features["mask_or_tail"] = float(bool(region.get("has_mask_or_tail")))
     features["two_reduction_interaction"] = float(
         int(region.get("reduction_count", 0)) >= 2
+    )
+    features["two_reduction_interaction_x_free"] = (
+        features["two_reduction_interaction"]
+        * float(max(1, int(region.get("logical_free_dim", 1))))
     )
     features["rsqrt_newton_interaction"] = float(
         region.get("op_histogram", {}).get("rsqrt", 0) > 0
@@ -267,8 +312,276 @@ def compositional_features(region: dict[str, Any]) -> dict[str, float]:
     features["single_elementwise"] = float(
         features["reduction_count"] == 0 and total_elementwise == 1
     )
+    free = float(max(1, int(region.get("logical_free_dim", 1))))
+    features["free_dim_linear"] = free
+    allocation_free = float(max(1, int(region.get("free_dim", free))))
+    features["allocation_free_dim"] = allocation_free
+    features["allocation_to_logical_ratio"] = allocation_free / free
+    features["wide_allocation"] = float(allocation_free >= 8192)
+    features["tile2k_masked"] = float(
+        allocation_free == 2048 and features["mask_or_tail"] > 0
+    )
+    features["two_input_elementwise_count_x_free"] = (
+        features["two_input_elementwise_count"] * free
+    )
+    features["one_input_elementwise_count_x_free"] = (
+        features["one_input_elementwise_count"] * free
+    )
+    features["transcendental_count_x_free"] = (
+        features["transcendental_count"] * free
+    )
+    features["reduction_count_x_free"] = features["reduction_count"] * free
+    features["has_transcendental"] = float(features["transcendental_count"] > 0)
+    features["has_reduction"] = float(features["reduction_count"] > 0)
+    features["arithmetic_only"] = float(
+        features["transcendental_count"] == 0
+        and features["reduction_count"] == 0
+    )
+    primitive_count = (
+        features["one_input_elementwise_count"]
+        + features["two_input_elementwise_count"]
+        + features["reduction_count"]
+    )
+    features["multi_primitive"] = float(primitive_count > 1)
+    features["one_input_arity"] = float(
+        features["one_input_elementwise_count"] > 0
+        and features["two_input_elementwise_count"] == 0
+        and features["reduction_count"] == 0
+    )
+    features["two_input_arity"] = float(
+        features["two_input_elementwise_count"] > 0
+        and features["one_input_elementwise_count"] == 0
+        and features["reduction_count"] == 0
+    )
+    features["free_dim_linear_x_multi"] = free * features["multi_primitive"]
+    features["has_mask_or_tail_feature"] = float(
+        bool(region.get("has_mask_or_tail"))
+    )
+    features["has_compute_mask"] = float(features["compute_mask_count"] > 0)
+    features["compute_mask_count_x_free"] = features["compute_mask_count"] * free
+    features["has_mask_or_tail_feature_x_multi"] = (
+        features["has_mask_or_tail_feature"] * features["multi_primitive"]
+    )
+    for name in (
+        "one_input_elementwise_count",
+        "one_input_elementwise_count_x_free",
+        "two_input_elementwise_count",
+        "two_input_elementwise_count_x_free",
+        "transcendental_count",
+        "transcendental_count_x_free",
+        "reduction_count",
+        "reduction_count_x_free",
+        "has_transcendental",
+        "has_reduction",
+        "arithmetic_only",
+        "two_reduction_interaction",
+        "two_reduction_interaction_x_free",
+    ):
+        features[f"{name}_x_multi"] = features[name] * features["multi_primitive"]
+    partition = int(region.get("partition_count") or 1)
+    nearest_partition = min((1, 16, 128), key=lambda value: abs(value - partition))
+    for value in (1, 16, 128):
+        features[f"partition_p{value}"] = float(nearest_partition == value)
+    logical_partition = int(
+        region.get("logical_active_partition_count") or partition
+    )
+    features["logical_active_partition_count"] = float(logical_partition)
+    features["log2_logical_active_partition_count"] = math.log2(
+        max(1, logical_partition)
+    )
+    nearest_logical_partition = min(
+        (1, 16, 128), key=lambda value: abs(value - logical_partition)
+    )
+    for value in (1, 16, 128):
+        features[f"logical_partition_p{value}"] = float(
+            nearest_logical_partition == value
+        )
+    for name in (
+        "two_input_elementwise_count",
+        "two_input_elementwise_count_x_free",
+        "transcendental_count",
+        "transcendental_count_x_free",
+        "reduction_count",
+        "reduction_count_x_free",
+        "has_transcendental",
+        "has_reduction",
+        "arithmetic_only",
+        "free_dim_linear",
+        "two_reduction_interaction",
+        "two_reduction_interaction_x_free",
+    ):
+        features[f"{name}_x_partition_p128"] = (
+            features[name] * features["partition_p128"]
+        )
+        features[f"{name}_x_partition_p128_x_multi"] = (
+            features[f"{name}_x_partition_p128"] * features["multi_primitive"]
+        )
+    for name in (
+        "two_input_elementwise_count",
+        "one_input_elementwise_count",
+        "transcendental_count",
+        "reduction_count",
+        "has_transcendental",
+        "has_reduction",
+        "arithmetic_only",
+        "two_reduction_interaction",
+    ):
+        features[f"{name}_x_wide_allocation"] = (
+            features[name] * features["wide_allocation"]
+        )
+        features[f"{name}_x_wide_allocation_x_multi"] = (
+            features[f"{name}_x_wide_allocation"] * features["multi_primitive"]
+        )
     for token, count in region.get("op_histogram", {}).items():
         features[f"op_{token}"] = float(count)
+        features[f"op_{token}_x_free"] = float(count) * free
+        features[f"op_{token}_x_multi"] = (
+            float(count) * features["multi_primitive"]
+        )
+        features[f"op_{token}_x_free_x_multi"] = (
+            float(count) * free * features["multi_primitive"]
+        )
+        features[f"op_{token}_x_mask"] = (
+            float(count) * features["has_mask_or_tail_feature"]
+        )
+        features[f"op_{token}_x_free_x_mask"] = (
+            float(count) * free * features["has_mask_or_tail_feature"]
+        )
+        features[f"op_{token}_x_allocation_free"] = float(count) * allocation_free
+        features[f"op_{token}_x_compute_mask"] = (
+            float(count) * features["has_compute_mask"]
+        )
+        features[f"op_{token}_x_free_x_compute_mask"] = (
+            float(count) * free * features["has_compute_mask"]
+        )
+        features[f"op_{token}_x_sqrt_free_x_compute_mask"] = (
+            float(count) * math.sqrt(max(1.0, free)) * features["has_compute_mask"]
+        )
+        features[f"op_{token}_x_log2_free_x_compute_mask"] = (
+            float(count) * math.log2(max(1.0, free)) * features["has_compute_mask"]
+        )
+        features[f"op_{token}_x_wide_allocation"] = (
+            float(count) * features["wide_allocation"]
+        )
+        features[f"op_{token}_x_wide_allocation_x_multi"] = (
+            features[f"op_{token}_x_wide_allocation"]
+            * features["multi_primitive"]
+        )
+        for arity in ("one_input_arity", "two_input_arity"):
+            features[f"op_{token}_x_{arity}"] = float(count) * features[arity]
+            features[f"op_{token}_x_free_x_{arity}"] = (
+                float(count) * free * features[arity]
+            )
+        features[f"op_{token}_x_mask_x_multi"] = (
+            features[f"op_{token}_x_mask"] * features["multi_primitive"]
+        )
+        features[f"op_{token}_x_free_x_mask_x_multi"] = (
+            features[f"op_{token}_x_free_x_mask"] * features["multi_primitive"]
+        )
+    ordered_tokens = list(region.get("tokens", []))
+    features["long_mixed_tile2k_applicable"] = float(
+        features["tile2k_masked"] > 0
+        and features["partition_p128"] > 0
+        and len(ordered_tokens) >= 12
+        and (
+            int(region.get("reduction_count", 0)) > 0
+            or int(region.get("transcendental_count", 0)) > 0
+        )
+    )
+    features["atomic_wide_masked_applicable"] = float(
+        features["partition_p128"] > 0
+        and features["wide_allocation"] > 0
+        and features["has_compute_mask"] > 0
+        and len(ordered_tokens) == 1
+    )
+    if ordered_tokens:
+        first_name = f"first_op_{ordered_tokens[0]}"
+        features[first_name] = 1.0
+        features[f"{first_name}_x_multi"] = features["multi_primitive"]
+        features[f"{first_name}_x_tile2k_masked"] = features["tile2k_masked"]
+        features[f"{first_name}_x_tile2k_masked_x_multi"] = (
+            features["tile2k_masked"] * features["multi_primitive"]
+        )
+    for lhs, rhs in zip(ordered_tokens, ordered_tokens[1:]):
+        name = f"bigram_{lhs}__{rhs}"
+        features[name] = features.get(name, 0.0) + 1.0
+    for first, second, third in zip(
+        ordered_tokens, ordered_tokens[1:], ordered_tokens[2:]
+    ):
+        name = f"trigram_{first}__{second}__{third}"
+        features[name] = features.get(name, 0.0) + 1.0
+    for index, token in enumerate(ordered_tokens[:6]):
+        features[f"prefix_pos{index}_{token}"] = 1.0
+    for index, token in enumerate(ordered_tokens):
+        features[f"absolute_pos{index}_{token}"] = 1.0
+    for index, token in enumerate(reversed(ordered_tokens[-6:]), start=1):
+        features[f"suffix_pos{index}_{token}"] = 1.0
+    if ordered_tokens:
+        runs: list[tuple[str, int]] = []
+        for token in ordered_tokens:
+            if runs and runs[-1][0] == token:
+                runs[-1] = (token, runs[-1][1] + 1)
+            else:
+                runs.append((token, 1))
+        features["token_run_count"] = float(len(runs))
+        features["token_change_count"] = float(max(0, len(runs) - 1))
+        for token in set(ordered_tokens):
+            token_runs = [length for name, length in runs if name == token]
+            features[f"run_count_{token}"] = float(len(token_runs))
+            features[f"max_run_length_{token}"] = float(max(token_runs))
+        special_positions = [
+            index for index, token in enumerate(ordered_tokens)
+            if token in _TRANSCENDENTAL or token in _REDUCTIONS
+        ]
+        if special_positions:
+            first_special, last_special = special_positions[0], special_positions[-1]
+            features["first_special_position"] = float(first_special)
+            features["last_special_position"] = float(last_special)
+            features["special_span"] = float(last_special - first_special)
+            for token in set(ordered_tokens):
+                features[f"before_special_count_{token}"] = float(
+                    ordered_tokens[:first_special].count(token)
+                )
+                features[f"after_special_count_{token}"] = float(
+                    ordered_tokens[last_special + 1:].count(token)
+                )
+        barriers = _TRANSCENDENTAL | _REDUCTIONS
+        segments: list[list[str]] = [[]]
+        for token in ordered_tokens:
+            if token in barriers:
+                segments.append([])
+            else:
+                segments[-1].append(token)
+        nonempty_segments = [segment for segment in segments if segment]
+        features["affine_segment_count"] = float(len(nonempty_segments))
+        features["affine_segment_total_unique_ops"] = float(
+            sum(len(set(segment)) for segment in nonempty_segments)
+        )
+        features["affine_segment_max_length"] = float(
+            max((len(segment) for segment in nonempty_segments), default=0)
+        )
+        features["affine_segment_internal_changes"] = float(sum(
+            sum(lhs != rhs for lhs, rhs in zip(segment, segment[1:]))
+            for segment in nonempty_segments
+        ))
+        for token in set(ordered_tokens) - barriers:
+            features[f"affine_segments_with_{token}"] = float(sum(
+                token in segment for segment in nonempty_segments
+            ))
+        features["affine_segments_with_additive_and_multiply"] = float(sum(
+            "multiply" in segment
+            and ("add" in segment or "subtract" in segment)
+            for segment in nonempty_segments
+        ))
+        for index, segment in enumerate(segments[:5]):
+            features[f"affine_segment{index}_length"] = float(len(segment))
+            features[f"affine_segment{index}_unique_ops"] = float(len(set(segment)))
+    for name in [key for key in features if key.startswith("bigram_")]:
+        features[f"{name}_x_multi"] = features[name] * features["multi_primitive"]
+        features[f"{name}_x_tile2k_masked"] = features[name] * features["tile2k_masked"]
+        features[f"{name}_x_tile2k_masked_x_multi"] = (
+            features[name] * features["tile2k_masked"] * features["multi_primitive"]
+        )
     return features
 
 
