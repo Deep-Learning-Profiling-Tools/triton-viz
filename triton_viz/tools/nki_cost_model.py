@@ -1115,12 +1115,16 @@ class StructuredControlCalibration:
     completion_rule_points: dict[
         tuple[str, bool, str], list[tuple[int, float, str]]
     ] = field(default_factory=dict)
+    completion_semantic_points: dict[
+        tuple[str, str, str], list[tuple[int, float, str]]
+    ] = field(default_factory=dict)
 
     @classmethod
     def from_csv(cls, path: str | Path) -> StructuredControlCalibration:
         points = {}
         completion_points = {}
         completion_rule_points = {}
+        completion_semantic_points = {}
         micro_dags = {}
         opcode_timing_samples: dict[
             tuple[str, str, str, int, str], list[float]
@@ -1149,6 +1153,19 @@ class StructuredControlCalibration:
                     masked = "|mask=1|" in key[0]
                     completion_rule_points.setdefault(
                         (rule_id, masked, key[2]), []
+                    ).append(
+                        (int(row["free_dim"]), completion_ns, key[0])
+                    )
+                    ops = next(
+                        (
+                            part.removeprefix("ops=")
+                            for part in key[0].split("|")
+                            if part.startswith("ops=")
+                        ),
+                        "",
+                    )
+                    completion_semantic_points.setdefault(
+                        (rule_id, ops, key[2]), []
                     ).append(
                         (int(row["free_dim"]), completion_ns, key[0])
                     )
@@ -1200,6 +1217,7 @@ class StructuredControlCalibration:
             micro_dags,
             opcode_timing_points,
             completion_rule_points,
+            completion_semantic_points,
         )
 
     def micro_dag_lookup(
@@ -1285,6 +1303,28 @@ class StructuredControlCalibration:
         match = "exact"
         if not rows:
             rule_id = calibration_key.split("|", 1)[0]
+            ops = next(
+                (
+                    part.removeprefix("ops=")
+                    for part in calibration_key.split("|")
+                    if part.startswith("ops=")
+                ),
+                "",
+            )
+            semantic_rows = self.completion_semantic_points.get(
+                (rule_id, ops, key[1]), []
+            )
+            rows = sorted(
+                {
+                    (free_dim, completion_ns)
+                    for free_dim, completion_ns, source_key in semantic_rows
+                    if source_key not in (excluded_calibration_keys or set())
+                    and free_dim not in excluded_free_dims
+                }
+            )
+            if rows:
+                match = "semantic_fallback"
+        if not rows:
             masked = "|mask=1|" in calibration_key
             rule_rows = self.completion_rule_points.get(
                 (rule_id, masked, key[1]), []
@@ -1314,7 +1354,7 @@ class StructuredControlCalibration:
             math.log2(upper[0]) - math.log2(lower[0])
         )
         value = lower[1] + weight * (upper[1] - lower[1])
-        return value, match if match == "rule_fallback" else "interpolated"
+        return value, match if match.endswith("_fallback") else "interpolated"
 
     def predict_completion_ns(self, region_ir: dict[str, Any]) -> float:
         """Backward-compatible numeric completion-floor lookup."""
@@ -3133,6 +3173,9 @@ def simulate(
             ),
             "completion_rule_fallback_count": float(
                 completion_matches.get("rule_fallback", 0)
+            ),
+            "completion_semantic_fallback_count": float(
+                completion_matches.get("semantic_fallback", 0)
             ),
             "completion_ood_count": float(completion_matches.get("ood", 0)),
             "completion_excluded_grammar_count": float(

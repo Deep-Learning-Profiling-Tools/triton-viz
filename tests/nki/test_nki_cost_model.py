@@ -799,6 +799,31 @@ def test_completion_lookup_uses_explicit_source_rule_fallback():
     assert calibration.completion_lookup(region) == (44_000, "rule_fallback")
 
 
+def test_completion_lookup_prefers_same_ops_across_mask_context():
+    region = {
+        "dtype": "float32",
+        "logical_free_dim": 512,
+        "partition_count": 128,
+        "reduction_count": 2,
+        "has_mask_or_tail": True,
+        "op_histogram": {"max": 1, "exp": 1, "reduce_sum": 1},
+    }
+    key = structural_calibration_key(region)
+    rule_id = key.split("|", 1)[0]
+    ops = next(part[4:] for part in key.split("|") if part.startswith("ops="))
+    calibration = StructuredControlCalibration(
+        points={},
+        completion_points={},
+        completion_semantic_points={
+            (rule_id, ops, "float32"): [(512, 13_000, "unmasked-control")]
+        },
+        completion_rule_points={
+            (rule_id, True, "float32"): [(512, 30_000, "other-ops-control")]
+        },
+    )
+    assert calibration.completion_lookup(region) == (13_000, "semantic_fallback")
+
+
 def test_exact_micro_dag_uses_flow_predecessors_and_calibrated_engine_work():
     region = {
         "dtype": "float32",

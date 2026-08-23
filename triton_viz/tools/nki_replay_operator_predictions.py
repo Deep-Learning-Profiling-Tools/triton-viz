@@ -100,6 +100,7 @@ FIELDS = [
     "completion_exact_count",
     "completion_interpolated_count",
     "completion_rule_fallback_count",
+    "completion_semantic_fallback_count",
     "completion_ood_count",
     "completion_excluded_partition_count",
     "completion_floor_activated",
@@ -590,6 +591,9 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "completion_rule_fallback_count": int(
                     components.get("completion_rule_fallback_count", 0)
+                ),
+                "completion_semantic_fallback_count": int(
+                    components.get("completion_semantic_fallback_count", 0)
                 ),
                 "completion_ood_count": int(
                     components.get("completion_ood_count", 0)
