@@ -85,6 +85,10 @@ FIELDS = [
     "hardware_static_dma_us",
     "static_dma_error_pct",
     "static_dma_packet_match",
+    "structural_static_dma_padded_exact_count",
+    "structural_static_dma_structural_key_count",
+    "structural_static_dma_rule_sequence_count",
+    "structural_static_dma_none_count",
     "hardware_total_dma_us",
     "dma_error_pct",
     "calibration_match",
@@ -610,6 +614,19 @@ def main(argv: list[str] | None = None) -> int:
                 "completion_floor_activated": int(
                     components.get("structured_completion_floor_activated", 0)
                 ),
+                **{
+                    f"structural_static_dma_{match}_count": int(
+                        components.get(
+                            f"structural_static_dma_{match}_count", 0
+                        )
+                    )
+                    for match in (
+                        "padded_exact",
+                        "structural_key",
+                        "rule_sequence",
+                        "none",
+                    )
+                },
                 **{
                     f"level_a_{match}_count": int(
                         components.get(f"level_a_{match}_count", 0)

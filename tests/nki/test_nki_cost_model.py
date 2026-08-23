@@ -517,6 +517,9 @@ def test_structural_static_dma_uses_source_visible_padded_geometry(tmp_path):
         },
     ]
     assert calibration.predict_ns(events) == pytest.approx(321.5)
+    value, match = calibration.predict_ns_with_provenance(events)
+    assert value == pytest.approx(321.5)
+    assert match == "padded_exact"
 
 
 def test_disjoint_ranges_same_base_run_in_parallel():

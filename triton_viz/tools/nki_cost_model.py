@@ -347,7 +347,10 @@ class StructuralStaticDmaCalibration:
             raise ValueError(f"No structural Static DMA calibration rows in {path}")
         return cls(points, padded_points)
 
-    def predict_ns(self, events: Iterable[dict[str, Any]]) -> float:
+    def predict_ns_with_provenance(
+        self, events: Iterable[dict[str, Any]]
+    ) -> tuple[float, str]:
+        """Predict Static-DMA time and expose the source-only lookup path."""
         regions: dict[int, dict[str, Any]] = {}
         element_bytes = 0
         for event in events:
@@ -359,7 +362,7 @@ class StructuralStaticDmaCalibration:
                 if lanes > 0 and nbytes > 0 and nbytes % lanes == 0:
                     element_bytes = nbytes // lanes
         if not regions or element_bytes <= 0:
-            return 0.0
+            return 0.0, "none"
         from triton_viz.tools.nki_region_ir import (
             match_structural_family,
             structural_calibration_key,
@@ -395,9 +398,13 @@ class StructuralStaticDmaCalibration:
                 (element_bytes, logical_partitions, free_dim)
             )
             if padded is not None:
-                return padded
+                return padded, "padded_exact"
         candidates = []
-        for sequence in (calibration_sequence, rule_sequence):
+        match = "none"
+        for sequence, candidate_match in (
+            (calibration_sequence, "structural_key"),
+            (rule_sequence, "rule_sequence"),
+        ):
             candidates = [
                 (point_free_dim, value)
                 for (
@@ -410,13 +417,19 @@ class StructuralStaticDmaCalibration:
                 and point_partitions in {0, partition_count}
             ]
             if candidates:
+                match = candidate_match
                 break
         if not candidates or free_dim <= 0:
-            return 0.0
-        return min(
+            return 0.0, "none"
+        value = min(
             candidates,
             key=lambda item: abs(math.log2(item[0]) - math.log2(free_dim)),
         )[1]
+        return value, match
+
+    def predict_ns(self, events: Iterable[dict[str, Any]]) -> float:
+        """Backward-compatible numeric Static-DMA lookup."""
+        return self.predict_ns_with_provenance(events)[0]
 
 
 @dataclass
@@ -2726,10 +2739,10 @@ def simulate(
     """
     model = cost_model or CostModel()
     source_events = list(events)
-    structural_static_ns = (
-        model.structural_static_dma.predict_ns(source_events)
+    structural_static_ns, structural_static_match = (
+        model.structural_static_dma.predict_ns_with_provenance(source_events)
         if model.structural_static_dma is not None
-        else 0.0
+        else (0.0, "none")
     )
     completion_lookups = (
         [
@@ -3302,6 +3315,17 @@ def simulate(
                 micro_dag_timing_matches.get("aggregate_calibration", 0)
             ),
             "static_dma_dependency_unknown": float(structural_static_ns > 0),
+            **{
+                f"structural_static_dma_{match}_count": float(
+                    structural_static_match == match
+                )
+                for match in (
+                    "padded_exact",
+                    "structural_key",
+                    "rule_sequence",
+                    "none",
+                )
+            },
             "final": final_ns,
         },
     )
