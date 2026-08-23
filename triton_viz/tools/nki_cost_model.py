@@ -1112,11 +1112,15 @@ class StructuredControlCalibration:
     opcode_timing_points: dict[
         tuple[str, str, str], list[tuple[int, float]]
     ] = field(default_factory=dict)
+    completion_rule_points: dict[
+        tuple[str, bool, str], list[tuple[int, float, str]]
+    ] = field(default_factory=dict)
 
     @classmethod
     def from_csv(cls, path: str | Path) -> StructuredControlCalibration:
         points = {}
         completion_points = {}
+        completion_rule_points = {}
         micro_dags = {}
         opcode_timing_samples: dict[
             tuple[str, str, str, int, str], list[float]
@@ -1140,6 +1144,13 @@ class StructuredControlCalibration:
                 if completion_ns > 0:
                     completion_points.setdefault((key[0], key[2]), []).append(
                         (int(row["free_dim"]), completion_ns)
+                    )
+                    rule_id = key[0].split("|", 1)[0]
+                    masked = "|mask=1|" in key[0]
+                    completion_rule_points.setdefault(
+                        (rule_id, masked, key[2]), []
+                    ).append(
+                        (int(row["free_dim"]), completion_ns, key[0])
                     )
                 raw_dag = row.get("micro_dag_json") or ""
                 if raw_dag:
@@ -1184,7 +1195,11 @@ class StructuredControlCalibration:
                 (engine, dtype, opcode), []
             ).append((free_dim, statistics.median(values)))
         return cls(
-            points, completion_points, micro_dags, opcode_timing_points
+            points,
+            completion_points,
+            micro_dags,
+            opcode_timing_points,
+            completion_rule_points,
         )
 
     def micro_dag_lookup(
@@ -1267,12 +1282,28 @@ class StructuredControlCalibration:
                 if int(row[0]) not in excluded_free_dims
             }
         )
+        match = "exact"
         if not rows:
-            return 0.0, "ood"
+            rule_id = calibration_key.split("|", 1)[0]
+            masked = "|mask=1|" in calibration_key
+            rule_rows = self.completion_rule_points.get(
+                (rule_id, masked, key[1]), []
+            )
+            rows = sorted(
+                {
+                    (free_dim, completion_ns)
+                    for free_dim, completion_ns, source_key in rule_rows
+                    if source_key not in (excluded_calibration_keys or set())
+                    and free_dim not in excluded_free_dims
+                }
+            )
+            if not rows:
+                return 0.0, "ood"
+            match = "rule_fallback"
         free = int(region_ir.get("logical_free_dim") or region_ir.get("free_dim") or 1)
         exact = [row for row in rows if row[0] == free]
         if exact:
-            return statistics.median(row[1] for row in exact), "exact"
+            return statistics.median(row[1] for row in exact), match
         if free < rows[0][0] or free > rows[-1][0]:
             return 0.0, "ood"
         lower = max((row for row in rows if row[0] <= free), default=rows[0])
@@ -1282,7 +1313,8 @@ class StructuredControlCalibration:
         weight = (math.log2(free) - math.log2(lower[0])) / (
             math.log2(upper[0]) - math.log2(lower[0])
         )
-        return lower[1] + weight * (upper[1] - lower[1]), "interpolated"
+        value = lower[1] + weight * (upper[1] - lower[1])
+        return value, match if match == "rule_fallback" else "interpolated"
 
     def predict_completion_ns(self, region_ir: dict[str, Any]) -> float:
         """Backward-compatible numeric completion-floor lookup."""
@@ -3098,6 +3130,9 @@ def simulate(
             ),
             "completion_interpolated_count": float(
                 completion_matches.get("interpolated", 0)
+            ),
+            "completion_rule_fallback_count": float(
+                completion_matches.get("rule_fallback", 0)
             ),
             "completion_ood_count": float(completion_matches.get("ood", 0)),
             "completion_excluded_grammar_count": float(

@@ -772,6 +772,33 @@ def test_completion_lookup_reports_exact_ood_and_exclusions():
     ) == (0.0, "excluded_grammar")
 
 
+def test_completion_lookup_uses_explicit_source_rule_fallback():
+    region = {
+        "dtype": "float32",
+        "logical_free_dim": 512,
+        "partition_count": 128,
+        "reduction_count": 2,
+        "rsqrt_count": 1,
+        "has_mask_or_tail": True,
+        "op_histogram": {"reduce_sum": 2, "rsqrt": 1, "multiply": 9},
+    }
+    key = structural_calibration_key(region)
+    rule_key = (key.split("|", 1)[0], True, "float32")
+    source_key = key.replace("multiply:9", "multiply:10")
+    calibration = StructuredControlCalibration(
+        points={},
+        completion_points={},
+        completion_rule_points={
+            rule_key: [
+                (128, 42_000, source_key),
+                (512, 44_000, source_key),
+                (2048, 45_000, source_key),
+            ]
+        },
+    )
+    assert calibration.completion_lookup(region) == (44_000, "rule_fallback")
+
+
 def test_exact_micro_dag_uses_flow_predecessors_and_calibrated_engine_work():
     region = {
         "dtype": "float32",
