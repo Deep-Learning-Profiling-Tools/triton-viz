@@ -104,6 +104,12 @@ FIELDS = [
     "completion_ood_count",
     "completion_excluded_partition_count",
     "completion_floor_activated",
+    "level_a_exact_key_count",
+    "level_a_legacy_family_count",
+    "level_a_family_prefix_count",
+    "level_a_compositional_count",
+    "level_a_signature_count",
+    "level_a_none_count",
     "micro_dag_vector_covered",
     "micro_dag_scalar_covered",
     "micro_dag_gpsimd_covered",
@@ -604,6 +610,19 @@ def main(argv: list[str] | None = None) -> int:
                 "completion_floor_activated": int(
                     components.get("structured_completion_floor_activated", 0)
                 ),
+                **{
+                    f"level_a_{match}_count": int(
+                        components.get(f"level_a_{match}_count", 0)
+                    )
+                    for match in (
+                        "exact_key",
+                        "legacy_family",
+                        "family_prefix",
+                        "compositional",
+                        "signature",
+                        "none",
+                    )
+                },
                 "micro_dag_vector_covered": int(
                     components.get("micro_dag_vector_covered", 0)
                 ),

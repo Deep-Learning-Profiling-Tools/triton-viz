@@ -1364,6 +1364,12 @@ class StructuredControlCalibration:
         self, region_ir: dict[str, Any]
     ) -> dict[str, tuple[float, int, float]]:
         """Return effective count, real ISA count and fixed time per engine."""
+        return self.predict_points_with_provenance(region_ir)[0]
+
+    def predict_points_with_provenance(
+        self, region_ir: dict[str, Any]
+    ) -> tuple[dict[str, tuple[float, int, float]], dict[str, str]]:
+        """Return Level-A points and the source-only lookup path per engine."""
         from triton_viz.tools.nki_region_ir import (
             structural_calibration_key,
             structural_family,
@@ -1379,16 +1385,21 @@ class StructuredControlCalibration:
         # 16K backing tile even for 128 active columns).
         free = int(region_ir.get("logical_free_dim") or region_ir.get("free_dim") or 1)
         result = {}
+        provenance = {}
         for engine, streams in (("vector", 2), ("scalar", 1)):
             rows = sorted(self.points.get((calibration_key, engine, dtype), []))
+            match = "exact_key" if rows else "none"
             # Backward compatibility for pre-key tables. New tables must not
             # silently cross primitive-specific instruction-selection paths.
             if not rows and (family, engine, dtype) in self.points:
                 rows = sorted(self.points[(family, engine, dtype)])
+                match = "legacy_family"
             if not rows and "__" in family:
                 rows = sorted(
                     self.points.get((family.split("__", 1)[0], engine, dtype), [])
                 )
+                if rows:
+                    match = "family_prefix"
             if not rows:
                 continue
             exact = [row for row in rows if row[0] == free]
@@ -1424,7 +1435,8 @@ class StructuredControlCalibration:
                     )
             if row[1] > 0:
                 result[engine] = (row[1], row[2], row[3])
-        return result
+                provenance[engine] = match
+        return result, provenance
 
     def predict(self, region_ir: dict[str, Any]) -> dict[str, tuple[float, int, float]]:
         points = self.predict_points(region_ir)
@@ -2330,7 +2342,15 @@ def _expand_lowering_groups(
                 ]
                 if value_dtypes:
                     region_ir["dtype"] = Counter(value_dtypes).most_common(1)[0][0]
-            structured = model.structured_control_lowering.predict(region_ir)
+            points, structured_provenance = (
+                model.structured_control_lowering.predict_points_with_provenance(
+                    region_ir
+                )
+            )
+            structured = {
+                engine: (value[0], 2 if engine == "vector" else 1, value[2])
+                for engine, value in points.items()
+            }
             lowering_free_dim = int(
                 region_ir.get("logical_free_dim")
                 or region_ir.get("free_dim")
@@ -2339,9 +2359,12 @@ def _expand_lowering_groups(
             targets = {
                 engine: (value[0], value[1]) for engine, value in structured.items()
             }
+        else:
+            structured_provenance = {}
         if not targets:
             for member in members:
                 retained = dict(member)
+                retained["level_a_match"] = "none"
                 retained["micro_dag_match"] = "missing"
                 retained["micro_dag_region"] = str(
                     member.get("source_region_id") or group
@@ -2546,6 +2569,9 @@ def _expand_lowering_groups(
                         "micro_event_id": node_id,
                         "micro_event_predecessors": predecessors[node_id],
                         "micro_dag_match": "exact",
+                        "level_a_match": structured_provenance.get(
+                            engine, "structured"
+                        ),
                         "micro_dag_region": str(
                             event.get("source_region_id") or group
                         ),
@@ -2628,6 +2654,15 @@ def _expand_lowering_groups(
                         )
                     ),
                     "lowered_from_signature": signature,
+                    "level_a_match": (
+                        structured_provenance.get(engine, "structured")
+                        if model.structured_control_lowering is not None
+                        else (
+                            "compositional"
+                            if model.compositional_lowering is not None
+                            else "signature"
+                        )
+                    ),
                     "micro_dag_match": dag_match,
                     "micro_dag_region": str(
                         event.get("source_region_id") or group
@@ -2761,6 +2796,19 @@ def simulate(
         if strided_static_dma_ns > 0:
             structural_static_ns = max(structural_static_ns, strided_static_dma_ns)
     events = _expand_lowering_groups(source_events, model)
+    level_a_matches = Counter(
+        match
+        for _region, _engine, match in {
+            (
+                str(event.get("micro_dag_region") or event.get("source_region_id") or event.get("fusion_group")),
+                str(event.get("engine") or ""),
+                str(event.get("level_a_match")),
+            )
+            for event in events
+            if event.get("level_a_match")
+            and event.get("api_op") != "lowered_micro_publish"
+        }
+    )
     if structural_static_ns > 0:
         events.append(
             {
@@ -3177,6 +3225,17 @@ def simulate(
             "completion_semantic_fallback_count": float(
                 completion_matches.get("semantic_fallback", 0)
             ),
+            **{
+                f"level_a_{match}_count": float(level_a_matches.get(match, 0))
+                for match in (
+                    "exact_key",
+                    "legacy_family",
+                    "family_prefix",
+                    "compositional",
+                    "signature",
+                    "none",
+                )
+            },
             "completion_ood_count": float(completion_matches.get("ood", 0)),
             "completion_excluded_grammar_count": float(
                 completion_matches.get("excluded_grammar", 0)

@@ -417,6 +417,7 @@ def fit(root: Path, dry_run: bool) -> None:
             ],
             source_manifests=source_manifests,
             split_file=FORMAL_SPLITS,
+            payload_definition="raw_engine_active_no_runtime_baseline",
         )
 
 

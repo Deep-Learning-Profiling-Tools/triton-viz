@@ -890,6 +890,7 @@ def test_exact_micro_dag_uses_flow_predecessors_and_calibrated_engine_work():
     )
     assert len(result.timeline["vector"]) >= 1
     assert len(result.timeline["scalar"]) == 1
+    assert result.components_ns["level_a_exact_key_count"] == 2
     assert result.timeline["scalar"][0].start >= result.timeline["vector"][0].end
     assert result.components_ns["micro_dag_vector_covered"] == 1
     assert result.components_ns["micro_dag_scalar_covered"] == 1

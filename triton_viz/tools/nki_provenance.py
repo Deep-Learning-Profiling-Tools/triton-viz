@@ -251,6 +251,7 @@ def write_model_manifest(
     calibration_files: list[Path],
     source_manifests: list[Path],
     split_file: Path | None = None,
+    payload_definition: str = "unspecified",
 ) -> Path:
     """Create a frozen calibration bundle manifest with strict provenance."""
     fingerprints = []
@@ -301,6 +302,7 @@ def write_model_manifest(
         # Compatibility alias for v1 readers.
         "compiler_fingerprint": reference,
         "region_ir_schema_version": REGION_IR_SCHEMA_VERSION,
+        "engine_payload_definition": payload_definition,
         "calibration_files": files,
         "source_manifests": sources,
     }

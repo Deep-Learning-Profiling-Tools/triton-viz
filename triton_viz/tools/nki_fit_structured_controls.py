@@ -416,9 +416,47 @@ def collect_source_only(
         }
         if not regions:
             continue
+        profile = next(iter(_load_json(summary_path).values()), {})
+        completion_ns = completion_by_case.get(case.name, 0.0)
+        if completion_ns > 0:
+            for region in regions.values():
+                if int(region.get("reduction_count") or 0) <= 0:
+                    continue
+                match = match_structural_family(region)
+                rows.append(
+                    {
+                        "family": match.family,
+                        "calibration_key": structural_calibration_key(region),
+                        "rule_id": match.rule_id,
+                        "rule_evidence": ";".join(match.evidence),
+                        "ood_reasons": ";".join(match.ood_reasons),
+                        "engine": "completion",
+                        "dtype": str(region["dtype"]),
+                        "free_dim": int(
+                            region.get("logical_free_dim") or region["free_dim"]
+                        ),
+                        "effective_count": 0.0,
+                        "instruction_count": 0,
+                        "fixed_ns": 0.0,
+                        "nc_completion_ns": completion_ns,
+                        "case": case.name,
+                        "compiler_version": str(profile.get("compiler_version", "")),
+                        "opcode_fingerprint": "source-only",
+                        "mapping_status": "accepted_source_only_completion",
+                        "mapping_payload_coverage_pct": 0.0,
+                        "mapping_min_confidence": 0.0,
+                        "micro_dag_json": "",
+                        "micro_dag_mapped_payload_coverage_pct": 0.0,
+                        "replicate_count": 1,
+                        "effective_count_variance": 0.0,
+                        "fixed_ns_variance": 0.0,
+                    }
+                )
+        # Kernel-level engine ACTIVE cannot be assigned to multiple regions
+        # without a separately audited deconvolution model. Completion is a
+        # whole-kernel floor and was safely exported above.
         if len(regions) != 1:
             continue
-        profile = next(iter(_load_json(summary_path).values()), {})
         for group, region in regions.items():
             match = match_structural_family(region)
             free_dim = int(region.get("logical_free_dim") or region["free_dim"])
@@ -455,7 +493,7 @@ def collect_source_only(
                     "effective_count": active_ns / instruction_ns,
                     "instruction_count": 0,
                     "fixed_ns": 0.0,
-                    "nc_completion_ns": completion_by_case.get(case.name, 0.0),
+                    "nc_completion_ns": 0.0,
                     "case": case.name,
                     "compiler_version": str(profile.get("compiler_version", "")),
                     "opcode_fingerprint": "source-only",
