@@ -229,6 +229,29 @@ def _micro_dag(
     )
 
 
+def _load_completion_by_case(roots: list[Path]) -> dict[str, float]:
+    """Load NeuronCore completion labels from both control result schemas."""
+    result: dict[str, float] = {}
+    for root in roots:
+        for filename in ("control_results.csv", "operator_results.csv"):
+            results_path = root / filename
+            if not results_path.is_file():
+                continue
+            with results_path.open(encoding="utf-8", newline="") as file:
+                for row in csv.DictReader(file):
+                    completion = row.get("hardware_nc_p50_us")
+                    if not completion:
+                        continue
+                    case = row.get("case")
+                    if not case and filename == "operator_results.csv":
+                        required = ("op", "rows", "cols", "dtype")
+                        if all(row.get(field) for field in required):
+                            case = "{op}__r{rows}__c{cols}__{dtype}".format(**row)
+                    if case:
+                        result[case] = float(completion) * 1000.0
+    return result
+
+
 def collect(
     roots: list[Path],
     level_b: ComputeCalibration,
@@ -240,18 +263,7 @@ def collect(
 ) -> list[dict]:
     """Collect audited Level-A points; incomplete cases remain excluded explicitly."""
     rows: list[dict] = []
-    completion_by_case = {}
-    for root in roots:
-        results_path = root / "control_results.csv"
-        if results_path.is_file():
-            with results_path.open(encoding="utf-8", newline="") as file:
-                completion_by_case.update(
-                    {
-                        row["case"]: float(row["hardware_nc_p50_us"]) * 1000.0
-                        for row in csv.DictReader(file)
-                        if row.get("case") and row.get("hardware_nc_p50_us")
-                    }
-                )
+    completion_by_case = _load_completion_by_case(roots)
     traces = sorted(trace for root in roots for trace in root.glob("*/trace.jsonl"))
     for trace in traces:
         case = trace.parent
@@ -378,17 +390,7 @@ def collect_source_only(
     of source primitives in each region.  No compiler instruction, Flow, or
     target timing metadata participates in the allocation.
     """
-    completion_by_case: dict[str, float] = {}
-    for root in roots:
-        results_path = root / "control_results.csv"
-        if not results_path.is_file():
-            continue
-        with results_path.open(encoding="utf-8", newline="") as file:
-            for row in csv.DictReader(file):
-                if row.get("case") and row.get("hardware_nc_p50_us"):
-                    completion_by_case[row["case"]] = (
-                        float(row["hardware_nc_p50_us"]) * 1000.0
-                    )
+    completion_by_case = _load_completion_by_case(roots)
 
     rows: list[dict] = []
     for declared_trace in sorted(
