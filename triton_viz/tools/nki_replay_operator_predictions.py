@@ -17,6 +17,7 @@ from triton_viz.tools.nki_cost_model import (
     StructuralStaticDmaCalibration,
     StridedDmaCalibration,
     StructuredControlCalibration,
+    WholeProgramRoutingCalibration,
     TensorCalibrationSurface,
     TensorDotCountCalibration,
     _canonical_engine,
@@ -50,6 +51,7 @@ FIELDS = [
     "predicted_compute_only_us",
     "predicted_compute_dma_us",
     "predicted_resource_overlap_us",
+    "whole_program_routing_covered",
     "predicted_without_completion_floor_us",
     "compute_only_error_pct",
     "compute_dma_error_pct",
@@ -73,6 +75,7 @@ FIELDS = [
     "scalar_payload_error_pct",
     "scalar_error_pct",
     "hardware_gpsimd_active_us",
+    "hardware_gpsimd_reference",
     "hardware_gpsimd_payload_us",
     "hardware_gpsimd_payload_reference",
     "gpsimd_payload_evaluable",
@@ -139,6 +142,7 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--dma-transpose-surface-csv", type=Path)
     parser.add_argument("--compute-calibration-csv", type=Path, required=True)
     parser.add_argument("--structured-control-csv", type=Path, required=True)
+    parser.add_argument("--whole-program-control-root", type=Path)
     parser.add_argument("--compositional-lowering-csv", type=Path)
     parser.add_argument("--trace-filename", default="trace.jsonl")
     parser.add_argument("--tensor-calibration-csv", type=Path)
@@ -148,6 +152,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--runtime-overhead-csv", type=Path)
     parser.add_argument("--strided-dma-csv", type=Path)
     parser.add_argument("--strict-calibration", action="store_true")
+    parser.add_argument(
+        "--target-aggregate-labels-only",
+        action="store_true",
+        help="Do not open target hardware summaries; score only saved aggregate CSV labels.",
+    )
+    parser.add_argument(
+        "--gpsimd-reference-csv",
+        type=Path,
+        action="append",
+        default=[],
+        help="Saved aggregate-only GpSimd labels; repeated cases use their median.",
+    )
     parser.add_argument(
         "--disable-structured-completion-floor",
         action="store_true",
@@ -175,6 +191,15 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
+    gpsimd_references: dict[str, list[float]] = {}
+    for reference_path in args.gpsimd_reference_csv:
+        with reference_path.open(encoding="utf-8", newline="") as file:
+            for reference_row in csv.DictReader(file):
+                value = reference_row.get("hardware_gpsimd_active_us")
+                if value not in (None, ""):
+                    gpsimd_references.setdefault(reference_row["case"], []).append(
+                        float(value)
+                    )
     source_rows = list(csv.DictReader((args.root / "operator_results.csv").open()))
     out = []
     models: dict[str, CostModel] = {}
@@ -224,6 +249,12 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 structured_control_lowering=StructuredControlCalibration.from_csv(
                     args.structured_control_csv
+                ),
+                whole_program_routing=(
+                    WholeProgramRoutingCalibration.from_control_root(
+                        args.whole_program_control_root
+                    )
+                    if args.whole_program_control_root else None
                 ),
                 tensor_calibration=(
                     TensorCalibrationSurface.from_csv(
@@ -296,7 +327,12 @@ def main(argv: list[str] | None = None) -> int:
         static_matmul_count = 0
         tensor_instruction_match = "not_applicable"
         model_events, cse = eliminate_redundant_hbm_loads(events)
-        result = simulate(model_events, models[dtype])
+        result = simulate(
+            model_events,
+            models[dtype],
+            routing_source_events=events,
+            routing_dtype=dtype,
+        )
         gpsimd_static_opcode_match = "disabled"
         static_dma_packet_match = "disabled"
         # Audit the lowered compute events that CostModel actually prices.
@@ -372,12 +408,21 @@ def main(argv: list[str] | None = None) -> int:
         hardware_scalar_us = float(source.get("hardware_scalar_active_us") or 0.0)
         summary_path = args.root / case_name / "hardware/explorer_summary.json"
         profile = {}
-        if summary_path.is_file():
+        if not args.target_aggregate_labels_only and summary_path.is_file():
             summary = json.loads(summary_path.read_text(encoding="utf-8"))
             profile = next(iter(summary.values()), {})
-        hardware_gpsimd_us = float(
-            profile.get("gpsimd_engine_active_time") or 0.0
-        ) * 1e6
+        if case_name in gpsimd_references:
+            hardware_gpsimd_us = statistics.median(gpsimd_references[case_name])
+            hardware_gpsimd_reference = (
+                f"median_of_{len(gpsimd_references[case_name])}_saved_aggregate_labels"
+            )
+        else:
+            hardware_gpsimd_us = float(
+                profile.get("gpsimd_engine_active_time") or 0.0
+            ) * 1e6
+            hardware_gpsimd_reference = (
+                "explorer_summary" if profile else "missing_zero"
+            )
         counter_dynamic_dma_us = (
             float(profile.get("software_dynamic_dma_active_time") or 0.0)
             + float(profile.get("hardware_dynamic_dma_active_time") or 0.0)
@@ -452,6 +497,9 @@ def main(argv: list[str] | None = None) -> int:
                 "predicted_compute_dma_us": components["compute_plus_dma"] / 1000.0,
                 "predicted_resource_overlap_us": components["resource_overlap_makespan"]
                 / 1000.0,
+                "whole_program_routing_covered": int(
+                    components.get("whole_program_routing_covered", 0.0)
+                ),
                 "predicted_without_completion_floor_us": components[
                     "without_structured_completion_floor"
                 ]
@@ -531,6 +579,7 @@ def main(argv: list[str] | None = None) -> int:
                     else ""
                 ),
                 "hardware_gpsimd_active_us": hardware_gpsimd_us,
+                "hardware_gpsimd_reference": hardware_gpsimd_reference,
                 "hardware_gpsimd_payload_us": hardware_gpsimd_payload_us,
                 "hardware_gpsimd_payload_reference": payload_reference,
                 "gpsimd_payload_evaluable": int(

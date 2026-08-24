@@ -77,6 +77,46 @@ PROGRAM_CONTEXT_FEATURE_NAMES = frozenset(
         "program_dag_branch_subtract_maximum_order_max",
         "program_dag_branch_reduction_position_fraction_min",
         "program_dag_branch_reduction_position_fraction_max",
+        "program_dag_branch0_event_count",
+        "program_dag_branch1_event_count",
+        "program_dag_branch0_depth_max",
+        "program_dag_branch1_depth_max",
+        "program_dag_branch0_reduction_count",
+        "program_dag_branch1_reduction_count",
+        "program_dag_branch0_add_count",
+        "program_dag_branch1_add_count",
+        "program_dag_branch0_multiply_count",
+        "program_dag_branch1_multiply_count",
+        "program_dag_branch0_subtract_count",
+        "program_dag_branch1_subtract_count",
+        "program_dag_branch0_maximum_count",
+        "program_dag_branch1_maximum_count",
+        "program_dag_branch0_transcendental_count",
+        "program_dag_branch1_transcendental_count",
+        "program_dag_branch0_root_add",
+        "program_dag_branch1_root_add",
+        "program_dag_branch0_root_multiply",
+        "program_dag_branch1_root_multiply",
+        "program_dag_branch_event_count_signed_difference",
+        "program_dag_branch_depth_signed_difference",
+        "program_dag_branch_reduction_signed_difference",
+        "program_dag_branch_add_signed_difference",
+        "program_dag_branch_multiply_signed_difference",
+        "program_dag_join_update_branch0_count",
+        "program_dag_join_update_branch1_count",
+        "program_dag_join_update_ambiguous_count",
+        "program_dag_join_update_signed_difference",
+        "program_dag_join_update_transition_count",
+        "program_dag_first_join_update_branch0",
+        "program_dag_first_join_update_branch1",
+        "program_dag_last_join_update_branch0",
+        "program_dag_last_join_update_branch1",
+        "program_dag_branch0_local_fanout_count",
+        "program_dag_branch1_local_fanout_count",
+        "program_dag_branch0_local_rejoin_count",
+        "program_dag_branch1_local_rejoin_count",
+        "program_dag_local_fanout_count",
+        "program_dag_local_rejoin_count",
     }
 )
 
@@ -229,6 +269,38 @@ def _region_dag_topology(region: dict[str, Any]) -> dict[str, float]:
         )
         >= 2
     ]
+    owners: list[int | None] = [None] * node_count
+    root_indices = [index for index in range(node_count) if not predecessors[index]]
+    for owner, root in enumerate(root_indices[:2]):
+        owners[root] = owner
+    join_update_owners = []
+    for index in range(node_count):
+        if owners[index] is not None:
+            continue
+        predecessor_owners = {
+            owners[source]
+            for source in predecessors[index]
+            if owners[source] is not None
+        }
+        if len(predecessor_owners) == 1:
+            owners[index] = next(iter(predecessor_owners))
+            continue
+        if len(predecessor_owners) < 2:
+            continue
+        reused = [
+            source
+            for source in predecessors[index]
+            if any(successor > index for successor in successors[source])
+        ]
+        update_owner = None
+        if len(reused) == 1 and owners[reused[0]] is not None:
+            preserved_owner = owners[reused[0]]
+            replaced = predecessor_owners - {preserved_owner}
+            if len(replaced) == 1:
+                update_owner = next(iter(replaced))
+        owners[index] = update_owner
+        if index in joins:
+            join_update_owners.append(update_owner)
     branch_depths = []
     branch_reductions = []
     reduction_distances = []
@@ -306,6 +378,12 @@ def _region_dag_topology(region: dict[str, Any]) -> dict[str, float]:
             ]
             for nodes in branch_nodes
         ]
+        branch_sequences.sort(
+            key=lambda sequence: (
+                min((index for index, _token in sequence), default=node_count),
+                len(sequence),
+            )
+        )
         source_owners = [
             ownership[node][0]
             for node in sorted(ownership)
@@ -369,6 +447,76 @@ def _region_dag_topology(region: dict[str, Any]) -> dict[str, float]:
                 / len(branch_reductions)
                 / max(1, len(branch_tokens) - 1)
             )
+
+    branch_descriptors = []
+    for sequence in branch_sequences[:2]:
+        indices = [index for index, _token in sequence]
+        index_set = set(indices)
+        branch_tokens = [token for _index, token in sequence]
+        local_fanout_count = sum(
+            len([successor for successor in successors[index] if successor in index_set])
+            > 1
+            and not any(
+                tokens[successor] in {"reduce_sum", "max", "min", "mean"}
+                for successor in successors[index]
+                if successor in index_set
+            )
+            for index in indices
+        )
+        local_rejoin_count = sum(
+            len([source for source in predecessors[index] if source in index_set])
+            > 1
+            and not any(
+                tokens[source] in {"reduce_sum", "max", "min", "mean"}
+                for source in predecessors[index]
+                if source in index_set
+            )
+            for index in indices
+        )
+        branch_descriptors.append(
+            {
+                "event_count": len(sequence),
+                "depth_max": max((depths[index] for index in indices), default=0),
+                "reduction_count": sum(
+                    token in {"reduce_sum", "max", "min", "mean"}
+                    for token in branch_tokens
+                ),
+                "add_count": branch_tokens.count("add"),
+                "multiply_count": branch_tokens.count("multiply"),
+                "subtract_count": branch_tokens.count("subtract"),
+                "maximum_count": branch_tokens.count("maximum"),
+                "transcendental_count": sum(
+                    token in transcendental for token in branch_tokens
+                ),
+                "root_add": int(bool(branch_tokens) and branch_tokens[0] == "add"),
+                "root_multiply": int(
+                    bool(branch_tokens) and branch_tokens[0] == "multiply"
+                ),
+                "local_fanout_count": local_fanout_count,
+                "local_rejoin_count": local_rejoin_count,
+            }
+        )
+    while len(branch_descriptors) < 2:
+        branch_descriptors.append(
+            {
+                "event_count": 0,
+                "depth_max": 0,
+                "reduction_count": 0,
+                "add_count": 0,
+                "multiply_count": 0,
+                "subtract_count": 0,
+                "maximum_count": 0,
+                "transcendental_count": 0,
+                "root_add": 0,
+                "root_multiply": 0,
+                "local_fanout_count": 0,
+                "local_rejoin_count": 0,
+            }
+        )
+    branch0, branch1 = branch_descriptors
+    known_join_update_owners = [
+        owner for owner in join_update_owners if owner in {0, 1}
+    ]
     return {
         "program_dag_join_count": float(len(joins)),
         "program_dag_join_add_count": float(
@@ -453,6 +601,83 @@ def _region_dag_topology(region: dict[str, Any]) -> dict[str, float]:
         ),
         "program_dag_branch_reduction_position_fraction_max": float(
             max(reduction_positions, default=0.0)
+        ),
+        **{
+            f"program_dag_branch{branch}_{name}": float(descriptor[name])
+            for branch, descriptor in enumerate(branch_descriptors)
+            for name in (
+                "event_count",
+                "depth_max",
+                "reduction_count",
+                "add_count",
+                "multiply_count",
+                "subtract_count",
+                "maximum_count",
+                "transcendental_count",
+                "root_add",
+                "root_multiply",
+                "local_fanout_count",
+                "local_rejoin_count",
+            )
+        },
+        "program_dag_branch_event_count_signed_difference": float(
+            branch0["event_count"] - branch1["event_count"]
+        ),
+        "program_dag_branch_depth_signed_difference": float(
+            branch0["depth_max"] - branch1["depth_max"]
+        ),
+        "program_dag_branch_reduction_signed_difference": float(
+            branch0["reduction_count"] - branch1["reduction_count"]
+        ),
+        "program_dag_branch_add_signed_difference": float(
+            branch0["add_count"] - branch1["add_count"]
+        ),
+        "program_dag_branch_multiply_signed_difference": float(
+            branch0["multiply_count"] - branch1["multiply_count"]
+        ),
+        "program_dag_join_update_branch0_count": float(
+            known_join_update_owners.count(0)
+        ),
+        "program_dag_join_update_branch1_count": float(
+            known_join_update_owners.count(1)
+        ),
+        "program_dag_join_update_ambiguous_count": float(
+            len(join_update_owners) - len(known_join_update_owners)
+        ),
+        "program_dag_join_update_signed_difference": float(
+            known_join_update_owners.count(0)
+            - known_join_update_owners.count(1)
+        ),
+        "program_dag_join_update_transition_count": float(
+            sum(
+                left != right
+                for left, right in zip(
+                    known_join_update_owners,
+                    known_join_update_owners[1:],
+                )
+            )
+        ),
+        "program_dag_first_join_update_branch0": float(
+            bool(known_join_update_owners)
+            and known_join_update_owners[0] == 0
+        ),
+        "program_dag_first_join_update_branch1": float(
+            bool(known_join_update_owners)
+            and known_join_update_owners[0] == 1
+        ),
+        "program_dag_last_join_update_branch0": float(
+            bool(known_join_update_owners)
+            and known_join_update_owners[-1] == 0
+        ),
+        "program_dag_last_join_update_branch1": float(
+            bool(known_join_update_owners)
+            and known_join_update_owners[-1] == 1
+        ),
+        "program_dag_local_fanout_count": float(
+            branch0["local_fanout_count"] + branch1["local_fanout_count"]
+        ),
+        "program_dag_local_rejoin_count": float(
+            branch0["local_rejoin_count"] + branch1["local_rejoin_count"]
         ),
     }
 
@@ -653,3 +878,112 @@ def program_context_features(
             f"missing={missing}, unexpected={unexpected}"
         )
     return result
+
+
+def source_routing_state(features: dict[str, float]) -> str:
+    """Classify a reusable source phase from low-dimensional DAG topology.
+
+    The state is intentionally coarser than a structural key. It captures only
+    branch interleaving, post-join topology, and local add/multiply order; it
+    does not use case names, exact token strings, pointers, or hashes.
+    """
+    join_count = float(features.get("program_dag_join_count", 0.0))
+    if join_count <= 0:
+        return "other"
+    if float(
+        features.get("program_dag_branch_source_interleave_count", 0.0)
+    ) >= 5.0:
+        return "interleaved"
+    if (
+        join_count >= 4.0
+        or float(features.get("program_dag_post_join_event_count", 0.0)) >= 6.0
+    ):
+        return "blocked"
+    if float(
+        features.get("program_dag_branch_add_multiply_order_max", 0.0)
+    ) < 0.1:
+        return "reversed"
+    return "canonical"
+
+
+def source_join_ownership_state(features: dict[str, float]) -> str:
+    """Classify which oriented source branch receives cross-join results."""
+    branch0 = int(features.get("program_dag_join_update_branch0_count", 0.0))
+    branch1 = int(features.get("program_dag_join_update_branch1_count", 0.0))
+    if branch0 > 0 and branch1 == 0:
+        return "branch0_only"
+    if branch1 > 0 and branch0 == 0:
+        return "branch1_only"
+    if branch0 <= 0 or branch1 <= 0:
+        return "ambiguous"
+    first = (
+        "branch0"
+        if features.get("program_dag_first_join_update_branch0", 0.0)
+        else (
+            "branch1"
+            if features.get("program_dag_first_join_update_branch1", 0.0)
+            else "unknown"
+        )
+    )
+    transitions = min(
+        2, int(features.get("program_dag_join_update_transition_count", 0.0))
+    )
+    return f"mixed_{first}_t{transitions}"
+
+
+def source_routing_regime(features: dict[str, float]) -> str:
+    """Return the factored source phase × join-ownership regime."""
+    return (
+        f"{source_routing_state(features)}:"
+        f"{source_join_ownership_state(features)}"
+    )
+
+
+def source_local_topology_state(features: dict[str, float]) -> str:
+    """Classify non-reduction branch-local fanout/rejoin topology."""
+    branch0 = (
+        features.get("program_dag_branch0_local_fanout_count", 0.0) > 0
+        or features.get("program_dag_branch0_local_rejoin_count", 0.0) > 0
+    )
+    branch1 = (
+        features.get("program_dag_branch1_local_fanout_count", 0.0) > 0
+        or features.get("program_dag_branch1_local_rejoin_count", 0.0) > 0
+    )
+    if branch0 and branch1:
+        return "fanout_both"
+    if branch0:
+        return "fanout_branch0"
+    if branch1:
+        return "fanout_branch1"
+    return "linear"
+
+
+def source_full_routing_regime(features: dict[str, float]) -> str:
+    """Return source phase × join ownership × local topology."""
+    return (
+        f"{source_routing_regime(features)}:"
+        f"{source_local_topology_state(features)}"
+    )
+
+
+def source_branch_orientation_state(features: dict[str, float]) -> str:
+    """Return the ordered source-root primitive orientation."""
+    if (
+        features.get("program_dag_branch0_root_add", 0.0) > 0
+        and features.get("program_dag_branch1_root_multiply", 0.0) > 0
+    ):
+        return "add_mul"
+    if (
+        features.get("program_dag_branch0_root_multiply", 0.0) > 0
+        and features.get("program_dag_branch1_root_add", 0.0) > 0
+    ):
+        return "mul_add"
+    return "other"
+
+
+def source_complete_routing_regime(features: dict[str, float]) -> str:
+    """Return phase × ownership × local topology × root orientation."""
+    return (
+        f"{source_full_routing_regime(features)}:"
+        f"{source_branch_orientation_state(features)}"
+    )

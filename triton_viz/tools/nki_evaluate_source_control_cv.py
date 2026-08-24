@@ -1,4 +1,4 @@
-"""Leave-one-size-out CV for source-only structured control calibration."""
+"""Leave-one-size-out CV for mapped control structured calibration."""
 
 from __future__ import annotations
 
@@ -18,9 +18,7 @@ from triton_viz.tools.nki_cost_model import (
 from triton_viz.tools.nki_fit_structured_controls import (
     FIELDS,
     aggregate_rows,
-    collect_source_only,
-    load_runtime_engine_baselines,
-    runtime_engine_baseline_ns,
+    collect,
 )
 
 
@@ -29,8 +27,15 @@ def _column(case: str) -> int | None:
     return int(match.group(1)) if match else None
 
 
-def _mape(errors: list[float]) -> float:
-    return statistics.mean(errors) if errors else float("nan")
+def _wape(pairs: list[tuple[float, float]]) -> float:
+    denominator = sum(actual for _, actual in pairs)
+    return (
+        sum(abs(predicted - actual) for predicted, actual in pairs)
+        / denominator
+        * 100.0
+        if pairs and denominator > 0
+        else float("nan")
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -40,15 +45,18 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compute-calibration-csv", type=Path, required=True)
     parser.add_argument("--runtime-overhead-results", type=Path)
     parser.add_argument("--output-dir", type=Path, required=True)
+    parser.add_argument(
+        "--artifact-role", required=True, choices=("control", "target")
+    )
     args = parser.parse_args(argv)
+
+    if args.artifact_role != "control":
+        raise SystemExit("Refusing target post-compile artifacts in control CV")
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     level_b = ComputeCalibration.from_csv(args.compute_calibration_csv)
-    baselines = load_runtime_engine_baselines(args.runtime_overhead_results)
-    base_rows = collect_source_only(args.base_control_root, level_b, runtime_baselines=baselines)
-    sequence_rows = collect_source_only(
-        args.sequence_control_root, level_b, runtime_baselines=baselines
-    )
+    base_rows = collect(args.base_control_root, level_b)
+    sequence_rows = collect(args.sequence_control_root, level_b)
     folds = sorted({_column(str(row["case"])) for row in sequence_rows} - {None})
     results = []
     for held_column in folds:
@@ -69,7 +77,7 @@ def main(argv: list[str] | None = None) -> int:
             strict_calibration=True,
             enable_structured_completion_floor=False,
         )
-        errors = {"vector": [], "scalar": []}
+        pairs = {"vector": [], "scalar": []}
         cases = 0
         for root in args.sequence_control_root:
             result_path = root / "operator_results.csv"
@@ -82,36 +90,38 @@ def main(argv: list[str] | None = None) -> int:
                     continue
                 case = f"{row['op']}__r{row['rows']}__c{row['cols']}__{row['dtype']}"
                 simulation = simulate_jsonl(root / case / "trace.jsonl", model)
-                for engine in errors:
+                for engine in pairs:
                     actual = float(row.get(f"hardware_{engine}_active_us") or 0.0)
-                    if actual <= 0:
-                        continue
-                    predicted_ns = simulation.engine_busy_ns.get(engine, 0.0)
-                    predicted_ns += runtime_engine_baseline_ns(
-                        baselines,
-                        str(row["dtype"]),
-                        int(row["rows"]),
-                        engine,
-                    )
-                    predicted = predicted_ns / 1000.0
-                    errors[engine].append(abs(predicted - actual) / actual * 100.0)
+                    predicted = simulation.engine_busy_ns.get(engine, 0.0) / 1000.0
+                    pairs[engine].append((predicted, actual))
                 cases += 1
         results.append(
             {
                 "held_column": held_column,
                 "cases": cases,
-                "vector_mape_pct": _mape(errors["vector"]),
-                "scalar_mape_pct": _mape(errors["scalar"]),
-                "vector_samples": len(errors["vector"]),
-                "scalar_samples": len(errors["scalar"]),
+                "vector_wape_pct": _wape(pairs["vector"]),
+                "scalar_wape_pct": _wape(pairs["scalar"]),
+                "vector_samples": len(pairs["vector"]),
+                "scalar_samples": len(pairs["scalar"]),
             }
         )
     report = {
-        "schema": "triton-viz.source-control-cv-v1",
+        "schema": "triton-viz.mapped-control-cv-v2",
         "split": "leave-one-control-column-out",
         "folds": results,
-        "vector_mape_pct": _mape([row["vector_mape_pct"] for row in results]),
-        "scalar_mape_pct": _mape([row["scalar_mape_pct"] for row in results]),
+        "vector_mean_fold_wape_pct": statistics.mean(
+            row["vector_wape_pct"] for row in results
+        ),
+        "scalar_mean_fold_wape_pct": statistics.mean(
+            row["scalar_wape_pct"] for row in results
+        ),
+        "vector_worst_fold_wape_pct": max(
+            row["vector_wape_pct"] for row in results
+        ),
+        "scalar_worst_fold_wape_pct": max(
+            row["scalar_wape_pct"] for row in results
+        ),
+        "target_postcompile_prediction_reads": False,
     }
     (args.output_dir / "report.json").write_text(
         json.dumps(report, indent=2, sort_keys=True) + "\n", encoding="utf-8"

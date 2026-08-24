@@ -5,6 +5,16 @@ from microbench.inf2_nki.tests.region_controls.kernels import (
     factorial_dag_audit_schedule,
     factorial_dag_interleave_schedule,
     factorial_dag_blocked_audit_schedule,
+    factorial_dag_role_swap_audit_schedule,
+    factorial_dag_join_target_audit_schedule,
+    factorial_dag_alternating_join_audit_schedule,
+    factorial_dag_paired_ownership_audit_schedule,
+    factorial_dag_fanout_audit_schedule,
+    factorial_dag_fanout_variant_audit_schedule,
+    factorial_dag_fanout_chain_audit_schedule,
+    factorial_dag_fanout_branch0_extra_schedule,
+    factorial_dag_fanout_branch1_extra_schedule,
+    factorial_dag_fanout_deep_audit_schedule,
     random_dag_schedule,
     random_semantic_schedule,
 )
@@ -79,3 +89,128 @@ def test_factorial_dag_blocked_audit_is_fourth_disjoint_family():
     assert audit.isdisjoint(prior)
     with pytest.raises(ValueError):
         factorial_dag_blocked_audit_schedule(6054)
+
+
+def test_factorial_dag_role_swap_audit_balances_covered_states():
+    schedules = [
+        factorial_dag_role_swap_audit_schedule(seed)
+        for seed in range(7000, 7054)
+    ]
+    assert len(schedules) == 54
+    assert len(set(schedules)) == 54
+    assert schedules[0] == factorial_dag_schedule(3000)
+    assert schedules[1] == factorial_dag_audit_schedule(4001)
+    assert schedules[2] == factorial_dag_interleave_schedule(5002)
+    assert schedules[3] == factorial_dag_blocked_audit_schedule(6003)
+    with pytest.raises(ValueError):
+        factorial_dag_role_swap_audit_schedule(7054)
+
+
+def test_factorial_dag_join_target_audit_balances_covered_states():
+    schedules = [
+        factorial_dag_join_target_audit_schedule(seed)
+        for seed in range(8000, 8054)
+    ]
+    assert len(schedules) == 54
+    assert len(set(schedules)) == 54
+    assert schedules[0] == factorial_dag_schedule(3000)
+    assert schedules[1] == factorial_dag_audit_schedule(4001)
+    assert schedules[2] == factorial_dag_interleave_schedule(5002)
+    assert schedules[3] == factorial_dag_blocked_audit_schedule(6003)
+    with pytest.raises(ValueError):
+        factorial_dag_join_target_audit_schedule(8054)
+
+
+def test_factorial_dag_alternating_join_audit_balances_covered_states():
+    schedules = [
+        factorial_dag_alternating_join_audit_schedule(seed)
+        for seed in range(9000, 9054)
+    ]
+    assert len(schedules) == 54
+    assert len(set(schedules)) == 54
+    assert schedules[0] == factorial_dag_schedule(3000)
+    assert schedules[1] == factorial_dag_audit_schedule(4001)
+    assert schedules[2] == factorial_dag_interleave_schedule(5002)
+    assert schedules[3] == factorial_dag_blocked_audit_schedule(6003)
+    with pytest.raises(ValueError):
+        factorial_dag_alternating_join_audit_schedule(9054)
+
+
+def test_factorial_dag_paired_ownership_audit_balances_covered_states():
+    schedules = [
+        factorial_dag_paired_ownership_audit_schedule(seed)
+        for seed in range(10000, 10054)
+    ]
+    assert len(schedules) == 54
+    assert len(set(schedules)) == 54
+    assert schedules[0] == factorial_dag_schedule(3000)
+    assert schedules[1] == factorial_dag_audit_schedule(4001)
+    assert schedules[2] == factorial_dag_interleave_schedule(5002)
+    assert schedules[3] == factorial_dag_blocked_audit_schedule(6003)
+    with pytest.raises(ValueError):
+        factorial_dag_paired_ownership_audit_schedule(10054)
+
+
+def test_factorial_dag_fanout_audit_balances_covered_states():
+    schedules = [
+        factorial_dag_fanout_audit_schedule(seed)
+        for seed in range(11000, 11054)
+    ]
+    assert len(schedules) == 54
+    assert len(set(schedules)) == 54
+    assert schedules[0] == factorial_dag_schedule(3000)
+    assert schedules[1] == factorial_dag_audit_schedule(4001)
+    assert schedules[2] == factorial_dag_interleave_schedule(5002)
+    assert schedules[3] == factorial_dag_blocked_audit_schedule(6003)
+    with pytest.raises(ValueError):
+        factorial_dag_fanout_audit_schedule(11054)
+
+
+def test_factorial_dag_fanout_variant_audit_balances_covered_states():
+    schedules = [
+        factorial_dag_fanout_variant_audit_schedule(seed)
+        for seed in range(12000, 12054)
+    ]
+    assert len(schedules) == 54
+    assert len(set(schedules)) == 54
+    assert schedules[0] == factorial_dag_schedule(3000)
+    assert schedules[1] == factorial_dag_audit_schedule(4001)
+    assert schedules[2] == factorial_dag_interleave_schedule(5002)
+    assert schedules[3] == factorial_dag_blocked_audit_schedule(6003)
+    with pytest.raises(ValueError):
+        factorial_dag_fanout_variant_audit_schedule(12054)
+
+
+def test_factorial_dag_fanout_chain_audit_balances_covered_states():
+    schedules = [
+        factorial_dag_fanout_chain_audit_schedule(seed)
+        for seed in range(13000, 13054)
+    ]
+    assert len(schedules) == 54
+    assert len(set(schedules)) == 54
+    assert schedules[0] == factorial_dag_schedule(3000)
+    assert schedules[1] == factorial_dag_audit_schedule(4001)
+    assert schedules[2] == factorial_dag_interleave_schedule(5002)
+    assert schedules[3] == factorial_dag_blocked_audit_schedule(6003)
+    with pytest.raises(ValueError):
+        factorial_dag_fanout_chain_audit_schedule(13054)
+
+
+@pytest.mark.parametrize(
+    ("function", "start"),
+    [
+        (factorial_dag_fanout_branch0_extra_schedule, 14000),
+        (factorial_dag_fanout_branch1_extra_schedule, 15000),
+        (factorial_dag_fanout_deep_audit_schedule, 16000),
+    ],
+)
+def test_factorial_dag_fanout_factorial_schedules_cover_states(function, start):
+    schedules = [function(seed) for seed in range(start, start + 54)]
+    assert len(schedules) == 54
+    assert len(set(schedules)) == 54
+    assert schedules[0] == factorial_dag_schedule(3000)
+    assert schedules[1] == factorial_dag_audit_schedule(4001)
+    assert schedules[2] == factorial_dag_interleave_schedule(5002)
+    assert schedules[3] == factorial_dag_blocked_audit_schedule(6003)
+    with pytest.raises(ValueError):
+        function(start + 54)

@@ -70,15 +70,29 @@ KINDS = [
     "sequence_factorialdagaudit2k",
     "sequence_factorialdaginterleave2k",
     "sequence_factorialdagblockedaudit2k",
+    "sequence_factorialdagroleswapaudit2k",
+    "sequence_factorialdagjointargetaudit2k",
+    "sequence_factorialdagalternatingjoinaudit2k",
+    "sequence_factorialdagpairedownershipaudit2k",
+    "sequence_factorialdagfanoutaudit2k",
+    "sequence_factorialdagfanoutvariantaudit2k",
+    "sequence_factorialdagfanoutchainaudit2k",
+    "sequence_factorialdagfanoutbranch0extra2k",
+    "sequence_factorialdagfanoutbranch1extra2k",
+    "sequence_factorialdagfanoutdeepaudit2k",
     "elementwise_maximum_masked",
     "elementwise_multiply_masked",
     "elementwise_sigmoid_masked",
     "elementwise_maximum_wide_masked",
     "elementwise_multiply_wide_masked",
     "elementwise_sigmoid_wide_masked",
+    "elementwise_add_wide_masked_audit",
+    "elementwise_exp_wide_masked_audit",
+    "elementwise_minimum_wide_masked_audit",
     "masked_log_reduction",
     "softmax_reduction",
     "elementwise_multiply2",
+    "memory_interleave_offset",
     "broadcast_multiply2",
     "broadcast_affine",
     "two_pass_reduce_affine",
@@ -156,6 +170,9 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
         "elementwise_maximum_wide_masked",
         "elementwise_multiply_wide_masked",
         "elementwise_sigmoid_wide_masked",
+        "elementwise_add_wide_masked_audit",
+        "elementwise_exp_wide_masked_audit",
+        "elementwise_minimum_wide_masked_audit",
         "sequence_add_multiply_wide_memory",
         "sequence_subtract_multiply_add_wide_memory",
         "sequence_exp_multiply_add_wide_memory",
@@ -184,18 +201,17 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
         "padded_reduce_maximum",
         "padded_randomdag",
     }
-    mask_provided = kind in explicit_mask_kinds or kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k"))
-    tile = (
-        2048
-        if kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k"))
-        else
-        (16384 if "wide_memory" in kind else min(2048, f))
-        if kind == "mask_tail" or "wide_masked" in kind or "wide_memory" in kind or f > 2048
-        else (
-            (16384 if "wide_masked" in kind else 2048)
-            if kind.endswith("_masked") or kind == "two_pass_reduce_affine" else f
-        )
-    )
+    mask_provided = kind in explicit_mask_kinds or kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k", "sequence_factorialdagroleswapaudit2k", "sequence_factorialdagjointargetaudit2k", "sequence_factorialdagalternatingjoinaudit2k", "sequence_factorialdagpairedownershipaudit2k", "sequence_factorialdagfanoutaudit2k", "sequence_factorialdagfanoutvariantaudit2k", "sequence_factorialdagfanoutchainaudit2k", "sequence_factorialdagfanoutbranch0extra2k", "sequence_factorialdagfanoutbranch1extra2k", "sequence_factorialdagfanoutdeepaudit2k"))
+    if kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k", "sequence_factorialdagroleswapaudit2k", "sequence_factorialdagjointargetaudit2k", "sequence_factorialdagalternatingjoinaudit2k", "sequence_factorialdagpairedownershipaudit2k", "sequence_factorialdagfanoutaudit2k", "sequence_factorialdagfanoutvariantaudit2k", "sequence_factorialdagfanoutchainaudit2k", "sequence_factorialdagfanoutbranch0extra2k", "sequence_factorialdagfanoutbranch1extra2k", "sequence_factorialdagfanoutdeepaudit2k")):
+        tile = 2048
+    elif "wide_masked" in kind or "wide_memory" in kind:
+        tile = 16384
+    elif kind == "mask_tail" or f > 2048:
+        tile = min(2048, f)
+    elif kind.endswith("_masked") or kind == "two_pass_reduce_affine":
+        tile = 2048
+    else:
+        tile = f
     item_bytes = 2 if dtype == "bfloat16" else 4
     events = [{"seq": 0, "op": "grid", "record_type": "Grid", "grid_idx": [0, 0, 0]}]
     if kind.startswith("padded_"):
@@ -498,6 +514,46 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
             encoding="utf-8",
         )
         return events
+    if kind == "memory_interleave_offset":
+        for index in range(2):
+            events.append(
+                {
+                    "seq": len(events),
+                    "op": "load",
+                    "record_type": "Load",
+                    "grid_idx": [0, 0, 0],
+                    "bytes": p * f * item_bytes,
+                    "active_lanes": p * f,
+                    "partition_count": p,
+                    "offsets_shape": [p, f],
+                    "mem_src": "HBM",
+                    "mem_dst": "SBUF",
+                    "source_root": index,
+                }
+            )
+        for parity in range(2):
+            events.append(
+                {
+                    "seq": len(events),
+                    "op": "store",
+                    "record_type": "Store",
+                    "grid_idx": [0, 0, 0],
+                    "bytes": p * f * item_bytes,
+                    "active_lanes": p * f,
+                    "partition_count": p,
+                    "offsets_shape": [p, f],
+                    "mem_src": "SBUF",
+                    "mem_dst": "HBM",
+                    "output_stride": 2,
+                    "output_parity": parity,
+                }
+            )
+        _annotate_fusion_signature(events)
+        path.write_text(
+            "".join(json.dumps(event, sort_keys=True) + "\n" for event in events),
+            encoding="utf-8",
+        )
+        return events
     blocks = (f + tile - 1) // tile
     for block in range(blocks):
         active_f = min(tile, f - block * tile)
@@ -579,7 +635,7 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
                 else:
                     tokens.append(token)
                     arities.append(1)
-        elif kind in {"sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k"}:
+        elif kind in {"sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k", "sequence_factorialdagroleswapaudit2k", "sequence_factorialdagjointargetaudit2k", "sequence_factorialdagalternatingjoinaudit2k", "sequence_factorialdagpairedownershipaudit2k", "sequence_factorialdagfanoutaudit2k", "sequence_factorialdagfanoutvariantaudit2k", "sequence_factorialdagfanoutchainaudit2k", "sequence_factorialdagfanoutbranch0extra2k", "sequence_factorialdagfanoutbranch1extra2k", "sequence_factorialdagfanoutdeepaudit2k"}:
             module_path = Path("microbench/inf2_nki/tests/region_controls/kernels.py").resolve()
             module_spec = importlib.util.spec_from_file_location(
                 "nki_region_dag_schedule_dynamic", module_path
@@ -605,15 +661,74 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
                 })
                 return next_ptr
 
-            a_ptr = dag_op("add", [10])
-            b_ptr = dag_op("multiply", [20])
+            role_swap = kind == "sequence_factorialdagroleswapaudit2k"
+            join_target_swap = kind == "sequence_factorialdagjointargetaudit2k"
+            alternating_join = kind == "sequence_factorialdagalternatingjoinaudit2k"
+            paired_ownership = kind == "sequence_factorialdagpairedownershipaudit2k"
+            fanout_audit = kind == "sequence_factorialdagfanoutaudit2k"
+            fanout_variant = kind == "sequence_factorialdagfanoutvariantaudit2k"
+            fanout_chain = kind == "sequence_factorialdagfanoutchainaudit2k"
+            fanout_branch0_extra = kind == "sequence_factorialdagfanoutbranch0extra2k"
+            fanout_branch1_extra = kind == "sequence_factorialdagfanoutbranch1extra2k"
+            fanout_deep = kind == "sequence_factorialdagfanoutdeepaudit2k"
+            a_ptr = dag_op("multiply" if role_swap else "add", [20 if role_swap else 10])
+            b_ptr = dag_op("add" if role_swap else "multiply", [10 if role_swap else 20])
+            if fanout_audit:
+                a_side = dag_op("multiply", [a_ptr])
+                a_ptr = dag_op("add", [a_ptr, a_side])
+                b_side = dag_op("add", [b_ptr])
+                b_ptr = dag_op("multiply", [b_ptr, b_side])
+            elif fanout_variant:
+                a_side = dag_op("add", [a_ptr])
+                a_ptr = dag_op("multiply", [a_ptr, a_side])
+                b_side = dag_op("multiply", [b_ptr])
+                b_ptr = dag_op("add", [b_ptr, b_side])
+            elif fanout_chain:
+                a_side = dag_op("add", [a_ptr])
+                a_side = dag_op("multiply", [a_side])
+                a_ptr = dag_op("add", [a_ptr, a_side])
+                b_side = dag_op("multiply", [b_ptr])
+                b_side = dag_op("add", [b_side])
+                b_ptr = dag_op("multiply", [b_ptr, b_side])
+            elif fanout_branch0_extra:
+                a_side = dag_op("add", [a_ptr])
+                a_side = dag_op("multiply", [a_side])
+                a_ptr = dag_op("add", [a_ptr, a_side])
+                b_side = dag_op("add", [b_ptr])
+                b_ptr = dag_op("multiply", [b_ptr, b_side])
+            elif fanout_branch1_extra:
+                a_side = dag_op("multiply", [a_ptr])
+                a_ptr = dag_op("add", [a_ptr, a_side])
+                b_side = dag_op("multiply", [b_ptr])
+                b_side = dag_op("add", [b_side])
+                b_ptr = dag_op("multiply", [b_ptr, b_side])
+            elif fanout_deep:
+                a_side = dag_op("add", [a_ptr])
+                a_side = dag_op("multiply", [a_side])
+                a_side = dag_op("add", [a_side])
+                a_ptr = dag_op("add", [a_ptr, a_side])
+                b_side = dag_op("multiply", [b_ptr])
+                b_side = dag_op("add", [b_side])
+                b_side = dag_op("multiply", [b_side])
+                b_ptr = dag_op("multiply", [b_ptr, b_side])
             schedule_fn = {
                 "sequence_randomdag2k": schedule_module.random_dag_schedule,
                 "sequence_factorialdag2k": schedule_module.factorial_dag_schedule,
                 "sequence_factorialdagaudit2k": schedule_module.factorial_dag_audit_schedule,
                 "sequence_factorialdaginterleave2k": schedule_module.factorial_dag_interleave_schedule,
                 "sequence_factorialdagblockedaudit2k": schedule_module.factorial_dag_blocked_audit_schedule,
+                "sequence_factorialdagroleswapaudit2k": schedule_module.factorial_dag_role_swap_audit_schedule,
+                "sequence_factorialdagjointargetaudit2k": schedule_module.factorial_dag_join_target_audit_schedule,
+                "sequence_factorialdagalternatingjoinaudit2k": schedule_module.factorial_dag_alternating_join_audit_schedule,
+                "sequence_factorialdagpairedownershipaudit2k": schedule_module.factorial_dag_paired_ownership_audit_schedule,
+                "sequence_factorialdagfanoutaudit2k": schedule_module.factorial_dag_fanout_audit_schedule,
+                "sequence_factorialdagfanoutvariantaudit2k": schedule_module.factorial_dag_fanout_variant_audit_schedule,
+                "sequence_factorialdagfanoutchainaudit2k": schedule_module.factorial_dag_fanout_chain_audit_schedule,
+                "sequence_factorialdagfanoutbranch0extra2k": schedule_module.factorial_dag_fanout_branch0_extra_schedule,
+                "sequence_factorialdagfanoutbranch1extra2k": schedule_module.factorial_dag_fanout_branch1_extra_schedule,
+                "sequence_factorialdagfanoutdeepaudit2k": schedule_module.factorial_dag_fanout_deep_audit_schedule,
             }[kind]
+            join_ordinal = 0
             for action in schedule_fn(chain):
                 if action == "a_add": a_ptr = dag_op("add", [a_ptr])
                 elif action == "a_multiply": a_ptr = dag_op("multiply", [a_ptr])
@@ -629,9 +744,57 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
                     joined = dag_op("add", [branch, scaled])
                     if action == "a_reduce": a_ptr = joined
                     else: b_ptr = joined
-                elif action == "cross_add": a_ptr = dag_op("add", [a_ptr, b_ptr])
-                else: b_ptr = dag_op("multiply", [a_ptr, b_ptr])
-            dag_op("add", [a_ptr, b_ptr])
+                elif action == "cross_add":
+                    swap_target = join_target_swap or (
+                        alternating_join and join_ordinal % 2 == 1
+                    ) or (
+                        (
+                            paired_ownership
+                            or fanout_audit
+                            or fanout_variant
+                            or fanout_chain
+                            or fanout_branch0_extra
+                            or fanout_branch1_extra
+                            or fanout_deep
+                        )
+                        and (join_ordinal // 2) % 2 == 1
+                    )
+                    if swap_target:
+                        b_ptr = dag_op("add", [b_ptr, a_ptr])
+                    else:
+                        a_ptr = dag_op("add", [a_ptr, b_ptr])
+                    join_ordinal += 1
+                else:
+                    swap_target = join_target_swap or (
+                        alternating_join and join_ordinal % 2 == 1
+                    ) or (
+                        (
+                            paired_ownership
+                            or fanout_audit
+                            or fanout_variant
+                            or fanout_chain
+                            or fanout_branch0_extra
+                            or fanout_branch1_extra
+                            or fanout_deep
+                        )
+                        and (join_ordinal // 2) % 2 == 1
+                    )
+                    if swap_target:
+                        a_ptr = dag_op("multiply", [b_ptr, a_ptr])
+                    elif (
+                        paired_ownership
+                        or fanout_audit
+                        or fanout_variant
+                        or fanout_chain
+                        or fanout_branch0_extra
+                        or fanout_branch1_extra
+                        or fanout_deep
+                    ):
+                        a_ptr = dag_op("multiply", [a_ptr, b_ptr])
+                    else:
+                        b_ptr = dag_op("multiply", [a_ptr, b_ptr])
+                    join_ordinal += 1
+            dag_op("add", [b_ptr, a_ptr] if role_swap else [a_ptr, b_ptr])
         elif kind.startswith("sequence_deepmixed2k_"):
             specs = {
                 "00": [("add",1),("multiply",1),("subtract",1),("exp",1),("multiply",1),("add",1),("reduce_sum",1),("multiply",2),("subtract",1),("multiply",1),("add",1),("multiply",1),("subtract",1)],
@@ -710,6 +873,12 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
             tokens, arities = ["multiply"], [1]
         elif kind == "elementwise_sigmoid_wide_masked":
             tokens, arities = ["sigmoid"], [1]
+        elif kind == "elementwise_add_wide_masked_audit":
+            tokens, arities = ["add"], [1]
+        elif kind == "elementwise_exp_wide_masked_audit":
+            tokens, arities = ["exp"], [1]
+        elif kind == "elementwise_minimum_wide_masked_audit":
+            tokens, arities = ["minimum"], [1]
         elif kind == "masked_log_reduction":
             tokens, arities = (
                 ["greater", "log", "where", "subtract", "multiply", "reduce_sum"],
@@ -970,7 +1139,7 @@ def run_case(
     # and a separate runtime trace carrying physical SBUF dependency identity.
     # The two artifacts answer different questions and must not overwrite one
     # another.
-    if kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k", "padded_")):
+    if kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k", "sequence_factorialdagroleswapaudit2k", "sequence_factorialdagjointargetaudit2k", "sequence_factorialdagalternatingjoinaudit2k", "sequence_factorialdagpairedownershipaudit2k", "sequence_factorialdagfanoutaudit2k", "sequence_factorialdagfanoutvariantaudit2k", "sequence_factorialdagfanoutchainaudit2k", "sequence_factorialdagfanoutbranch0extra2k", "sequence_factorialdagfanoutbranch1extra2k", "sequence_factorialdagfanoutdeepaudit2k", "padded_")):
         dependency_events = _declared_trace(
             kind, p, f, chain, dtype, case / "dependency_trace.jsonl"
         )
@@ -1099,7 +1268,7 @@ def main(argv=None):
             dims = args.free_dims
             for kind in args.kinds:
                 chains = (
-                    args.chains if kind in {"elementwise_one", "elementwise_two", "sequence_deep2k_add", "sequence_deep2k_multiply", "sequence_deep2k_add_multiply", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k", "padded_randomdag"} else [1]
+                    args.chains if kind in {"elementwise_one", "elementwise_two", "sequence_deep2k_add", "sequence_deep2k_multiply", "sequence_deep2k_add_multiply", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k", "sequence_factorialdagroleswapaudit2k", "sequence_factorialdagjointargetaudit2k", "sequence_factorialdagalternatingjoinaudit2k", "sequence_factorialdagpairedownershipaudit2k", "sequence_factorialdagfanoutaudit2k", "sequence_factorialdagfanoutvariantaudit2k", "sequence_factorialdagfanoutchainaudit2k", "sequence_factorialdagfanoutbranch0extra2k", "sequence_factorialdagfanoutbranch1extra2k", "sequence_factorialdagfanoutdeepaudit2k", "padded_randomdag"} else [1]
                 )
                 for f in dims:
                     if f > 2048 and kind not in {

@@ -11,6 +11,7 @@ from pathlib import Path
 
 from triton_viz.tools.nki_cost_model import ComputeCalibration
 from triton_viz.tools.nki_region_ir import (
+    compositional_features,
     completion_calibration_dtype,
     match_structural_family,
     structural_calibration_key,
@@ -38,6 +39,7 @@ FIELDS = [
     "mapping_min_confidence",
     "micro_dag_json",
     "micro_dag_mapped_payload_coverage_pct",
+    "compositional_features_json",
     "replicate_count",
     "effective_count_variance",
     "fixed_ns_variance",
@@ -270,9 +272,14 @@ def collect(
         case = trace.parent
         audit_path = case / "hardware/source_mapping/audit.json"
         mapping_path = case / "hardware/source_mapping/instruction_mapping.csv"
+        instruction_path = case / "hardware/explorer_parquet/Instruction.parquet"
         if include_prefixes and not case.name.startswith(include_prefixes):
             continue
-        if not audit_path.is_file() or not mapping_path.is_file():
+        if (
+            not audit_path.is_file()
+            or not mapping_path.is_file()
+            or not instruction_path.is_file()
+        ):
             continue
 
         events = [
@@ -287,6 +294,28 @@ def collect(
         audit = _load_json(audit_path)
         with mapping_path.open(encoding="utf-8", newline="") as file:
             mappings = list(csv.DictReader(file))
+        try:
+            import pyarrow.parquet as pq  # type: ignore
+
+            instruction_rows = pq.read_table(instruction_path).to_pylist()
+        except ImportError as exc:
+            raise RuntimeError(
+                "pyarrow is required for control Instruction.parquet calibration"
+            ) from exc
+        instruction_ids = {str(row["id"]) for row in instruction_rows}
+        missing_instruction_ids = sorted(
+            {
+                str(row["instruction_id"])
+                for row in mappings
+                if row.get("instruction_id")
+                and str(row["instruction_id"]) not in instruction_ids
+            }
+        )
+        if missing_instruction_ids:
+            raise ValueError(
+                f"Control mapping references absent Instruction rows in {case}: "
+                + ",".join(missing_instruction_ids[:8])
+            )
         flow_path = case / "hardware/explorer_parquet/Flow.parquet"
         if flow_path.is_file():
             try:
@@ -369,6 +398,11 @@ def collect(
                         "mapping_min_confidence": mapping_min_confidence,
                         "micro_dag_json": micro_dag_json,
                         "micro_dag_mapped_payload_coverage_pct": micro_dag_coverage,
+                        "compositional_features_json": json.dumps(
+                            compositional_features(region),
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
                         "replicate_count": 1,
                         "effective_count_variance": 0.0,
                         "fixed_ns_variance": 0.0,
@@ -456,6 +490,11 @@ def collect_source_only(
                         "mapping_min_confidence": 0.0,
                         "micro_dag_json": "",
                         "micro_dag_mapped_payload_coverage_pct": 0.0,
+                        "compositional_features_json": json.dumps(
+                            compositional_features(region),
+                            separators=(",", ":"),
+                            sort_keys=True,
+                        ),
                         "replicate_count": 1,
                         "effective_count_variance": 0.0,
                         "fixed_ns_variance": 0.0,
@@ -516,6 +555,11 @@ def collect_source_only(
                     "mapping_min_confidence": 0.0,
                     "micro_dag_json": "",
                     "micro_dag_mapped_payload_coverage_pct": 0.0,
+                    "compositional_features_json": json.dumps(
+                        compositional_features(region),
+                        separators=(",", ":"),
+                        sort_keys=True,
+                    ),
                     "replicate_count": 1,
                     "effective_count_variance": 0.0,
                     "fixed_ns_variance": 0.0,
@@ -553,6 +597,7 @@ def collect_legacy(paths: list[Path]) -> list[dict]:
                     "mapping_min_confidence": 1.0,
                     "micro_dag_json": "",
                     "micro_dag_mapped_payload_coverage_pct": 100.0,
+                    "compositional_features_json": "{}",
                     "replicate_count": 1,
                     "effective_count_variance": 0.0,
                     "fixed_ns_variance": 0.0,
@@ -630,12 +675,27 @@ def main(argv: list[str] | None = None) -> int:
         help="Optional CSV retaining accepted and rejected mapping rows.",
     )
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument(
+        "--artifact-role",
+        required=True,
+        choices=("control", "target"),
+        help="Post-compile artifacts are legal only for independent controls.",
+    )
     args = parser.parse_args(argv)
 
+    if args.artifact_role != "control":
+        raise SystemExit(
+            "Refusing target post-compile artifacts: structured lowering fit is "
+            "control-only"
+        )
     level_b = ComputeCalibration.from_csv(args.compute_calibration_csv)
-    runtime_baselines = load_runtime_engine_baselines(args.runtime_overhead_results)
-    audit_rows = collect_source_only(
-        args.roots, level_b, tuple(args.include_case_prefix), runtime_baselines
+    audit_rows = collect(
+        args.roots,
+        level_b,
+        tuple(args.include_case_prefix),
+        min_payload_coverage=args.min_payload_coverage,
+        min_mapping_confidence=args.min_mapping_confidence,
+        include_rejected=bool(args.audit_output),
     )
     audit_rows.extend(collect_legacy(args.legacy_level_a_csv))
     if args.audit_output:
@@ -652,7 +712,7 @@ def main(argv: list[str] | None = None) -> int:
     rows = aggregate_rows(rows)
     if not rows:
         raise SystemExit(
-            "No unambiguous single-region source-only control rows were found"
+            "No accepted mapped control rows were found"
         )
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", newline="", encoding="utf-8") as file:

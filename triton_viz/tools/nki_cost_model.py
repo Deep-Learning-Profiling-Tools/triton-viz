@@ -1750,6 +1750,46 @@ def _input_stream_count(event):
 
 
 @dataclass
+class WholeProgramRoutingCalibration:
+    """Control-only engine occupancy indexed by source-visible program grammar."""
+
+    samples: list[dict[str, Any]]
+
+    @classmethod
+    def from_control_root(cls, root: str | Path) -> WholeProgramRoutingCalibration:
+        from triton_viz.tools.nki_evaluate_whole_program_regime import _source_sample
+
+        root = Path(root)
+        with (root / "operator_results.csv").open(encoding="utf-8", newline="") as file:
+            return cls([
+                _source_sample(root, row)
+                for row in csv.DictReader(file)
+                if row.get("status") == "ok"
+            ])
+
+    def predict_ns(self, events: list[dict[str, Any]], dtype: str) -> dict[str, float] | None:
+        from triton_viz.tools.nki_evaluate_whole_program_regime import source_descriptor_from_events
+
+        descriptor = source_descriptor_from_events(events, dtype)
+        candidates = [sample for sample in self.samples if sample["key"] == descriptor["key"]]
+        if not candidates:
+            return None
+        distance = min(
+            abs(sample["distance_feature"] - descriptor["distance_feature"])
+            for sample in candidates
+        )
+        nearest = [
+            sample for sample in candidates
+            if abs(sample["distance_feature"] - descriptor["distance_feature"]) == distance
+        ]
+        # Explorer active-time labels are microseconds; the simulator uses ns.
+        return {
+            engine: statistics.mean(sample["actual"][engine] for sample in nearest) * 1000.0
+            for engine in (ENGINE_VECTOR, ENGINE_SCALAR, ENGINE_GPSIMD)
+        }
+
+
+@dataclass
 class CostModel:
     """Placeholder analytical cost model (units: nanoseconds).
 
@@ -1776,6 +1816,7 @@ class CostModel:
     lowering_calibration: LoweringExpansionCalibration | None = None
     compositional_lowering: CompositionalLoweringCalibration | None = None
     structured_control_lowering: StructuredControlCalibration | None = None
+    whole_program_routing: WholeProgramRoutingCalibration | None = None
     runtime_overhead_calibration: RuntimeOverheadCalibration | None = None
     strided_dma_calibration: StridedDmaCalibration | None = None
     tensor_calibration: TensorCalibrationSurface | None = None
@@ -2709,7 +2750,11 @@ def _expand_lowering_groups(
 
 
 def simulate(
-    events: Iterable[dict[str, Any]], cost_model: CostModel | None = None
+    events: Iterable[dict[str, Any]],
+    cost_model: CostModel | None = None,
+    *,
+    routing_source_events: Iterable[dict[str, Any]] | None = None,
+    routing_dtype: str | None = None,
 ) -> SimulationResult:
     """Schedule trace events onto per-engine timelines with data dependencies.
 
@@ -2745,6 +2790,11 @@ def simulate(
     """
     model = cost_model or CostModel()
     source_events = list(events)
+    routing_events = (
+        list(routing_source_events)
+        if routing_source_events is not None
+        else source_events
+    )
     structural_static_ns, structural_static_match = (
         model.structural_static_dma.predict_ns_with_provenance(source_events)
         if model.structural_static_dma is not None
@@ -3145,6 +3195,30 @@ def simulate(
         if micro_event_id is not None:
             micro_event_end[str(micro_event_id)] = (end, engine)
 
+    # Compose control-learned whole-program routing into the resource model.
+    # The source DAG still determines ordering/overlap; calibrated aggregate
+    # occupancy replaces only Vector/Scalar/GpSimd work and provides a physical
+    # makespan lower bound.  This avoids inventing target compiler Flow edges.
+    whole_program_routing_match = "disabled"
+    value_dtypes = [
+        str(value)
+        for event in source_events
+        for value in ([event.get("output_dtype")] + list(event.get("input_dtypes") or []))
+        if value and str(value).lower() not in {"bool", "boolean"}
+    ]
+    source_dtype = ComputeCalibration._norm_dtype(
+        routing_dtype
+        or (Counter(value_dtypes).most_common(1)[0][0] if value_dtypes else "float32")
+    )
+    if model.whole_program_routing is not None:
+        routed_busy = model.whole_program_routing.predict_ns(routing_events, source_dtype)
+        if routed_busy is not None:
+            whole_program_routing_match = "covered"
+            engine_busy.update(routed_busy)
+            makespan = max(makespan, max(routed_busy.values(), default=0.0))
+        else:
+            whole_program_routing_match = "ood"
+
     calibrated_nc_ns = None
     max_partitions = max(
         (int(event.get("partition_count") or 1) for event in source_events),
@@ -3177,23 +3251,11 @@ def simulate(
     else:
         runtime_control_in_domain = None
     if model.compositional_lowering is not None:
-        value_dtypes = [
-            str(value)
-            for event in source_events
-            for value in (
-                [event.get("output_dtype")]
-                + list(event.get("input_dtypes") or [])
-            )
-            if value and str(value).lower() not in {"bool", "boolean"}
-        ]
-        source_dtype = (
-            Counter(value_dtypes).most_common(1)[0][0]
-            if value_dtypes else "float32"
-        )
         for engine, baseline_ns in model.compositional_lowering.runtime_baseline_ns(
             source_dtype, max_partitions
         ).items():
-            engine_busy[engine] = engine_busy.get(engine, 0.0) + baseline_ns
+            if whole_program_routing_match != "covered":
+                engine_busy[engine] = engine_busy.get(engine, 0.0) + baseline_ns
             engine_runtime_baseline_ns[engine] = baseline_ns
     compute_critical_ns = max(
         engine_busy.get(ENGINE_VECTOR, 0.0),
@@ -3226,6 +3288,9 @@ def simulate(
             "compute_only": compute_critical_ns,
             "compute_plus_dma": phase_critical_ns,
             "resource_overlap_makespan": makespan,
+            "whole_program_routing_covered": float(
+                whole_program_routing_match == "covered"
+            ),
             "runtime_critical_path_extension": final_ns - makespan,
             "without_structured_completion_floor": without_structured_completion_ns,
             "structured_completion_floor_ns": structured_completion_ns,

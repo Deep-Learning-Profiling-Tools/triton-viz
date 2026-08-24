@@ -884,7 +884,14 @@ def structural_calibration_key(region: dict[str, Any]) -> str:
     two = int(region.get("two_input_elementwise_count", 0))
     previous = str(region.get("previous_family") or "none")
     following = str(region.get("next_family") or "none")
-    partition_count = max(1, int(region.get("partition_count") or 1))
+    partition_count = max(
+        1,
+        int(
+            region.get("logical_active_partition_count")
+            or region.get("partition_count")
+            or 1
+        ),
+    )
     partition_bucket = 1 << (partition_count.bit_length() - 1)
     partition_broadcast_count = max(
         0, int(region.get("partition_broadcast_input_count") or 0)

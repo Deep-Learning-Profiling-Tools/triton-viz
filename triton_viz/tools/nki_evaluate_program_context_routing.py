@@ -101,7 +101,11 @@ def _routing_features(features: dict[str, float]) -> dict[str, float]:
     }
 
 
-def _samples(roots: list[Path], baselines: dict) -> list[dict]:
+def _samples(
+    roots: list[Path],
+    baselines: dict,
+    required_engines: tuple[str, ...] = ENGINES,
+) -> list[dict]:
     engine_rows = _cases(roots, baselines)
     by_case: dict[str, dict] = {}
     for row in engine_rows:
@@ -130,7 +134,7 @@ def _samples(roots: list[Path], baselines: dict) -> list[dict]:
     return [
         sample
         for sample in by_case.values()
-        if all(engine in sample["payloads"] for engine in ENGINES)
+        if all(engine in sample["payloads"] for engine in required_engines)
     ]
 
 

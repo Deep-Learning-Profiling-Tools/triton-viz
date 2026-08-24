@@ -331,6 +331,8 @@ def fit(root: Path, dry_run: bool) -> None:
             *control_roots,
             "--compute-calibration-csv",
             compute,
+            "--artifact-role",
+            "control",
             "--audit-output",
             calibration / "structured_compute_audit.csv",
             "--output",
@@ -670,22 +672,43 @@ def evaluate(root: Path, dry_run: bool) -> None:
         {row["calibration_match"] for row in full_bf16_rows}
     )
     mechanism_rows = full_rows + full_bf16_rows + tensor_rows + attention_rows
-    report["mechanism_busy_mape_pct"] = {
-        name: statistics.mean(
-            abs(float(row[field]))
+    def mechanism_wape(predicted_field: str, actual_field: str) -> float | None:
+        pairs = [
+            (float(row[predicted_field]), float(row[actual_field]))
             for row in mechanism_rows
-            if row.get(field) not in (None, "")
-        )
-        for name, field in {
-            "dynamic_dma": "dynamic_dma_error_pct",
-            "static_dma": "static_dma_error_pct",
-            "vector_payload": "vector_payload_error_pct",
-            "scalar_payload": "scalar_payload_error_pct",
-            "gpsimd_payload": "gpsimd_payload_error_pct",
-            "tensor": "tensor_error_pct",
-        }.items()
-        if any(row.get(field) not in (None, "") for row in mechanism_rows)
+            if row.get(predicted_field) not in (None, "")
+            and row.get(actual_field) not in (None, "")
+        ]
+        denominator = sum(actual for _, actual in pairs)
+        if not pairs or denominator <= 0:
+            return None
+        return sum(abs(predicted - actual) for predicted, actual in pairs) / denominator * 100.0
+
+    mechanism_fields = {
+        "dynamic_dma": ("predicted_dynamic_dma_us", "hardware_dynamic_dma_us"),
+        "static_dma": ("predicted_static_dma_us", "hardware_static_dma_us"),
+        "vector_payload": (
+            "predicted_vector_payload_us",
+            "hardware_vector_payload_us",
+        ),
+        "scalar_payload": (
+            "predicted_scalar_payload_us",
+            "hardware_scalar_payload_us",
+        ),
+        "gpsimd_payload": (
+            "predicted_gpsimd_payload_us",
+            "hardware_gpsimd_payload_us",
+        ),
+        "tensor": ("predicted_tensor_us", "hardware_tensor_active_us"),
     }
+    report["mechanism_busy_wape_pct"] = {
+        name: value
+        for name, fields in mechanism_fields.items()
+        if (value := mechanism_wape(*fields)) is not None
+    }
+    report["mechanism_busy_metric"] = (
+        "WAPE=sum(abs(predicted-actual))/sum(actual); zero/small actual rows retained"
+    )
     report["mechanism_coverage"] = {}
     for name, field, coverage_field in (
         ("vector", "vector_payload_error_pct", "micro_dag_vector_covered"),

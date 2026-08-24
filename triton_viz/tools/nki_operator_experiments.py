@@ -726,6 +726,26 @@ def _mape(rows: list[dict[str, Any]], field: str) -> float | str:
     return statistics.mean(vals) if vals else ""
 
 
+def _wape(
+    rows: list[dict[str, Any]], predicted_field: str, actual_field: str
+) -> float | str:
+    pairs = [
+        (float(row[predicted_field]), float(row[actual_field]))
+        for row in rows
+        if row.get("status") == "ok"
+        and row.get(predicted_field) not in (None, "")
+        and row.get(actual_field) not in (None, "")
+    ]
+    denominator = sum(actual for _, actual in pairs)
+    return (
+        sum(abs(predicted - actual) for predicted, actual in pairs)
+        / denominator
+        * 100.0
+        if pairs and denominator > 0
+        else ""
+    )
+
+
 def main(argv: list[str] | None = None) -> int:
     global TILEBENCH_OPS
     parser = argparse.ArgumentParser(description=__doc__)
@@ -981,12 +1001,12 @@ def main(argv: list[str] | None = None) -> int:
     print(
         "=== NC-p50 MAPE:",
         _mape(rows, "error_vs_nc_pct"),
-        " vector-busy MAPE:",
-        _mape(rows, "vector_busy_error_pct"),
-        " scalar-busy MAPE:",
-        _mape(rows, "scalar_busy_error_pct"),
-        " dma-busy MAPE:",
-        _mape(rows, "dma_busy_error_pct"),
+        " vector-busy WAPE:",
+        _wape(rows, "predicted_vector_busy_us", "hardware_vector_active_us"),
+        " scalar-busy WAPE:",
+        _wape(rows, "predicted_scalar_busy_us", "hardware_scalar_active_us"),
+        " dma-busy WAPE:",
+        _wape(rows, "predicted_dma_busy_us", "hardware_dma_active_us"),
     )
     return 1 if any(r["status"] == "error" for r in rows) else 0
 

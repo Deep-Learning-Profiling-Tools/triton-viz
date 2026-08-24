@@ -1,11 +1,29 @@
 import csv
 import json
 
+import pytest
+
 from triton_viz.tools.nki_cost_model import ComputeCalibration
 from triton_viz.tools.nki_fit_structured_controls import (
     _load_completion_by_case,
     collect_source_only,
+    main,
 )
+
+
+def test_structured_fit_rejects_target_before_opening_artifacts(tmp_path):
+    with pytest.raises(SystemExit, match="Refusing target post-compile"):
+        main(
+            [
+                str(tmp_path / "target"),
+                "--compute-calibration-csv",
+                str(tmp_path / "missing.csv"),
+                "--artifact-role",
+                "target",
+                "--output",
+                str(tmp_path / "out.csv"),
+            ]
+        )
 
 
 def test_load_completion_accepts_operator_results_schema(tmp_path):

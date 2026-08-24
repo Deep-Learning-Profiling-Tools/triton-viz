@@ -766,6 +766,166 @@ def factorial_dag_blocked_audit_schedule(schedule_id: int) -> tuple[str, ...]:
     return tuple(actions)
 
 
+def factorial_dag_role_swap_audit_schedule(schedule_id: int) -> tuple[str, ...]:
+    """Frozen mixed-state audit; kernel factory swaps the two branch roles."""
+    index = int(schedule_id) - 7000
+    if not 0 <= index < 54:
+        raise ValueError(
+            "factorial DAG role-swap audit IDs are frozen to 7000--7053"
+        )
+    state = index % 4
+    if state == 0:
+        return factorial_dag_schedule(3000 + index)
+    if state == 1:
+        return factorial_dag_audit_schedule(4000 + index)
+    if state == 2:
+        return factorial_dag_interleave_schedule(5000 + index)
+    return factorial_dag_blocked_audit_schedule(6000 + index)
+
+
+def factorial_dag_join_target_audit_schedule(schedule_id: int) -> tuple[str, ...]:
+    """Frozen mixed-state audit; kernel swaps cross-join update targets."""
+    index = int(schedule_id) - 8000
+    if not 0 <= index < 54:
+        raise ValueError(
+            "factorial DAG join-target audit IDs are frozen to 8000--8053"
+        )
+    state = index % 4
+    if state == 0:
+        return factorial_dag_schedule(3000 + index)
+    if state == 1:
+        return factorial_dag_audit_schedule(4000 + index)
+    if state == 2:
+        return factorial_dag_interleave_schedule(5000 + index)
+    return factorial_dag_blocked_audit_schedule(6000 + index)
+
+
+def factorial_dag_alternating_join_audit_schedule(
+    schedule_id: int,
+) -> tuple[str, ...]:
+    """Frozen mixed-state audit with alternating cross-join update targets."""
+    index = int(schedule_id) - 9000
+    if not 0 <= index < 54:
+        raise ValueError(
+            "factorial DAG alternating-join audit IDs are frozen to 9000--9053"
+        )
+    state = index % 4
+    if state == 0:
+        return factorial_dag_schedule(3000 + index)
+    if state == 1:
+        return factorial_dag_audit_schedule(4000 + index)
+    if state == 2:
+        return factorial_dag_interleave_schedule(5000 + index)
+    return factorial_dag_blocked_audit_schedule(6000 + index)
+
+
+def factorial_dag_paired_ownership_audit_schedule(
+    schedule_id: int,
+) -> tuple[str, ...]:
+    """Frozen mixed-state audit with branch0,branch0,branch1,branch1 joins."""
+    index = int(schedule_id) - 10000
+    if not 0 <= index < 54:
+        raise ValueError(
+            "factorial DAG paired-ownership audit IDs are frozen to "
+            "10000--10053"
+        )
+    state = index % 4
+    if state == 0:
+        return factorial_dag_schedule(3000 + index)
+    if state == 1:
+        return factorial_dag_audit_schedule(4000 + index)
+    if state == 2:
+        return factorial_dag_interleave_schedule(5000 + index)
+    return factorial_dag_blocked_audit_schedule(6000 + index)
+
+
+def factorial_dag_fanout_audit_schedule(schedule_id: int) -> tuple[str, ...]:
+    """Frozen whole-family audit with branch-local fanout/reuse grammar."""
+    index = int(schedule_id) - 11000
+    if not 0 <= index < 54:
+        raise ValueError(
+            "factorial DAG fanout audit IDs are frozen to 11000--11053"
+        )
+    state = index % 4
+    if state == 0:
+        return factorial_dag_schedule(3000 + index)
+    if state == 1:
+        return factorial_dag_audit_schedule(4000 + index)
+    if state == 2:
+        return factorial_dag_interleave_schedule(5000 + index)
+    return factorial_dag_blocked_audit_schedule(6000 + index)
+
+
+def factorial_dag_fanout_variant_audit_schedule(
+    schedule_id: int,
+) -> tuple[str, ...]:
+    """Frozen fanout-both audit with swapped local primitive roles."""
+    index = int(schedule_id) - 12000
+    if not 0 <= index < 54:
+        raise ValueError(
+            "factorial DAG fanout-variant audit IDs are frozen to 12000--12053"
+        )
+    state = index % 4
+    if state == 0:
+        return factorial_dag_schedule(3000 + index)
+    if state == 1:
+        return factorial_dag_audit_schedule(4000 + index)
+    if state == 2:
+        return factorial_dag_interleave_schedule(5000 + index)
+    return factorial_dag_blocked_audit_schedule(6000 + index)
+
+
+def factorial_dag_fanout_chain_audit_schedule(
+    schedule_id: int,
+) -> tuple[str, ...]:
+    """Frozen fanout-both audit with two-op side paths on each branch."""
+    index = int(schedule_id) - 13000
+    if not 0 <= index < 54:
+        raise ValueError(
+            "factorial DAG fanout-chain audit IDs are frozen to 13000--13053"
+        )
+    state = index % 4
+    if state == 0:
+        return factorial_dag_schedule(3000 + index)
+    if state == 1:
+        return factorial_dag_audit_schedule(4000 + index)
+    if state == 2:
+        return factorial_dag_interleave_schedule(5000 + index)
+    return factorial_dag_blocked_audit_schedule(6000 + index)
+
+
+def _factorial_mixed_state_schedule(schedule_id: int, base: int) -> tuple[str, ...]:
+    index = int(schedule_id) - base
+    if not 0 <= index < 54:
+        raise ValueError(f"factorial mixed-state IDs are frozen to {base}--{base + 53}")
+    state = index % 4
+    if state == 0:
+        return factorial_dag_schedule(3000 + index)
+    if state == 1:
+        return factorial_dag_audit_schedule(4000 + index)
+    if state == 2:
+        return factorial_dag_interleave_schedule(5000 + index)
+    return factorial_dag_blocked_audit_schedule(6000 + index)
+
+
+def factorial_dag_fanout_branch0_extra_schedule(
+    schedule_id: int,
+) -> tuple[str, ...]:
+    return _factorial_mixed_state_schedule(schedule_id, 14000)
+
+
+def factorial_dag_fanout_branch1_extra_schedule(
+    schedule_id: int,
+) -> tuple[str, ...]:
+    return _factorial_mixed_state_schedule(schedule_id, 15000)
+
+
+def factorial_dag_fanout_deep_audit_schedule(
+    schedule_id: int,
+) -> tuple[str, ...]:
+    return _factorial_mixed_state_schedule(schedule_id, 16000)
+
+
 def sequence_factorialdag2k_factory(schedule_id: int, *, audit: bool = False):
     schedule = (
         factorial_dag_audit_schedule(schedule_id)
@@ -854,6 +1014,413 @@ def sequence_factorialdagblockedaudit2k_factory(schedule_id: int):
                 b = nl.add(b, nl.multiply(nl.sum(b, axis=1, keepdims=True), .0001))
             elif action == "cross_add": a = nl.add(a, b)
             else: b = nl.multiply(a, b)
+        nl.store(out[pi, fi], nl.add(a, b), mask=mask)
+        return out
+
+    return kernel
+
+
+def sequence_factorialdagroleswapaudit2k_factory(schedule_id: int):
+    schedule = factorial_dag_role_swap_audit_schedule(schedule_id)
+
+    @nki.jit
+    def kernel(x, y, logical_f):
+        p, _ = x.shape; tile_f = 2048
+        out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+        pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+        mask = (pi < p) & (fi < logical_f)
+        # Deliberately reverse the branch initialization roles and source
+        # operand order. The primitive vocabulary and routing-state levels are
+        # unchanged, but this is a distinct source context.
+        a = nl.multiply(nl.load(y[pi, fi], mask=mask), 1.001)
+        b = nl.add(nl.load(x[pi, fi], mask=mask), 2.0)
+        for index in nl.static_range(len(schedule)):
+            action = schedule[index]
+            if action == "a_add": a = nl.add(a, .1)
+            elif action == "a_multiply": a = nl.multiply(a, 1.001)
+            elif action == "a_exp": a = nl.exp(nl.multiply(a, .1))
+            elif action == "b_subtract": b = nl.subtract(b, .01)
+            elif action == "b_maximum": b = nl.maximum(b, 0.0)
+            elif action == "a_reduce":
+                a = nl.add(a, nl.multiply(nl.sum(a, axis=1, keepdims=True), .0001))
+            elif action == "b_reduce":
+                b = nl.add(b, nl.multiply(nl.sum(b, axis=1, keepdims=True), .0001))
+            elif action == "cross_add": a = nl.add(a, b)
+            else: b = nl.multiply(a, b)
+        nl.store(out[pi, fi], nl.add(b, a), mask=mask)
+        return out
+
+    return kernel
+
+
+def sequence_factorialdagjointargetaudit2k_factory(schedule_id: int):
+    schedule = factorial_dag_join_target_audit_schedule(schedule_id)
+
+    @nki.jit
+    def kernel(x, y, logical_f):
+        p, _ = x.shape; tile_f = 2048
+        out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+        pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+        mask = (pi < p) & (fi < logical_f)
+        a = nl.add(nl.load(x[pi, fi], mask=mask), 2.0)
+        b = nl.multiply(nl.load(y[pi, fi], mask=mask), 1.001)
+        for index in nl.static_range(len(schedule)):
+            action = schedule[index]
+            if action == "a_add": a = nl.add(a, .1)
+            elif action == "a_multiply": a = nl.multiply(a, 1.001)
+            elif action == "a_exp": a = nl.exp(nl.multiply(a, .1))
+            elif action == "b_subtract": b = nl.subtract(b, .01)
+            elif action == "b_maximum": b = nl.maximum(b, 0.0)
+            elif action == "a_reduce":
+                a = nl.add(a, nl.multiply(nl.sum(a, axis=1, keepdims=True), .0001))
+            elif action == "b_reduce":
+                b = nl.add(b, nl.multiply(nl.sum(b, axis=1, keepdims=True), .0001))
+            elif action == "cross_add":
+                b = nl.add(b, a)
+            else:
+                a = nl.multiply(b, a)
+        nl.store(out[pi, fi], nl.add(a, b), mask=mask)
+        return out
+
+    return kernel
+
+
+def sequence_factorialdagalternatingjoinaudit2k_factory(schedule_id: int):
+    schedule = factorial_dag_alternating_join_audit_schedule(schedule_id)
+
+    @nki.jit
+    def kernel(x, y, logical_f):
+        p, _ = x.shape; tile_f = 2048
+        out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+        pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+        mask = (pi < p) & (fi < logical_f)
+        a = nl.add(nl.load(x[pi, fi], mask=mask), 2.0)
+        b = nl.multiply(nl.load(y[pi, fi], mask=mask), 1.001)
+        join_ordinal = 0
+        for index in nl.static_range(len(schedule)):
+            action = schedule[index]
+            if action == "a_add": a = nl.add(a, .1)
+            elif action == "a_multiply": a = nl.multiply(a, 1.001)
+            elif action == "a_exp": a = nl.exp(nl.multiply(a, .1))
+            elif action == "b_subtract": b = nl.subtract(b, .01)
+            elif action == "b_maximum": b = nl.maximum(b, 0.0)
+            elif action == "a_reduce":
+                a = nl.add(a, nl.multiply(nl.sum(a, axis=1, keepdims=True), .0001))
+            elif action == "b_reduce":
+                b = nl.add(b, nl.multiply(nl.sum(b, axis=1, keepdims=True), .0001))
+            elif action == "cross_add":
+                if join_ordinal % 2 == 0:
+                    a = nl.add(a, b)
+                else:
+                    b = nl.add(b, a)
+                join_ordinal += 1
+            else:
+                if join_ordinal % 2 == 0:
+                    b = nl.multiply(a, b)
+                else:
+                    a = nl.multiply(b, a)
+                join_ordinal += 1
+        nl.store(out[pi, fi], nl.add(a, b), mask=mask)
+        return out
+
+    return kernel
+
+
+def sequence_factorialdagpairedownershipaudit2k_factory(schedule_id: int):
+    schedule = factorial_dag_paired_ownership_audit_schedule(schedule_id)
+
+    @nki.jit
+    def kernel(x, y, logical_f):
+        p, _ = x.shape; tile_f = 2048
+        out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+        pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+        mask = (pi < p) & (fi < logical_f)
+        a = nl.add(nl.load(x[pi, fi], mask=mask), 2.0)
+        b = nl.multiply(nl.load(y[pi, fi], mask=mask), 1.001)
+        join_ordinal = 0
+        for index in nl.static_range(len(schedule)):
+            action = schedule[index]
+            if action == "a_add": a = nl.add(a, .1)
+            elif action == "a_multiply": a = nl.multiply(a, 1.001)
+            elif action == "a_exp": a = nl.exp(nl.multiply(a, .1))
+            elif action == "b_subtract": b = nl.subtract(b, .01)
+            elif action == "b_maximum": b = nl.maximum(b, 0.0)
+            elif action == "a_reduce":
+                a = nl.add(a, nl.multiply(nl.sum(a, axis=1, keepdims=True), .0001))
+            elif action == "b_reduce":
+                b = nl.add(b, nl.multiply(nl.sum(b, axis=1, keepdims=True), .0001))
+            elif action == "cross_add":
+                if (join_ordinal // 2) % 2 == 0:
+                    a = nl.add(a, b)
+                else:
+                    b = nl.add(b, a)
+                join_ordinal += 1
+            else:
+                if (join_ordinal // 2) % 2 == 0:
+                    a = nl.multiply(a, b)
+                else:
+                    b = nl.multiply(a, b)
+                join_ordinal += 1
+        nl.store(out[pi, fi], nl.add(a, b), mask=mask)
+        return out
+
+    return kernel
+
+
+def sequence_factorialdagfanoutaudit2k_factory(schedule_id: int):
+    schedule = factorial_dag_fanout_audit_schedule(schedule_id)
+
+    @nki.jit
+    def kernel(x, y, logical_f):
+        p, _ = x.shape; tile_f = 2048
+        out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+        pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+        mask = (pi < p) & (fi < logical_f)
+        a = nl.add(nl.load(x[pi, fi], mask=mask), 2.0)
+        b = nl.multiply(nl.load(y[pi, fi], mask=mask), 1.001)
+        # Distinct grammar family: each branch fans out and rejoins locally
+        # before any cross-branch routing. Cross-branch state remains covered.
+        a_side = nl.multiply(a, .999)
+        a = nl.add(a, a_side)
+        b_side = nl.add(b, .002)
+        b = nl.multiply(b, b_side)
+        join_ordinal = 0
+        for index in nl.static_range(len(schedule)):
+            action = schedule[index]
+            if action == "a_add": a = nl.add(a, .1)
+            elif action == "a_multiply": a = nl.multiply(a, 1.001)
+            elif action == "a_exp": a = nl.exp(nl.multiply(a, .1))
+            elif action == "b_subtract": b = nl.subtract(b, .01)
+            elif action == "b_maximum": b = nl.maximum(b, 0.0)
+            elif action == "a_reduce":
+                a = nl.add(a, nl.multiply(nl.sum(a, axis=1, keepdims=True), .0001))
+            elif action == "b_reduce":
+                b = nl.add(b, nl.multiply(nl.sum(b, axis=1, keepdims=True), .0001))
+            elif action == "cross_add":
+                if (join_ordinal // 2) % 2 == 0:
+                    a = nl.add(a, b)
+                else:
+                    b = nl.add(b, a)
+                join_ordinal += 1
+            else:
+                if (join_ordinal // 2) % 2 == 0:
+                    a = nl.multiply(a, b)
+                else:
+                    b = nl.multiply(a, b)
+                join_ordinal += 1
+        nl.store(out[pi, fi], nl.add(a, b), mask=mask)
+        return out
+
+    return kernel
+
+
+def sequence_factorialdagfanoutvariantaudit2k_factory(schedule_id: int):
+    schedule = factorial_dag_fanout_variant_audit_schedule(schedule_id)
+
+    @nki.jit
+    def kernel(x, y, logical_f):
+        p, _ = x.shape; tile_f = 2048
+        out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+        pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+        mask = (pi < p) & (fi < logical_f)
+        a = nl.add(nl.load(x[pi, fi], mask=mask), 2.0)
+        b = nl.multiply(nl.load(y[pi, fi], mask=mask), 1.001)
+        a_side = nl.add(a, .003)
+        a = nl.multiply(a, a_side)
+        b_side = nl.multiply(b, .997)
+        b = nl.add(b, b_side)
+        join_ordinal = 0
+        for index in nl.static_range(len(schedule)):
+            action = schedule[index]
+            if action == "a_add": a = nl.add(a, .1)
+            elif action == "a_multiply": a = nl.multiply(a, 1.001)
+            elif action == "a_exp": a = nl.exp(nl.multiply(a, .1))
+            elif action == "b_subtract": b = nl.subtract(b, .01)
+            elif action == "b_maximum": b = nl.maximum(b, 0.0)
+            elif action == "a_reduce":
+                a = nl.add(a, nl.multiply(nl.sum(a, axis=1, keepdims=True), .0001))
+            elif action == "b_reduce":
+                b = nl.add(b, nl.multiply(nl.sum(b, axis=1, keepdims=True), .0001))
+            elif action == "cross_add":
+                if (join_ordinal // 2) % 2 == 0:
+                    a = nl.add(a, b)
+                else:
+                    b = nl.add(b, a)
+                join_ordinal += 1
+            else:
+                if (join_ordinal // 2) % 2 == 0:
+                    a = nl.multiply(a, b)
+                else:
+                    b = nl.multiply(a, b)
+                join_ordinal += 1
+        nl.store(out[pi, fi], nl.add(a, b), mask=mask)
+        return out
+
+    return kernel
+
+
+def sequence_factorialdagfanoutchainaudit2k_factory(schedule_id: int):
+    schedule = factorial_dag_fanout_chain_audit_schedule(schedule_id)
+
+    @nki.jit
+    def kernel(x, y, logical_f):
+        p, _ = x.shape; tile_f = 2048
+        out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+        pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+        mask = (pi < p) & (fi < logical_f)
+        a = nl.add(nl.load(x[pi, fi], mask=mask), 2.0)
+        b = nl.multiply(nl.load(y[pi, fi], mask=mask), 1.001)
+        a_side = nl.multiply(nl.add(a, .003), .997)
+        a = nl.add(a, a_side)
+        b_side = nl.add(nl.multiply(b, .997), .003)
+        b = nl.multiply(b, b_side)
+        join_ordinal = 0
+        for index in nl.static_range(len(schedule)):
+            action = schedule[index]
+            if action == "a_add": a = nl.add(a, .1)
+            elif action == "a_multiply": a = nl.multiply(a, 1.001)
+            elif action == "a_exp": a = nl.exp(nl.multiply(a, .1))
+            elif action == "b_subtract": b = nl.subtract(b, .01)
+            elif action == "b_maximum": b = nl.maximum(b, 0.0)
+            elif action == "a_reduce":
+                a = nl.add(a, nl.multiply(nl.sum(a, axis=1, keepdims=True), .0001))
+            elif action == "b_reduce":
+                b = nl.add(b, nl.multiply(nl.sum(b, axis=1, keepdims=True), .0001))
+            elif action == "cross_add":
+                if (join_ordinal // 2) % 2 == 0:
+                    a = nl.add(a, b)
+                else:
+                    b = nl.add(b, a)
+                join_ordinal += 1
+            else:
+                if (join_ordinal // 2) % 2 == 0:
+                    a = nl.multiply(a, b)
+                else:
+                    b = nl.multiply(a, b)
+                join_ordinal += 1
+        nl.store(out[pi, fi], nl.add(a, b), mask=mask)
+        return out
+
+    return kernel
+
+
+def sequence_factorialdagfanoutbranch0extra2k_factory(schedule_id: int):
+    schedule = factorial_dag_fanout_branch0_extra_schedule(schedule_id)
+
+    @nki.jit
+    def kernel(x, y, logical_f):
+        p, _ = x.shape; tile_f = 2048
+        out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+        pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+        mask = (pi < p) & (fi < logical_f)
+        a = nl.add(nl.load(x[pi, fi], mask=mask), 2.0)
+        b = nl.multiply(nl.load(y[pi, fi], mask=mask), 1.001)
+        a_side = nl.multiply(nl.add(a, .003), .997)
+        a = nl.add(a, a_side)
+        b_side = nl.add(b, .002)
+        b = nl.multiply(b, b_side)
+        join_ordinal = 0
+        for index in nl.static_range(len(schedule)):
+            action = schedule[index]
+            if action == "a_add": a = nl.add(a, .1)
+            elif action == "a_multiply": a = nl.multiply(a, 1.001)
+            elif action == "a_exp": a = nl.exp(nl.multiply(a, .1))
+            elif action == "b_subtract": b = nl.subtract(b, .01)
+            elif action == "b_maximum": b = nl.maximum(b, 0.0)
+            elif action == "a_reduce":
+                a = nl.add(a, nl.multiply(nl.sum(a, axis=1, keepdims=True), .0001))
+            elif action == "b_reduce":
+                b = nl.add(b, nl.multiply(nl.sum(b, axis=1, keepdims=True), .0001))
+            elif action == "cross_add":
+                if (join_ordinal // 2) % 2 == 0: a = nl.add(a, b)
+                else: b = nl.add(b, a)
+                join_ordinal += 1
+            else:
+                if (join_ordinal // 2) % 2 == 0: a = nl.multiply(a, b)
+                else: b = nl.multiply(a, b)
+                join_ordinal += 1
+        nl.store(out[pi, fi], nl.add(a, b), mask=mask)
+        return out
+
+    return kernel
+
+
+def sequence_factorialdagfanoutbranch1extra2k_factory(schedule_id: int):
+    schedule = factorial_dag_fanout_branch1_extra_schedule(schedule_id)
+
+    @nki.jit
+    def kernel(x, y, logical_f):
+        p, _ = x.shape; tile_f = 2048
+        out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+        pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+        mask = (pi < p) & (fi < logical_f)
+        a = nl.add(nl.load(x[pi, fi], mask=mask), 2.0)
+        b = nl.multiply(nl.load(y[pi, fi], mask=mask), 1.001)
+        a_side = nl.multiply(a, .999)
+        a = nl.add(a, a_side)
+        b_side = nl.add(nl.multiply(b, .997), .003)
+        b = nl.multiply(b, b_side)
+        join_ordinal = 0
+        for index in nl.static_range(len(schedule)):
+            action = schedule[index]
+            if action == "a_add": a = nl.add(a, .1)
+            elif action == "a_multiply": a = nl.multiply(a, 1.001)
+            elif action == "a_exp": a = nl.exp(nl.multiply(a, .1))
+            elif action == "b_subtract": b = nl.subtract(b, .01)
+            elif action == "b_maximum": b = nl.maximum(b, 0.0)
+            elif action == "a_reduce":
+                a = nl.add(a, nl.multiply(nl.sum(a, axis=1, keepdims=True), .0001))
+            elif action == "b_reduce":
+                b = nl.add(b, nl.multiply(nl.sum(b, axis=1, keepdims=True), .0001))
+            elif action == "cross_add":
+                if (join_ordinal // 2) % 2 == 0: a = nl.add(a, b)
+                else: b = nl.add(b, a)
+                join_ordinal += 1
+            else:
+                if (join_ordinal // 2) % 2 == 0: a = nl.multiply(a, b)
+                else: b = nl.multiply(a, b)
+                join_ordinal += 1
+        nl.store(out[pi, fi], nl.add(a, b), mask=mask)
+        return out
+
+    return kernel
+
+
+def sequence_factorialdagfanoutdeepaudit2k_factory(schedule_id: int):
+    schedule = factorial_dag_fanout_deep_audit_schedule(schedule_id)
+
+    @nki.jit
+    def kernel(x, y, logical_f):
+        p, _ = x.shape; tile_f = 2048
+        out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+        pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+        mask = (pi < p) & (fi < logical_f)
+        a = nl.add(nl.load(x[pi, fi], mask=mask), 2.0)
+        b = nl.multiply(nl.load(y[pi, fi], mask=mask), 1.001)
+        a_side = nl.add(nl.multiply(nl.add(a, .003), .997), .001)
+        a = nl.add(a, a_side)
+        b_side = nl.multiply(nl.add(nl.multiply(b, .997), .003), 1.001)
+        b = nl.multiply(b, b_side)
+        join_ordinal = 0
+        for index in nl.static_range(len(schedule)):
+            action = schedule[index]
+            if action == "a_add": a = nl.add(a, .1)
+            elif action == "a_multiply": a = nl.multiply(a, 1.001)
+            elif action == "a_exp": a = nl.exp(nl.multiply(a, .1))
+            elif action == "b_subtract": b = nl.subtract(b, .01)
+            elif action == "b_maximum": b = nl.maximum(b, 0.0)
+            elif action == "a_reduce":
+                a = nl.add(a, nl.multiply(nl.sum(a, axis=1, keepdims=True), .0001))
+            elif action == "b_reduce":
+                b = nl.add(b, nl.multiply(nl.sum(b, axis=1, keepdims=True), .0001))
+            elif action == "cross_add":
+                if (join_ordinal // 2) % 2 == 0: a = nl.add(a, b)
+                else: b = nl.add(b, a)
+                join_ordinal += 1
+            else:
+                if (join_ordinal // 2) % 2 == 0: a = nl.multiply(a, b)
+                else: b = nl.multiply(a, b)
+                join_ordinal += 1
         nl.store(out[pi, fi], nl.add(a, b), mask=mask)
         return out
 
@@ -1093,6 +1660,42 @@ def elementwise_sigmoid_wide_masked_kernel(x, y):
 
 
 @nki.jit
+def elementwise_add_wide_masked_audit_kernel(x, y):
+    """Untouched arithmetic audit for the wide physical-allocation regime."""
+    p, f = x.shape; tile_f = 16384
+    out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+    pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+    mask = (pi < p) & (fi < f)
+    value = nl.add(nl.load(x[pi, fi], mask=mask), 0.25, mask=mask)
+    nl.store(out[pi, fi], value=value, mask=mask)
+    return out
+
+
+@nki.jit
+def elementwise_exp_wide_masked_audit_kernel(x, y):
+    """Untouched transcendental audit for the wide allocation regime."""
+    p, f = x.shape; tile_f = 16384
+    out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+    pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+    mask = (pi < p) & (fi < f)
+    value = nl.exp(nl.load(x[pi, fi], mask=mask), mask=mask)
+    nl.store(out[pi, fi], value=value, mask=mask)
+    return out
+
+
+@nki.jit
+def elementwise_minimum_wide_masked_audit_kernel(x, y):
+    """Untouched min/max-class audit for the wide allocation regime."""
+    p, f = x.shape; tile_f = 16384
+    out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+    pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+    mask = (pi < p) & (fi < f)
+    value = nl.minimum(nl.load(x[pi, fi], mask=mask), 0.0, mask=mask)
+    nl.store(out[pi, fi], value=value, mask=mask)
+    return out
+
+
+@nki.jit
 def masked_log_reduction_kernel(x, y):
     """Masked log/where/arithmetic/reduction compiler control."""
     p, f = x.shape
@@ -1130,6 +1733,19 @@ def elementwise_multiply2_kernel(x, y):
     pi, fi = nl.arange(p)[:, None], nl.arange(f)[None, :]
     a, b = nl.load(x[pi, fi]), nl.load(y[pi, fi])
     nl.store(out[pi, fi], value=nl.multiply(nl.multiply(a, b), b, dtype=x.dtype))
+    return out
+
+
+@nki.jit
+def memory_interleave_offset_kernel(x, y):
+    """Memory-only two-root interleave with no arithmetic join."""
+    p, f = x.shape
+    out = nl.ndarray((p, 2 * f), dtype=x.dtype, buffer=nl.shared_hbm)
+    pi, fi = nl.arange(p)[:, None], nl.arange(f)[None, :]
+    left = nl.load(x[pi, fi])
+    right = nl.load(y[pi, fi])
+    nl.store(out[pi, 2 * fi], value=left)
+    nl.store(out[pi, 2 * fi + 1], value=right)
     return out
 
 
@@ -1589,9 +2205,13 @@ KERNELS = {
     "elementwise_maximum_wide_masked": elementwise_maximum_wide_masked_kernel,
     "elementwise_multiply_wide_masked": elementwise_multiply_wide_masked_kernel,
     "elementwise_sigmoid_wide_masked": elementwise_sigmoid_wide_masked_kernel,
+    "elementwise_add_wide_masked_audit": elementwise_add_wide_masked_audit_kernel,
+    "elementwise_exp_wide_masked_audit": elementwise_exp_wide_masked_audit_kernel,
+    "elementwise_minimum_wide_masked_audit": elementwise_minimum_wide_masked_audit_kernel,
     "masked_log_reduction": masked_log_reduction_kernel,
     "softmax_reduction": softmax_reduction_kernel,
     "elementwise_multiply2": elementwise_multiply2_kernel,
+    "memory_interleave_offset": memory_interleave_offset_kernel,
     "broadcast_multiply2": broadcast_multiply2_kernel,
     "broadcast_affine": broadcast_affine_kernel,
     "two_pass_reduce_affine": two_pass_reduce_affine_kernel,
@@ -1638,6 +2258,26 @@ def region_control_factory(*, kind: str, p: int, f: int, chain: int = 1,
         return sequence_factorialdaginterleave2k_factory(chain), [(p, 2048), (p, 2048)], [f]
     if kind == "sequence_factorialdagblockedaudit2k":
         return sequence_factorialdagblockedaudit2k_factory(chain), [(p, 2048), (p, 2048)], [f]
+    if kind == "sequence_factorialdagroleswapaudit2k":
+        return sequence_factorialdagroleswapaudit2k_factory(chain), [(p, 2048), (p, 2048)], [f]
+    if kind == "sequence_factorialdagjointargetaudit2k":
+        return sequence_factorialdagjointargetaudit2k_factory(chain), [(p, 2048), (p, 2048)], [f]
+    if kind == "sequence_factorialdagalternatingjoinaudit2k":
+        return sequence_factorialdagalternatingjoinaudit2k_factory(chain), [(p, 2048), (p, 2048)], [f]
+    if kind == "sequence_factorialdagpairedownershipaudit2k":
+        return sequence_factorialdagpairedownershipaudit2k_factory(chain), [(p, 2048), (p, 2048)], [f]
+    if kind == "sequence_factorialdagfanoutaudit2k":
+        return sequence_factorialdagfanoutaudit2k_factory(chain), [(p, 2048), (p, 2048)], [f]
+    if kind == "sequence_factorialdagfanoutvariantaudit2k":
+        return sequence_factorialdagfanoutvariantaudit2k_factory(chain), [(p, 2048), (p, 2048)], [f]
+    if kind == "sequence_factorialdagfanoutchainaudit2k":
+        return sequence_factorialdagfanoutchainaudit2k_factory(chain), [(p, 2048), (p, 2048)], [f]
+    if kind == "sequence_factorialdagfanoutbranch0extra2k":
+        return sequence_factorialdagfanoutbranch0extra2k_factory(chain), [(p, 2048), (p, 2048)], [f]
+    if kind == "sequence_factorialdagfanoutbranch1extra2k":
+        return sequence_factorialdagfanoutbranch1extra2k_factory(chain), [(p, 2048), (p, 2048)], [f]
+    if kind == "sequence_factorialdagfanoutdeepaudit2k":
+        return sequence_factorialdagfanoutdeepaudit2k_factory(chain), [(p, 2048), (p, 2048)], [f]
     if kind.startswith("sequence_deep2k_"):
         return KERNELS[kind], [(p, 2048), (p, 2048)], [f, chain]
     if kind.startswith("sequence_deepmixed2k_"):

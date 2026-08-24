@@ -229,6 +229,19 @@ def test_structural_key_buckets_multiple_partition_broadcasts():
     )
 
 
+def test_calibration_key_uses_logical_partition_under_physical_padding():
+    base = {
+        "op_histogram": {"add": 1},
+        "one_input_elementwise_count": 1,
+        "partition_count": 128,
+        "logical_active_partition_count": 1,
+    }
+    p16 = {**base, "logical_active_partition_count": 16}
+    assert structural_calibration_key(base) != structural_calibration_key(p16)
+    assert "|p=1|" in structural_calibration_key(base)
+    assert "|p=16|" in structural_calibration_key(p16)
+
+
 def test_region_ir_v2_provenance_is_excluded_from_structural_key():
     region = build_region_ir(
         [{"op": "compute", "api_op": "relu", "input_ptrs": [1], "output_ptr": 2}]
