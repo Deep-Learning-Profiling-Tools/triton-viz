@@ -11,6 +11,7 @@ from pathlib import Path
 
 from triton_viz.tools.nki_cost_model import ComputeCalibration
 from triton_viz.tools.nki_region_ir import (
+    completion_calibration_dtype,
     match_structural_family,
     structural_calibration_key,
 )
@@ -384,11 +385,15 @@ def collect_source_only(
 ) -> list[dict]:
     """Collect controls without compiler instruction or Flow metadata.
 
+    ``trace.jsonl`` is the semantic authority for calibration grammar.
+    ``dependency_trace.jsonl`` is a separate runtime-physical artifact and
+    must not replace the declared source semantics: simulator promotion can
+    otherwise turn BF16 source regions into FP32 and change region boundaries.
+
     Single-region controls receive the complete kernel-level engine label.
-    For multi-region controls, the only permitted allocation is a frozen
-    source-level rule: divide engine active time in proportion to the number
-    of source primitives in each region.  No compiler instruction, Flow, or
-    target timing metadata participates in the allocation.
+    Multi-region engine ACTIVE is not allocated without a separately audited
+    deconvolution model.  No compiler instruction, Flow, or target timing
+    metadata participates in the allocation.
     """
     completion_by_case = _load_completion_by_case(roots)
 
@@ -397,15 +402,13 @@ def collect_source_only(
         path for root in roots for path in root.glob("*/trace.jsonl")
     ):
         case = declared_trace.parent
-        runtime_trace = case / "dependency_trace.jsonl"
-        trace = runtime_trace if runtime_trace.is_file() else declared_trace
         if include_prefixes and not case.name.startswith(include_prefixes):
             continue
         summary_path = case / "hardware/explorer_summary.json"
-        if not summary_path.is_file():
-            continue
         events = [
-            json.loads(line) for line in trace.read_text().splitlines() if line.strip()
+            json.loads(line)
+            for line in declared_trace.read_text().splitlines()
+            if line.strip()
         ]
         _annotate_fusion_signature(events)
         groups: dict[int, list[dict]] = {}
@@ -418,7 +421,11 @@ def collect_source_only(
         }
         if not regions:
             continue
-        profile = next(iter(_load_json(summary_path).values()), {})
+        profile = (
+            next(iter(_load_json(summary_path).values()), {})
+            if summary_path.is_file()
+            else {}
+        )
         completion_ns = completion_by_case.get(case.name, 0.0)
         if completion_ns > 0:
             for region in regions.values():
@@ -433,7 +440,7 @@ def collect_source_only(
                         "rule_evidence": ";".join(match.evidence),
                         "ood_reasons": ";".join(match.ood_reasons),
                         "engine": "completion",
-                        "dtype": str(region["dtype"]),
+                        "dtype": completion_calibration_dtype(region),
                         "free_dim": int(
                             region.get("logical_free_dim") or region["free_dim"]
                         ),
@@ -458,6 +465,11 @@ def collect_source_only(
         # without a separately audited deconvolution model. Completion is a
         # whole-kernel floor and was safely exported above.
         if len(regions) != 1:
+            continue
+        if not profile:
+            # Completion labels come from control_results/operator_results and
+            # remain usable in stripped source-only archives. Engine payload,
+            # however, requires the aggregate control profile.
             continue
         for group, region in regions.items():
             match = match_structural_family(region)

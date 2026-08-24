@@ -40,7 +40,7 @@ def _profile(case: Path) -> dict:
 
 
 def _one_region(case: Path) -> dict | None:
-    path = case / "dependency_trace.jsonl"
+    path = case / "trace.jsonl"
     if not path.is_file():
         return None
     regions = {
@@ -55,7 +55,7 @@ def _one_region(case: Path) -> dict | None:
 
 def _primitive_specs(case: Path) -> list[tuple[str, int]]:
     specs = []
-    for line in (case / "dependency_trace.jsonl").read_text(encoding="utf-8").splitlines():
+    for line in (case / "trace.jsonl").read_text(encoding="utf-8").splitlines():
         event = json.loads(line)
         if event.get("region_ir") is None:
             continue

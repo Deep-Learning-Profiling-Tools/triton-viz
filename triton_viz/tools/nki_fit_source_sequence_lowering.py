@@ -110,10 +110,26 @@ PAYLOAD_RESOLUTION_NS = 10.0
 
 def _cases(roots: list[Path], baselines: dict) -> list[dict]:
     rows = []
+    labels_by_case = {}
+    for root in roots:
+        results = root / "control_results.csv"
+        if not results.is_file():
+            continue
+        with results.open(encoding="utf-8", newline="") as file:
+            labels_by_case.update(
+                {
+                    str(row["case"]): row
+                    for row in csv.DictReader(file)
+                    if row.get("case") and not row.get("error")
+                }
+            )
     for case in sorted(case for root in roots for case in root.glob("control_*")):
-        summary = case / "hardware/explorer_summary.json"
-        trace = case / "dependency_trace.jsonl"
-        if not summary.is_file() or not trace.is_file():
+        # Calibration grammar must come from the declared source trace.
+        # dependency_trace.jsonl is a runtime-physical artifact whose dtype
+        # promotion and region boundaries can differ from the written kernel.
+        trace = case / "trace.jsonl"
+        label = labels_by_case.get(case.name)
+        if label is None or not trace.is_file():
             continue
         events = [json.loads(line) for line in trace.read_text().splitlines() if line.strip()]
         regions = {
@@ -133,14 +149,16 @@ def _cases(roots: list[Path], baselines: dict) -> list[dict]:
         features = compositional_features(region)
         dtype = str(region["dtype"])
         partition = int(region.get("partition_count") or 1)
-        profile = next(iter(json.loads(summary.read_text()).values()), {})
         match = re.match(r"control_(.*?)__p", case.name)
         family = match.group(1) if match else case.name
         geometry = re.search(r"__p(\d+)__f(\d+)__n(\d+)__", case.name)
         is_sequence = family.startswith("sequence_") or len(region_events) > 1
         for engine in ("vector", "scalar", "gpsimd"):
             baseline = runtime_engine_baseline_ns(baselines, dtype, partition, engine)
-            active = float(profile.get(f"{engine}_engine_active_time", 0.0)) * 1e9
+            active_value = label.get(f"{engine}_active_ns")
+            if active_value in (None, ""):
+                continue
+            active = float(active_value)
             rows.append({
                 "case": case.name,
                 "family": family,

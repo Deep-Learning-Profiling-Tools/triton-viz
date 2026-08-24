@@ -69,6 +69,7 @@ KINDS = [
     "sequence_factorialdag2k",
     "sequence_factorialdagaudit2k",
     "sequence_factorialdaginterleave2k",
+    "sequence_factorialdagblockedaudit2k",
     "elementwise_maximum_masked",
     "elementwise_multiply_masked",
     "elementwise_sigmoid_masked",
@@ -183,10 +184,10 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
         "padded_reduce_maximum",
         "padded_randomdag",
     }
-    mask_provided = kind in explicit_mask_kinds or kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k"))
+    mask_provided = kind in explicit_mask_kinds or kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k"))
     tile = (
         2048
-        if kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k"))
+        if kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k"))
         else
         (16384 if "wide_memory" in kind else min(2048, f))
         if kind == "mask_tail" or "wide_masked" in kind or "wide_memory" in kind or f > 2048
@@ -578,7 +579,7 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
                 else:
                     tokens.append(token)
                     arities.append(1)
-        elif kind in {"sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k"}:
+        elif kind in {"sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k"}:
             module_path = Path("microbench/inf2_nki/tests/region_controls/kernels.py").resolve()
             module_spec = importlib.util.spec_from_file_location(
                 "nki_region_dag_schedule_dynamic", module_path
@@ -611,6 +612,7 @@ def _declared_trace(kind: str, p: int, f: int, chain: int, dtype: str, path: Pat
                 "sequence_factorialdag2k": schedule_module.factorial_dag_schedule,
                 "sequence_factorialdagaudit2k": schedule_module.factorial_dag_audit_schedule,
                 "sequence_factorialdaginterleave2k": schedule_module.factorial_dag_interleave_schedule,
+                "sequence_factorialdagblockedaudit2k": schedule_module.factorial_dag_blocked_audit_schedule,
             }[kind]
             for action in schedule_fn(chain):
                 if action == "a_add": a_ptr = dag_op("add", [a_ptr])
@@ -968,7 +970,7 @@ def run_case(
     # and a separate runtime trace carrying physical SBUF dependency identity.
     # The two artifacts answer different questions and must not overwrite one
     # another.
-    if kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "padded_")):
+    if kind.startswith(("sequence_perm2k_", "sequence_deep2k_", "sequence_deepmixed2k_", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k", "padded_")):
         dependency_events = _declared_trace(
             kind, p, f, chain, dtype, case / "dependency_trace.jsonl"
         )
@@ -1097,7 +1099,7 @@ def main(argv=None):
             dims = args.free_dims
             for kind in args.kinds:
                 chains = (
-                    args.chains if kind in {"elementwise_one", "elementwise_two", "sequence_deep2k_add", "sequence_deep2k_multiply", "sequence_deep2k_add_multiply", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "padded_randomdag"} else [1]
+                    args.chains if kind in {"elementwise_one", "elementwise_two", "sequence_deep2k_add", "sequence_deep2k_multiply", "sequence_deep2k_add_multiply", "sequence_randommixed2k", "sequence_randomsemantic2k", "sequence_randomdag2k", "sequence_factorialdag2k", "sequence_factorialdagaudit2k", "sequence_factorialdaginterleave2k", "sequence_factorialdagblockedaudit2k", "padded_randomdag"} else [1]
                 )
                 for f in dims:
                     if f > 2048 and kind not in {

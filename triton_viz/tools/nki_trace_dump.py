@@ -593,6 +593,8 @@ def record_to_event(
                 list(record.output_range) if record.output_range is not None else None
             ),
             "output_version": record.output_version,
+            "input_dtypes": [str(value) for value in record.input_dtypes],
+            "output_dtype": record.output_dtype,
         }
 
     if isinstance(record, NkiCompute):

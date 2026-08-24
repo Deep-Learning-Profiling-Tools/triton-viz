@@ -15,8 +15,8 @@ _TRANSCENDENTAL = {"exp", "rsqrt", "sqrt", "log", "sin", "cos", "tanh", "sigmoid
 _ONE_INPUT = {"exp", "rsqrt", "sqrt", "log", "sin", "cos", "tanh", "sigmoid", "relu"}
 _IGNORED_FAMILY_OPS = {"where"}
 REGION_IR_SCHEMA_NAME = "triton-viz.nki-region-ir"
-REGION_IR_SCHEMA_VERSION = 2
-SUPPORTED_REGION_IR_SCHEMA_VERSIONS = frozenset({1, REGION_IR_SCHEMA_VERSION})
+REGION_IR_SCHEMA_VERSION = 3
+SUPPORTED_REGION_IR_SCHEMA_VERSIONS = frozenset({1, 2, REGION_IR_SCHEMA_VERSION})
 _KNOWN_FAMILY_OPS = (
     _REDUCTIONS
     | _TRANSCENDENTAL
@@ -76,6 +76,40 @@ def _token(event: dict[str, Any]) -> str:
 def _shape(event: dict[str, Any], key: str) -> list[int]:
     value = event.get(key) or []
     return [int(item) for item in value] if isinstance(value, (list, tuple)) else []
+
+
+def _value_dtypes(values: Any) -> list[str]:
+    """Return canonical non-predicate dtype strings in source order."""
+    if values is None:
+        return []
+    if not isinstance(values, (list, tuple)):
+        values = [values]
+    result = []
+    for value in values:
+        if not value:
+            continue
+        dtype = str(value)
+        if dtype.lower() in {"bool", "boolean"}:
+            continue
+        result.append(dtype)
+    return result
+
+
+def _dominant_dtype(values: list[str], default: str = "float32") -> str:
+    """Choose deterministically while preserving the first value on a tie."""
+    return Counter(values).most_common(1)[0][0] if values else default
+
+
+def completion_calibration_dtype(region: dict[str, Any]) -> str:
+    """Return the source-input precision that selects completion controls.
+
+    Completion is a whole-kernel observation.  For reductions, the source
+    input precision and accumulator precision are distinct compiler-visible
+    facts (for example BF16 -> FP32), so using the accumulator/majority dtype
+    silently aliases two different control domains.  Older Region IR remains
+    readable through the legacy ``dtype`` fallback.
+    """
+    return str(region.get("input_dtype") or region.get("dtype") or "float32")
 
 
 def region_ir_structural_key(region: dict[str, Any]) -> str:
@@ -177,13 +211,47 @@ def build_region_ir(
     has_explicit_mask = any(
         bool(event.get("mask_provided")) for event in loads + stores
     )
-    dtypes = [
-        str(dtype)
-        for event in members
-        for dtype in ([event.get("output_dtype")] + list(event.get("input_dtypes") or []))
-        if dtype and str(dtype).lower() not in {"bool", "boolean"}
+    # Precision roles must not be collapsed.  The declared source trace can
+    # contain BF16 inputs followed by FP32 reduction/epilogue intermediates;
+    # using the majority dtype then loses the original input precision.
+    produced_ptrs: set[Any] = set()
+    external_input_dtypes: list[str] = []
+    all_input_dtypes: list[str] = []
+    output_dtypes: list[str] = []
+    reduction_output_dtypes: list[str] = []
+    for event, token in zip(members, tokens):
+        event_input_dtypes = _value_dtypes(event.get("input_dtypes"))
+        all_input_dtypes.extend(event_input_dtypes)
+        input_ptrs = list(event.get("input_ptrs") or [])
+        for index, input_dtype in enumerate(event_input_dtypes):
+            pointer = input_ptrs[index] if index < len(input_ptrs) else None
+            if pointer is None or pointer not in produced_ptrs:
+                external_input_dtypes.append(input_dtype)
+        event_output_dtypes = _value_dtypes(event.get("output_dtype"))
+        output_dtypes.extend(event_output_dtypes)
+        if token in _REDUCTIONS:
+            reduction_output_dtypes.extend(event_output_dtypes)
+        output_ptr = event.get("output_ptr")
+        if output_ptr is not None:
+            produced_ptrs.add(output_ptr)
+
+    # HBM->SBUF loads are the strongest source-visible evidence for program
+    # input precision, and avoid scalar FP32 literals outvoting a BF16 tile.
+    loaded_input_dtypes = [
+        str(event.get("dst_dtype") or event.get("src_dtype"))
+        for event in loads
+        if event.get("dst_dtype") or event.get("src_dtype")
     ]
-    dtype = Counter(dtypes).most_common(1)[0][0] if dtypes else "float32"
+    input_dtype_evidence = (
+        loaded_input_dtypes or external_input_dtypes or all_input_dtypes
+    )
+    input_dtype = _dominant_dtype(input_dtype_evidence)
+    accumulator_dtype = _dominant_dtype(
+        reduction_output_dtypes or output_dtypes or all_input_dtypes,
+        default=input_dtype,
+    )
+    dtypes = output_dtypes + all_input_dtypes
+    dtype = _dominant_dtype(dtypes, default=input_dtype)
     item_bytes = 2 if dtype.lower() in {"float16", "fp16", "bfloat16", "bf16"} else 4
     block_elems = max(1, 8192 // item_bytes)
     result = {
@@ -218,6 +286,11 @@ def build_region_ir(
             bool(event.get("compute_mask_provided")) for event in members
         ),
         "dtype": dtype,
+        "input_dtype": input_dtype,
+        "accumulator_dtype": accumulator_dtype,
+        "input_dtypes": sorted(set(input_dtype_evidence)),
+        "output_dtypes": sorted(set(output_dtypes)),
+        "has_mixed_precision": input_dtype.lower() != accumulator_dtype.lower(),
         "partition_count": partition_count,
         "logical_active_partition_count": logical_active_partitions,
         "free_dim": free_dim,

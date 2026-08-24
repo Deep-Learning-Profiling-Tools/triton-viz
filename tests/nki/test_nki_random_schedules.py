@@ -4,6 +4,7 @@ from microbench.inf2_nki.tests.region_controls.kernels import (
     factorial_dag_schedule,
     factorial_dag_audit_schedule,
     factorial_dag_interleave_schedule,
+    factorial_dag_blocked_audit_schedule,
     random_dag_schedule,
     random_semantic_schedule,
 )
@@ -62,3 +63,19 @@ def test_factorial_dag_interleave_is_third_disjoint_family():
     assert factorial_dag_interleave_schedule(5000)[:4] == (
         "a_add", "b_maximum", "a_multiply", "b_subtract"
     )
+
+
+def test_factorial_dag_blocked_audit_is_fourth_disjoint_family():
+    prior = {
+        *[factorial_dag_schedule(seed) for seed in range(3000, 3054)],
+        *[factorial_dag_audit_schedule(seed) for seed in range(4000, 4054)],
+        *[factorial_dag_interleave_schedule(seed) for seed in range(5000, 5054)],
+    }
+    audit = {
+        factorial_dag_blocked_audit_schedule(seed)
+        for seed in range(6000, 6054)
+    }
+    assert len(audit) == 54
+    assert audit.isdisjoint(prior)
+    with pytest.raises(ValueError):
+        factorial_dag_blocked_audit_schedule(6054)

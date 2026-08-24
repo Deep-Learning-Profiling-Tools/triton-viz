@@ -736,6 +736,36 @@ def factorial_dag_interleave_schedule(schedule_id: int) -> tuple[str, ...]:
     return tuple(actions)
 
 
+def factorial_dag_blocked_audit_schedule(schedule_id: int) -> tuple[str, ...]:
+    """Frozen fourth family with reductions inside blocked branch-local runs."""
+    index = int(schedule_id) - 6000
+    if not 0 <= index < 54:
+        raise ValueError(
+            "factorial DAG blocked-audit IDs are frozen to 6000--6053"
+        )
+    join = ("cross_add", "cross_multiply")[index % 2]
+    reduction = ("a", "b", "both")[(index // 2) % 3]
+    gap = (0, 4, 8)[(index // 6) % 3]
+    depth = (2, 4, 8)[(index // 18) % 3]
+    a_ops = ["a_add"] * ((depth + 1) // 2) + ["a_multiply"] * (depth // 2)
+    b_ops = ["b_subtract"] * ((gap + 1) // 2) + ["b_maximum"] * (gap // 2)
+    actions = []
+    a_split = len(a_ops) // 2
+    b_split = len(b_ops) // 2
+    actions.extend(a_ops[:a_split])
+    if reduction in {"a", "both"}:
+        actions.append("a_reduce")
+    actions.extend(a_ops[a_split:])
+    actions.extend(b_ops[:b_split])
+    if reduction in {"b", "both"}:
+        actions.append("b_reduce")
+    actions.extend(b_ops[b_split:])
+    # A fixed cross-branch prelude and multiply/add tail make this a genuinely
+    # new context while retaining the same reusable primitive vocabulary.
+    actions.extend(("cross_add", join, "a_exp", "cross_multiply", "cross_add"))
+    return tuple(actions)
+
+
 def sequence_factorialdag2k_factory(schedule_id: int, *, audit: bool = False):
     schedule = (
         factorial_dag_audit_schedule(schedule_id)
@@ -772,6 +802,36 @@ def sequence_factorialdag2k_factory(schedule_id: int, *, audit: bool = False):
 def sequence_factorialdaginterleave2k_factory(schedule_id: int):
     # Reuse the exact kernel body by selecting the third frozen schedule here.
     schedule = factorial_dag_interleave_schedule(schedule_id)
+
+    @nki.jit
+    def kernel(x, y, logical_f):
+        p, _ = x.shape; tile_f = 2048
+        out = nl.ndarray(x.shape, dtype=x.dtype, buffer=nl.shared_hbm)
+        pi, fi = nl.arange(p)[:, None], nl.arange(tile_f)[None, :]
+        mask = (pi < p) & (fi < logical_f)
+        a = nl.add(nl.load(x[pi, fi], mask=mask), 2.0)
+        b = nl.multiply(nl.load(y[pi, fi], mask=mask), 1.001)
+        for index in nl.static_range(len(schedule)):
+            action = schedule[index]
+            if action == "a_add": a = nl.add(a, .1)
+            elif action == "a_multiply": a = nl.multiply(a, 1.001)
+            elif action == "a_exp": a = nl.exp(nl.multiply(a, .1))
+            elif action == "b_subtract": b = nl.subtract(b, .01)
+            elif action == "b_maximum": b = nl.maximum(b, 0.0)
+            elif action == "a_reduce":
+                a = nl.add(a, nl.multiply(nl.sum(a, axis=1, keepdims=True), .0001))
+            elif action == "b_reduce":
+                b = nl.add(b, nl.multiply(nl.sum(b, axis=1, keepdims=True), .0001))
+            elif action == "cross_add": a = nl.add(a, b)
+            else: b = nl.multiply(a, b)
+        nl.store(out[pi, fi], nl.add(a, b), mask=mask)
+        return out
+
+    return kernel
+
+
+def sequence_factorialdagblockedaudit2k_factory(schedule_id: int):
+    schedule = factorial_dag_blocked_audit_schedule(schedule_id)
 
     @nki.jit
     def kernel(x, y, logical_f):
@@ -1576,6 +1636,8 @@ def region_control_factory(*, kind: str, p: int, f: int, chain: int = 1,
         return sequence_factorialdag2k_factory(chain, audit=True), [(p, 2048), (p, 2048)], [f]
     if kind == "sequence_factorialdaginterleave2k":
         return sequence_factorialdaginterleave2k_factory(chain), [(p, 2048), (p, 2048)], [f]
+    if kind == "sequence_factorialdagblockedaudit2k":
+        return sequence_factorialdagblockedaudit2k_factory(chain), [(p, 2048), (p, 2048)], [f]
     if kind.startswith("sequence_deep2k_"):
         return KERNELS[kind], [(p, 2048), (p, 2048)], [f, chain]
     if kind.startswith("sequence_deepmixed2k_"):

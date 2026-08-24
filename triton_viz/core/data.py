@@ -259,6 +259,12 @@ class Reduce(Op):
     output_range: tuple[int, int] | None = None
     output_version: int | None = None
     api_op: str = "reduce_sum"
+    # Preserve source operand precision separately from the reduction result.
+    # NKI reductions may promote BF16 inputs to FP32; collapsing both roles
+    # into one dtype makes source-only calibration unable to distinguish those
+    # lowering domains.
+    input_dtypes: tuple[str, ...] = ()
+    output_dtype: str | None = None
 
 
 @dataclass

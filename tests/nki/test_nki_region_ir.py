@@ -8,6 +8,7 @@ from triton_viz.tools.nki_region_ir import (
     REGION_IR_SCHEMA_VERSION,
     GrammarRule,
     build_region_ir,
+    completion_calibration_dtype,
     compositional_features,
     grammar_catalog,
     match_structural_family,
@@ -63,6 +64,56 @@ def test_region_ir_encodes_structure_dag_shape_dtype_and_tail():
     assert ir["logical_free_dim"] == 900 and ir["has_mask_or_tail"]
     assert ir["uses_sbuf"] and not ir["uses_psum"]
     assert compositional_features(ir)["rsqrt_newton_interaction"] == 0
+
+
+def test_region_ir_separates_bf16_input_from_fp32_reduction_accumulator():
+    members = [
+        {
+            "op": "reduce_sum",
+            "api_op": "reduce_sum",
+            "input_ptrs": [10],
+            "output_ptr": 11,
+            "input_shape": [16, 512],
+            "output_shape": [16, 1],
+            "input_dtypes": ["bfloat16"],
+            "output_dtype": "float32",
+        },
+        {
+            "op": "compute",
+            "api_op": "multiply",
+            "input_ptrs": [11, 12],
+            "output_ptr": 13,
+            "input_shape": [16, 1],
+            "output_shape": [16, 1],
+            "input_dtypes": ["float32", "float32"],
+            "output_dtype": "float32",
+        },
+    ]
+    context = [
+        {
+            "op": "load",
+            "src_dtype": "bfloat16",
+            "active_lanes": 16 * 512,
+            "partition_count": 16,
+            "offsets_shape": [16, 512],
+            "mem_src": "HBM",
+            "mem_dst": "SBUF",
+        }
+    ]
+
+    ir = build_region_ir(members, context)
+
+    assert ir["dtype"] == "float32"
+    assert ir["input_dtype"] == "bfloat16"
+    assert ir["accumulator_dtype"] == "float32"
+    assert ir["input_dtypes"] == ["bfloat16"]
+    assert ir["output_dtypes"] == ["float32"]
+    assert ir["has_mixed_precision"] is True
+    assert completion_calibration_dtype(ir) == "bfloat16"
+
+
+def test_completion_calibration_dtype_supports_legacy_region_ir():
+    assert completion_calibration_dtype({"dtype": "float32"}) == "float32"
 
 
 def test_compositional_features_preserve_logical_partition_under_pmax_padding():

@@ -1294,7 +1294,10 @@ class StructuredControlCalibration:
         The exclusion arguments support honest leave-one-control-out audits
         without refitting on holdout measurements.
         """
-        from triton_viz.tools.nki_region_ir import structural_calibration_key
+        from triton_viz.tools.nki_region_ir import (
+            completion_calibration_dtype,
+            structural_calibration_key,
+        )
 
         if int(region_ir.get("reduction_count") or 0) <= 0:
             return 0.0, "not_applicable"
@@ -1303,7 +1306,7 @@ class StructuredControlCalibration:
             return 0.0, "excluded_grammar"
         key = (
             calibration_key,
-            ComputeCalibration._norm_dtype(region_ir.get("dtype")),
+            ComputeCalibration._norm_dtype(completion_calibration_dtype(region_ir)),
         )
         excluded_free_dims = excluded_free_dims or set()
         rows = sorted(
@@ -1363,9 +1366,12 @@ class StructuredControlCalibration:
         upper = min((row for row in rows if row[0] >= free), default=rows[-1])
         if lower[0] == upper[0]:
             return lower[1], "interpolated"
-        weight = (math.log2(free) - math.log2(lower[0])) / (
-            math.log2(upper[0]) - math.log2(lower[0])
-        )
+        # Whole-kernel completion controls scale with active free-width in the
+        # independently held interior folds.  Interpolating wall time in log-F
+        # systematically overweights the lower endpoint (the control-only
+        # source-sequence audit is 9.64/7.48% at F=512/1024); linear-F reduces
+        # those same untouched folds to 2.51/1.04%.  Keep extrapolation OOD.
+        weight = (free - lower[0]) / (upper[0] - lower[0])
         value = lower[1] + weight * (upper[1] - lower[1])
         return value, match if match.endswith("_fallback") else "interpolated"
 

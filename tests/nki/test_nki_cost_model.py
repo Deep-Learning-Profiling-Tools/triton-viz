@@ -775,6 +775,44 @@ def test_completion_lookup_reports_exact_ood_and_exclusions():
     ) == (0.0, "excluded_grammar")
 
 
+def test_completion_lookup_interpolates_linearly_in_active_free_width():
+    region = {
+        "dtype": "float32",
+        "free_dim": 512,
+        "logical_free_dim": 512,
+        "partition_count": 128,
+        "reduction_count": 1,
+        "op_histogram": {"reduce_sum": 1},
+    }
+    key = structural_calibration_key(region)
+    calibration = StructuredControlCalibration(
+        points={},
+        completion_points={(key, "float32"): [(128, 10_000), (2048, 30_000)]},
+    )
+
+    assert calibration.completion_lookup(region) == (14_000, "interpolated")
+
+
+def test_completion_lookup_keys_mixed_precision_by_source_input_dtype():
+    region = {
+        "dtype": "float32",
+        "input_dtype": "bfloat16",
+        "accumulator_dtype": "float32",
+        "free_dim": 512,
+        "logical_free_dim": 512,
+        "partition_count": 128,
+        "reduction_count": 1,
+        "op_histogram": {"reduce_sum": 1},
+    }
+    key = structural_calibration_key(region)
+    calibration = StructuredControlCalibration(
+        points={},
+        completion_points={(key, "bfloat16"): [(512, 20_000)]},
+    )
+
+    assert calibration.completion_lookup(region) == (20_000, "exact")
+
+
 def test_completion_lookup_uses_explicit_source_rule_fallback():
     region = {
         "dtype": "float32",

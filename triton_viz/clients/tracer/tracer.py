@@ -283,6 +283,10 @@ class Tracer(Client):
                 output_range=_range(ret),
                 output_version=_version(ret),
                 api_op=str(api_op or "reduce_sum"),
+                input_dtypes=(
+                    (str(input.dtype),) if hasattr(input, "dtype") else ()
+                ),
+                output_dtype=str(ret.dtype) if hasattr(ret, "dtype") else None,
             )
             rec.call_path = extract_user_frames(num_frames=1)
             ret._trace_record = rec

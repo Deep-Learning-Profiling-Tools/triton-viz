@@ -252,6 +252,16 @@ def test_tracer_records_reduce_sum():
     assert record.index == 1
     assert record.keep_dims is False
     assert record.output_shape == (block_m,)
+    assert record.input_dtypes == ("float32",)
+    assert record.output_dtype == "float32"
+
+    event = next(
+        event
+        for event in records_to_events(records)
+        if event.get("op") == "reduce_sum"
+    )
+    assert event["input_dtypes"] == ["float32"]
+    assert event["output_dtype"] == "float32"
 
 
 def _silu_kernel(x_ptr):
