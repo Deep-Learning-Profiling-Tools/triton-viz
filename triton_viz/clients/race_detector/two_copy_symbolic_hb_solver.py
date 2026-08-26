@@ -1665,8 +1665,25 @@ class TwoCopySymbolicHBSolver:
         link of the same RMW chain). Chain length over MODELED events is
         bounded by their count; chains through unmodeled grid instances are
         exactly what the counting pairs cover.
+
+        Every rf hop of a chain must be morally strong (PTX observation
+        order recurses over ``morally_strong ∩ rf``; scoped-RC11 release
+        sequences use ``incl ∩ rf`` at every relay), so each link — the
+        seed rf included — conjoins ``_scope_ok`` of ITS OWN endpoints.
+        Ordering stays endpoint-only: interior relays may be relaxed. A
+        scope-incompatible interior hop breaks the chain even when the
+        chain's two endpoints are mutually inclusive (adversarial finding:
+        a cta-scoped relay CAS in another block let a release publish
+        through it, certifying a PTX-racy launch race-free). A counted
+        record's chain runs through unmodeled ranks of its one textual
+        operation, so a ``cta``-scoped counted record cannot guarantee
+        per-hop inclusion across ranks and contributes no chain edge.
         """
-        rt: dict[tuple[int, int], BoolRef] = dict(self.rf_source)
+        by_idx = {e.idx: e for e in self.events}
+        rt: dict[tuple[int, int], BoolRef] = {
+            (w_idx, r_idx): And(rf, self._scope_ok(by_idx[w_idx], by_idx[r_idx]))
+            for (w_idx, r_idx), rf in self.rf_source.items()
+        }
         n_modeled = len(self._modeled_atomic_events())
         frontier: dict[tuple[int, int], BoolRef] = dict(rt)
         for _ in range(max(0, n_modeled - 1)):
@@ -1675,7 +1692,11 @@ class TwoCopySymbolicHBSolver:
                 for (m2_idx, r_idx), rf2 in self.rf_source.items():
                     if m2_idx != m_idx or r_idx == w_idx:
                         continue
-                    step = And(pred, rf2)
+                    step = And(
+                        pred,
+                        rf2,
+                        self._scope_ok(by_idx[m2_idx], by_idx[r_idx]),
+                    )
                     key = (w_idx, r_idx)
                     grown[key] = Or(grown[key], step) if key in grown else step
             if not grown:
@@ -1684,6 +1705,8 @@ class TwoCopySymbolicHBSolver:
                 rt[key] = Or(rt[key], pred) if key in rt else pred
             frontier = grown
         for info in self._counting.values():
+            if by_idx[info.idx_a].scope == "cta":
+                continue
             ord_a = self.atomic_order[info.idx_a]
             ord_b = self.atomic_order[info.idx_b]
             for w_idx, r_idx, before in (
