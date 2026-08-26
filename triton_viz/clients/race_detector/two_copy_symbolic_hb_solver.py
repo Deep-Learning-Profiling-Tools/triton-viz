@@ -887,6 +887,14 @@ class TwoCopySymbolicHBSolver:
 
     @staticmethod
     def _scope_ok(w: SymbolicMemoryEvent, r: SymbolicMemoryEvent) -> BoolRef:
+        for scope in (w.scope, r.scope):
+            if scope not in (None, "cta", "gpu", "sys"):
+                # Never widen an unknown scope to device-wide moral
+                # strength; the capture normalizes and refuses first,
+                # this guards events arriving by other routes.
+                raise UnsupportedSymbolicRaceQuery(
+                    f"unsupported memory scope {scope!r}"
+                )
         if w.scope == "cta" or r.scope == "cta":
             return And(
                 w.pid[0] == r.pid[0],

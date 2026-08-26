@@ -1537,12 +1537,16 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             return "gpu"
         name = getattr(scope, "name", scope)
         normalized = str(name).lower()
-        return {
-            "gpu": "gpu",
-            "cta": "cta",
-            "system": "sys",
-            "sys": "sys",
-        }.get(normalized, normalized)
+        normalized = {"system": "sys"}.get(normalized, normalized)
+        if normalized not in ("cta", "gpu", "sys"):
+            # An unrecognized scope must not fall open to device scope:
+            # a narrower future scope (e.g. cluster) would silently be
+            # judged morally strong device-wide. Unsupported is the
+            # honest verdict.
+            raise UnsupportedSymbolicRaceQuery(
+                f"unsupported memory scope {normalized!r}"
+            )
+        return normalized
 
     def _record_atomic_cas_event(
         self,
