@@ -416,9 +416,58 @@ solve times, mutation-detection matrix; case studies from historical pipeliner b
 ## 8. Later extensions (Track 1)
 - **Membar verification (v2)**: re-implement the Membar aliasing analysis as constraints
   and check generic-proxy pairs too — turns the v1 assumption into a checked theorem.
+  The minimal cut of this slot SHIPPED as the A2 gate (§8.1 below); the full aliasing
+  re-implementation remains open.
 - **Gluon kernels**: Gluon IR uses the same ttg dialect with explicit layouts — the
   reader should work nearly unchanged; valuable because Gluon authors hand-write the
   pipelining that the compiler normally gets right.
+
+### 8.1 A2 gate (shipped 2026-08-27): atomic-ordering barrier coverage over PTX
+
+The minimal slice of Membar verification: check that the lowering emitted the
+CTA barriers that non-relaxed atomic memory semantics require — the rule fixed
+by triton-lang/triton PR #10816 (merged 2026-07-10), whose pre-fix defect class
+is the paper repo's casebook entry A2. Spec: `impl-spec-a2-gate.md` in the
+paper repo (authored first, ported here); structural coverage check, no SMT.
+
+- **Obligations** (from the TTIR text, independent of `parse_ttir` so the gate
+  stays applicable where the graph reader refuses): every `tt.atomic_rmw` /
+  `tt.atomic_cas` with sem ∈ {release, acq_rel} needs a CTA barrier immediately
+  before the atomic in the PTX; sem ∈ {acquire, acq_rel} the mirror after,
+  dischargeable by the result-staging `st.shared / bar.sync / ld.shared`
+  sequence; relaxed needs nothing. `tt.atomic_poll` refuses by name (v1).
+- **Discharge** (`compiled/ptx_gate.py`): linear PTX parse — `.file`/`.loc`
+  tables (the `.file` table sits at the END of the module), `$L__BB*` labels
+  and branches bound blocks, sites are `atom.*`/`red.*` (RMW prints
+  scope-before-sem, CAS sem-before-scope: qualifiers read as a token set)
+  PLUS sem-qualified plain `ld.*`/`st.*` (the zero-RMW peephole:
+  `tl.atomic_add(p, 0, sem="acquire")` lowers to an inline-asm
+  `ld.global.gpu.acquire` with rendezvous barriers, no atom instruction).
+  Obligations match sites by user source line; coverage = same-block scan
+  skipping non-memory instructions (plus `st.shared` on the after side).
+- **Verdict surface** (`client.py::_check_lowering`, run from `finalize()`):
+  `last_lowering_status` ∈ {verified, violation, unsupported, no_lowered} +
+  reason + reports, independent of the shared and global surfaces; capture is
+  a `_pending_lowered` dict (`ttir`/`ptx`/`llir` from the same
+  `post_warmup_callback`); fail-closed with named kinds (cluster-barrier,
+  atomic-poll, no-loc, obligation-unmatched, sem-mismatch).
+- **Results (2026-08-27, sm_89)**: the regression pair — pre-fix parent
+  7aab98ee: VIOLATION (5 uncovered sides across the two litmus kernels);
+  post-fix merge c57bbbd8: verified. The corpus pin triton 3.6.0 itself
+  PREDATES the fix and reports violation: the A2 defect is live in the pinned
+  toolchain (benchmark validity unaffected — the missing barriers order
+  intra-CTA shared memory around atomics, and the benchmark rows use none).
+  Benchmark sync rows on the pin: pc-wait / mutex / last-block-done each
+  1 uncovered release-side, atomic-accum (acq_rel) both sides, the relaxed
+  and atomic-free rows verified; the acquire spin-poll peephole is
+  rendezvous-covered even pre-fix. Tests: `tests/unit/test_ptx_gate.py`
+  (27 incl. the per-side single-atomic mutation matrix),
+  `tests/end_to_end/test_a2_gate.py`, goldens + generator in
+  `tests/golden/a2gate/`, pair driver `evaluation/a2_gate_pair.py`.
+- **Open (v2)**: AMD (`asm["amdgcn"]`, same rule), clusters (numCTAs > 1),
+  `atomic_poll` rendezvous matching, the full Membar aliasing
+  re-implementation for generic-proxy pairs, and the in-compiler MLIR SMT
+  placement (this gate is its post-hoc precursor).
 
 ## 9. Risks (Track 1)
 

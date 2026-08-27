@@ -946,6 +946,28 @@ the demoted hazard as a `content_fragile` attribute.
       the first time — 763 passed, 0 failed, sequential AND -n auto
       (down from 34 baseline failures at the branch's start).
 
+## 9. A2 gate — atomic-ordering barrier coverage (LANDED 2026-08-27)
+
+Shipped on Hao's request in one day, spec-first
+(`impl-spec-a2-gate.md` in the paper repo; as-built record in
+`race_detector_static_hybrid_plan.md` §8.1): a third verdict
+surface (`last_lowering_status`) checking that the lowering
+emitted the CTA barriers non-relaxed atomic semantics require
+(the triton PR #10816 rule; the paper casebook's A2 class).
+Structural coverage over the captured PTX, no SMT; fail-closed
+named refusals. Headline results: the pre-fix/post-fix pair
+(7aab98ee violation, c57bbbd8 verified) flips exactly on the fix;
+the corpus pin triton 3.6.0 itself predates the fix and reports
+violation (A2 live in the pinned toolchain; benchmark validity
+unaffected, its rows use no shared memory). Paper consequences
+deliberately deferred: A2's no-detection-claim discipline stands
+until the Keren revisit (paper TODO.md `baselines`/compiled-mode
+notes).
+
+Open v2 items: AMD (`asm["amdgcn"]`), clusters, `atomic_poll`
+rendezvous matching, full Membar aliasing verification, the
+in-compiler MLIR SMT placement.
+
 ## Corpus & experiment backlog (the paper's extension placeholders)
 
 - [ ] M4 tranche 4 — Blackwell tensor memory (tcgen05): model

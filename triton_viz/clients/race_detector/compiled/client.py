@@ -44,6 +44,7 @@ from .global_records import (
     symbolic_grid,
     t0_linearity_gate,
 )
+from .ptx_gate import GateResult, check_gate
 from .smt_encoder import AnalysisResult, analyze_ttgir
 
 _RE_TTGIR_FUNC = re.compile(r"tt\.func\s+\w+\s+@(\w+)\(")
@@ -120,6 +121,23 @@ class CompiledRaceDetector(Client):
         self._ttir_graph_cache: dict[str, tuple[AccessGraph | None, str | None]] = {}
         self.last_ttir_graphs: list[AccessGraph | None] = []
         self.last_ttir_unsupported: list[str | None] = []
+        # A2 gate capture (impl-spec-a2-gate): the post-Membar lowered
+        # artifacts per specialization, self-contained dicts with the
+        # ttir (obligation side) plus ptx (discharge side; llir kept as
+        # the fallback artifact). Pending per launch like _pending_ttir;
+        # gate verdicts cached per (ttir, ptx) digest, same SHA-256
+        # rationale as above.
+        self._pending_lowered: list[dict[str, str]] = []
+        self._gate_cache: dict[str, GateResult] = {}
+        # The gate's verdict surface, independent of both last_status
+        # (shared memory) and last_global_status: "verified" = every
+        # atomic ordering obligation is barrier-covered in the PTX;
+        # "violation" = at least one obligation has no covering barrier
+        # (reports name site and side); "unsupported" (named kind);
+        # "no_lowered" = warmup delivered no artifacts.
+        self.last_lowering_status: str = "no_lowered"
+        self.last_lowering_reason: str | None = None
+        self.last_lowering_reports: list[str] = []
         # Global-memory verdict (independent of the TTGIR shared-memory
         # last_status): "ok" = proved race-free (see last_global_provenance
         # for the rung); "races" = definite reports in last_global_reports;
@@ -320,6 +338,9 @@ class CompiledRaceDetector(Client):
             self._pending_ttgir.append(asm["ttgir"])
         if "ttir" in asm:
             self._pending_ttir.append(asm["ttir"])
+        self._pending_lowered.append(
+            {k: asm[k] for k in ("ttir", "ptx", "llir") if k in asm}
+        )
 
     # ── interpreted-run hooks (analysis needs none of this) ───────────
 
@@ -394,6 +415,75 @@ class CompiledRaceDetector(Client):
             self.last_ttir_graphs.append(graph)
             self.last_ttir_unsupported.append(reason)
         self._pending_ttir = []
+
+    def _check_lowering(self) -> None:
+        """A2 gate: barrier coverage of the atomic ordering obligations.
+
+        Checks, per captured specialization, that the PTX carries the CTA
+        barriers the TTIR's non-relaxed atomics oblige (the rule of
+        triton PR #10816; see ``ptx_gate``). The verdict surface
+        (``last_lowering_*``) is independent of both the shared-memory
+        and the global-memory verdicts, and finalize() is its per-launch
+        reset point. Nothing raised here may escape: like the other
+        analyses this runs in the trace teardown of the user's launch.
+        Aggregation: violation > unsupported > verified.
+        """
+        self.last_lowering_reports = []
+        self.last_lowering_reason = None
+        if not self._pending_lowered:
+            self.last_lowering_status = "no_lowered"
+            self.last_lowering_reason = "no lowered artifacts captured from warmup"
+            return
+        status = "verified"
+        reason: str | None = None
+        reports: list[str] = []
+        obligations = 0
+        for entry in self._pending_lowered:
+            ttir, ptx = entry.get("ttir"), entry.get("ptx")
+            if not ttir or not ptx:
+                if status == "verified":
+                    status = "unsupported"
+                    reason = "specialization missing its ttir or ptx artifact"
+                continue
+            key = hashlib.sha256(
+                (ttir + "\0" + ptx).encode("utf-8", errors="replace")
+            ).hexdigest()
+            res = self._gate_cache.get(key)
+            if res is None:
+                try:
+                    res = check_gate(ttir, ptx, _kernel_name(ttir))
+                except Exception as e:  # noqa: BLE001
+                    # Gate bug or printer drift: degrade to unsupported,
+                    # never crash the launch.
+                    res = GateResult("unsupported", f"{type(e).__name__}: {e}", [])
+                self._gate_cache[key] = res
+            obligations += res.obligations
+            if res.status == "violation":
+                status = "violation"
+                reason = None
+            elif res.status == "unsupported" and status == "verified":
+                status = "unsupported"
+                reason = res.reason
+            reports.extend(res.reports)
+        self._pending_lowered = []
+        self.last_lowering_status = status
+        self.last_lowering_reason = reason
+        self.last_lowering_reports = reports
+        if cfg.cli_active:
+            if status == "violation":
+                print(
+                    f"[{self.LOG_TAG}] lowering: BARRIER VIOLATION — "
+                    f"{len(reports)} obligation side(s) uncovered"
+                )
+                for r in reports:
+                    print(f"    {r}")
+            elif status == "unsupported":
+                print(f"[{self.LOG_TAG}] lowering: unsupported — {reason}")
+            elif obligations:
+                print(
+                    f"[{self.LOG_TAG}] lowering: atomic-ordering barriers "
+                    f"verified ({obligations} obligation(s))"
+                )
 
     def _analyze_global(self) -> None:
         """Global-memory race verdict over this launch's parsed TTIR.
@@ -1098,6 +1188,7 @@ class CompiledRaceDetector(Client):
         self.smtlib = []
         self._consume_pending_ttir()
         self._analyze_global()
+        self._check_lowering()
         if not self._pending_ttgir:
             # Warmup never delivered IR (e.g. driverless environment where
             # JITFunction.run could not bind a device). Distinguish from a
