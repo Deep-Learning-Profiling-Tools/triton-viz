@@ -451,6 +451,26 @@ change — the spec's work items below are validation + tests.
       The causal-attention inner loop is the canonical shape; expect
       most of the 14 rows to flip to proved@T1.
 
+
+## 3h. Real-kernel corpus growth: aiter_ops (landed 2026-08-28)
+
+113 captured launches from ROCm/aiter's Triton ops (checkout at
+AITER_ROOT, commit-pinned b0d56a0; NOT pip-installable on NVIDIA,
+loaded through the package stubs of kernels/_aiter_loader.py:
+skipped ROCm-requiring inits, synthetic dtypes/chip_info/
+torch_guard/jit.core, and a meta-path mirror of the real
+backward-compat module redirects). Captured by
+evaluation/aiter_capture.py from the 103 op_tests/triton_tests
+files (98 succeed; residue: pa_decode x2, conv2d empty, one
+fusion, one mxfp4 case), with AMD-only launch kwargs stripped
+and unrebuildable AMD-fp8 dtype records filtered. Distinct from
+aiter_originals (the 2-row A1 case corpus). Launch validation on
+the 4090: 108/113 rows run as plain GPU launches (median 2.1 s);
+the 5 failures are sm_89 shared-memory OOM at the captured
+configs (record precedes the run), analyzable only by the
+GPU-free tracks on this machine. Survey provenance in the paper
+repo (TODO.md rq2, baselines/results/aiter_census.json).
+
 ## 3h. Real-kernel corpus growth: FlagGems (landed 2026-07-12)
 
 - [x] flagos-ai/FlagGems as the FIFTH real-code corpus and the
