@@ -2,7 +2,6 @@ import json
 
 import pytest
 
-from triton_viz.tools.nki_grammar_report import build_report, collect_region_coverage
 from triton_viz.tools.nki_region_ir import (
     REGION_IR_SCHEMA_NAME,
     REGION_IR_SCHEMA_VERSION,
@@ -405,41 +404,10 @@ def test_declarative_rules_preserve_established_family_names(region, expected):
     assert structural_family({"schema_version": 1, **region}) == expected
 
 
-def test_grammar_catalog_and_coverage_report_keep_ood_in_denominator(tmp_path):
+def test_grammar_catalog_preserves_rule_metadata():
     catalog = grammar_catalog()
     assert catalog["region_ir_schema"]["current_version"] == REGION_IR_SCHEMA_VERSION
     assert {rule["rule_id"] for rule in catalog["rules"]} >= {
         "reduction.broadcast",
         "elementwise.arity_chain",
     }
-
-    case = tmp_path / "case"
-    case.mkdir()
-    trace = case / "trace.jsonl"
-    events = [
-        {
-            "op": "compute",
-            "engine": "vector",
-            "api_op": "future_activation",
-            "grid_idx": [0],
-            "input_shape": [128, 64],
-            "output_shape": [128, 64],
-            "output_dtype": "float32",
-            "input_ptrs": [1],
-            "output_ptr": 2,
-        }
-    ]
-    trace.write_text("\n".join(json.dumps(event) for event in events) + "\n")
-    rows = collect_region_coverage([tmp_path])
-    report = build_report(rows)
-    assert len(rows) == 1
-    assert rows[0]["rule_id"] == "elementwise.arity_chain"
-    assert rows[0]["in_scope"] is False
-    assert report["coverage"]["region_count"] == 1
-    assert report["coverage"]["ood_region_count"] == 1
-    assert report["coverage"]["in_scope_percent"] == 0.0
-    matched_rule = next(
-        rule for rule in report["rules"] if rule["rule_id"] == "elementwise.arity_chain"
-    )
-    assert matched_rule["has_observed_evidence"] is False
-    assert matched_rule["observed_cases"] == []

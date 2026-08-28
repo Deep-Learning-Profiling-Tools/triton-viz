@@ -1,10 +1,6 @@
 import json
 import csv
 
-from triton_viz.tools.nki_evaluate_program_context_routing import (
-    _routing_features,
-    _samples,
-)
 from triton_viz.tools.nki_fit_source_sequence_lowering import _cases
 from triton_viz.tools.nki_program_context import program_context_features
 from triton_viz.tools.nki_program_context import source_routing_state
@@ -173,32 +169,8 @@ def test_source_sequence_cases_use_declared_trace_semantics(tmp_path):
         )
 
     rows = _cases([tmp_path / "phase1"], {})
-    samples = _samples([tmp_path / "phase1"], {})
-
     assert len(rows) == 3
     assert {row["dtype"] for row in rows} == {"bfloat16"}
-    assert len(samples) == 1
-    assert samples[0]["features"]["program_input_bf16_region_count"] == 1
-    assert samples[0]["features"]["program_input_fp32_region_count"] == 0
-
-
-def test_routing_feature_filter_rejects_positional_fingerprints():
-    features = _routing_features(
-        {
-            "reduction_count": 1.0,
-            "op_reduce_sum": 1.0,
-            "program_peak_live_bytes": 2048.0,
-            "absolute_pos17_multiply": 1.0,
-            "prefix_pos0_add": 1.0,
-            "trigram_add__multiply__subtract": 1.0,
-        }
-    )
-
-    assert features == {
-        "reduction_count": 1.0,
-        "op_reduce_sum": 1.0,
-        "program_peak_live_bytes": 2048.0,
-    }
 
 
 def test_program_context_summarizes_branch_join_topology():

@@ -2232,35 +2232,6 @@ class SimulationResult:
         }
 
 
-def _memory_key(event: dict[str, Any], side: str) -> int | None:
-    """Return the base pointer for the given side of a memory event."""
-    return event.get(f"{side}_ptr")
-
-
-def _read_ptrs(event: dict[str, Any]) -> tuple[int, ...]:
-    """Base pointers this op reads from (its input buffers)."""
-    ptrs: list[int] = []
-    src = event.get("src_ptr")
-    if src is not None:
-        ptrs.append(int(src))
-    for ptr in event.get("input_ptrs", ()) or ():
-        if ptr is not None:
-            ptrs.append(int(ptr))
-    return tuple(ptrs)
-
-
-def _write_ptrs(event: dict[str, Any]) -> tuple[int, ...]:
-    """Base pointers this op writes to (its output buffers)."""
-    ptrs: list[int] = []
-    dst = event.get("dst_ptr")
-    if dst is not None:
-        ptrs.append(int(dst))
-    out = event.get("output_ptr")
-    if out is not None:
-        ptrs.append(int(out))
-    return tuple(ptrs)
-
-
 _RANGE_INF = float("inf")
 
 

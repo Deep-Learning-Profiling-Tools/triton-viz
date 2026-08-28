@@ -5,19 +5,11 @@ from __future__ import annotations
 import argparse
 import csv
 import json
-import re
 from pathlib import Path
 
 from triton_viz.tools.nki_program_context import program_context_features
 from triton_viz.tools.nki_region_ir import structural_calibration_key
 from triton_viz.tools.nki_trace_dump import _annotate_fusion_signature
-
-
-def _column(case: str) -> int:
-    match = re.search(r"__c(\d+)__", case)
-    if not match:
-        raise ValueError(f"control case has no column field: {case}")
-    return int(match.group(1))
 
 
 def source_descriptor_from_events(events: list[dict], dtype: str, case: str = "") -> dict:
