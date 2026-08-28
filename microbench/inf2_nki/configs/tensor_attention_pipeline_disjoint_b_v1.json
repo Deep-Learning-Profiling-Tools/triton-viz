@@ -1,0 +1,17 @@
+{
+  "suite": "inf2_tensor_attention_pipeline_disjoint_b_v1",
+  "description": "Second independent QK-normalize-PV grid for whole-suite CV; no holdout width is included.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {
+      "name": "tensor_attention_pipeline_b",
+      "kind": "tensor_attention_pipeline",
+      "matrix": {
+        "dv": [56, 72, 96, 144, 192, 288, 384, 480],
+        "repeat": [1],
+        "dtype": ["float32"]
+      }
+    }
+  ]
+}

@@ -1,0 +1,18 @@
+{
+  "suite": "inf2_tensor_geometry_disjoint_v5",
+  "description": "BF16 tiled-Dot controls at m-tile=5, bracketing the independently declared m-tile=4 deployment geometry without using holdout labels.",
+  "warmup": 2,
+  "iters": 20,
+  "benchmarks": [
+    {
+      "name": "tensor_geometry_disjoint_v5",
+      "kind": "tensor_matmul_tiled",
+      "matrix": {
+        "dtype": ["bfloat16"],
+        "m": [640],
+        "n": [512],
+        "k": [640, 1280, 2560, 5120, 10240]
+      }
+    }
+  ]
+}

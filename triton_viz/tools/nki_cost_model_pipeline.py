@@ -32,6 +32,9 @@ TOOL_MODULES = {
     "triton_viz.tools.nki_fit_structural_static_dma": "triton_viz.tools.nki_fit_structural_static_dma",
     "triton_viz.tools.nki_fit_runtime_overhead": "triton_viz.tools.nki_fit_runtime_overhead",
     "triton_viz.tools.nki_fit_strided_dma": "triton_viz.tools.nki_fit_strided_dma",
+    "triton_viz.tools.nki_fit_tensor_source_geometry": "triton_viz.tools.nki_fit_tensor_source_geometry",
+    "triton_viz.tools.nki_fit_attention_pipeline": "triton_viz.tools.nki_fit_attention_pipeline",
+    "triton_viz.tools.nki_fit_norm_pipeline": "triton_viz.tools.nki_fit_norm_pipeline",
     "triton_viz.tools.nki_replay_operator_predictions": "triton_viz.tools.nki_replay_operator_predictions",
 }
 
@@ -145,6 +148,14 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
         "dma_strided_store_surface.json",
         "tensor_matmul_tiled_surface.json",
         "tensor_geometry_disjoint_v1.json",
+        "tensor_geometry_disjoint_v3.json",
+        "tensor_geometry_disjoint_v4.json",
+        "tensor_geometry_disjoint_v5.json",
+        "tensor_dot_count_low_disjoint_v1.json",
+        "tensor_dot_count_low_disjoint_v2.json",
+        "tensor_dot_count_low_disjoint_v3.json",
+        "tensor_attention_pipeline_disjoint_a_v1.json",
+        "tensor_attention_pipeline_disjoint_b_v1.json",
     ]
     for config in configs:
         run_id = Path(config).stem
@@ -201,6 +212,37 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
                 10,
                 "--iters",
                 100,
+                "--resume",
+            ),
+            dry_run,
+        )
+    for name, free_dims in (
+        ("norm_pipeline_reference_v1", (96, 160, 1792, 2304)),
+        ("norm_pipeline_disjoint_a_v1", (96, 384, 768, 1536, 3072, 3584)),
+    ):
+        _run(
+            _module(
+                "triton_viz.tools.nki_region_control_experiments",
+                "--output-dir",
+                root / "stage2_controls" / name,
+                "--kinds",
+                "two_pass_reduce_multiply",
+                "two_pass_reduce_affine",
+                "--free-dims",
+                *free_dims,
+                "--dtypes",
+                "float32",
+                "bfloat16",
+                "--chains",
+                1,
+                "--p",
+                1,
+                16,
+                128,
+                "--warmup",
+                5,
+                "--iters",
+                20,
                 "--resume",
             ),
             dry_run,
@@ -295,6 +337,94 @@ def fit(root: Path, dry_run: bool) -> None:
             root / "microbench" / "tensor_geometry_disjoint_v1",
             "--output",
             tensor_geometry_csv,
+        ),
+        dry_run,
+    )
+    tensor_geometry_fit_csvs = []
+    for run_name in (
+        "tensor_geometry_disjoint_v3",
+        "tensor_geometry_disjoint_v4",
+        "tensor_geometry_disjoint_v5",
+        "tensor_dot_count_low_disjoint_v1",
+        "tensor_dot_count_low_disjoint_v2",
+        "tensor_dot_count_low_disjoint_v3",
+    ):
+        output = calibration / f"{run_name}.csv"
+        _run(
+            _module(
+                "microbench.inf2_nki.profile_parser.export_csv",
+                root / "microbench" / run_name,
+                "--output",
+                output,
+            ),
+            dry_run,
+        )
+        tensor_geometry_fit_csvs.append(output)
+    tensor_source_geometry = calibration / "tensor_source_geometry_frozen_v5.csv"
+    _run(
+        _module(
+            "triton_viz.tools.nki_fit_tensor_source_geometry",
+            *tensor_geometry_fit_csvs,
+            "--artifact-role",
+            "control",
+            "--max-mean-wape",
+            20,
+            "--cv-output",
+            calibration / "tensor_source_geometry_v5_strict_cv.json",
+            "--output",
+            tensor_source_geometry,
+        ),
+        dry_run,
+    )
+    attention_control_csvs = []
+    for run_name in (
+        "tensor_attention_pipeline_disjoint_a_v1",
+        "tensor_attention_pipeline_disjoint_b_v1",
+    ):
+        output = calibration / f"{run_name}.csv"
+        _run(
+            _module(
+                "microbench.inf2_nki.profile_parser.export_csv",
+                root / "microbench" / run_name,
+                "--output",
+                output,
+            ),
+            dry_run,
+        )
+        attention_control_csvs.append(output)
+    attention_pipeline = calibration / "attention_pipeline_frozen_v1.csv"
+    _run(
+        _module(
+            "triton_viz.tools.nki_fit_attention_pipeline",
+            *attention_control_csvs,
+            "--artifact-role",
+            "control",
+            "--max-tensor-wape",
+            20,
+            "--max-nc-mape",
+            20,
+            "--cv-output",
+            calibration / "attention_pipeline_strict_cv_v1.json",
+            "--output",
+            attention_pipeline,
+        ),
+        dry_run,
+    )
+    norm_pipeline = calibration / "norm_pipeline_frozen_v2.csv"
+    norm_cv = calibration / "norm_pipeline_strict_cv_v2.json"
+    _run(
+        _module(
+            "triton_viz.tools.nki_fit_norm_pipeline",
+            root / "stage2_controls" / "norm_pipeline_reference_v1" / "control_results.csv",
+            root / "stage2_controls" / "norm_pipeline_disjoint_a_v1" / "control_results.csv",
+            "--artifact-role",
+            "control",
+            "--max-mean-mape",
+            20,
+            "--cv-output",
+            norm_cv,
+            "--output",
+            norm_pipeline,
         ),
         dry_run,
     )
@@ -396,6 +526,8 @@ def fit(root: Path, dry_run: bool) -> None:
                     "tensor_attention_boundary_disjoint_v1",
                 )
             ],
+            root / "stage2_controls" / "norm_pipeline_reference_v1" / "experiment_manifest.json",
+            root / "stage2_controls" / "norm_pipeline_disjoint_a_v1" / "experiment_manifest.json",
         ]
         write_model_manifest(
             calibration,
@@ -410,6 +542,14 @@ def fit(root: Path, dry_run: bool) -> None:
                 calibration / "dma_write_bf16.csv",
                 calibration / "tensor_matmul_tiled.csv",
                 tensor_geometry_csv,
+                *tensor_geometry_fit_csvs,
+                tensor_source_geometry,
+                calibration / "tensor_source_geometry_v5_strict_cv.json",
+                *attention_control_csvs,
+                attention_pipeline,
+                calibration / "attention_pipeline_strict_cv_v1.json",
+                norm_pipeline,
+                norm_cv,
                 compute,
                 structured,
                 calibration / "static_dma.csv",
@@ -447,8 +587,12 @@ def _replay_args(root: Path, holdout: Path, output: Path, dtype: str) -> list[st
         calibration / "structured_compute.csv",
         "--tensor-calibration-csv",
         calibration / "tensor_matmul_tiled.csv",
-        "--attention-repeat-reference-root",
-        root / "diagnostics" / "attention_rechecks",
+        "--tensor-source-geometry-csv",
+        calibration / "tensor_source_geometry_frozen_v5.csv",
+        "--attention-pipeline-calibration-csv",
+        calibration / "attention_pipeline_frozen_v1.csv",
+        "--norm-pipeline-calibration-csv",
+        calibration / "norm_pipeline_frozen_v2.csv",
         "--structural-static-dma-csv",
         calibration / "static_dma.csv",
         "--runtime-overhead-csv",
@@ -521,6 +665,20 @@ def evaluate(root: Path, dry_run: bool) -> None:
                 calibration / "dma_write_fp32.csv",
                 calibration / "dma_write_bf16.csv",
                 calibration / "tensor_matmul_tiled.csv",
+                calibration / "tensor_geometry_disjoint_v3.csv",
+                calibration / "tensor_geometry_disjoint_v4.csv",
+                calibration / "tensor_geometry_disjoint_v5.csv",
+                calibration / "tensor_dot_count_low_disjoint_v1.csv",
+                calibration / "tensor_dot_count_low_disjoint_v2.csv",
+                calibration / "tensor_dot_count_low_disjoint_v3.csv",
+                calibration / "tensor_source_geometry_frozen_v5.csv",
+                calibration / "tensor_source_geometry_v5_strict_cv.json",
+                calibration / "tensor_attention_pipeline_disjoint_a_v1.csv",
+                calibration / "tensor_attention_pipeline_disjoint_b_v1.csv",
+                calibration / "attention_pipeline_frozen_v1.csv",
+                calibration / "attention_pipeline_strict_cv_v1.json",
+                calibration / "norm_pipeline_frozen_v2.csv",
+                calibration / "norm_pipeline_strict_cv_v2.json",
                 calibration / "compute.csv",
                 calibration / "structured_compute.csv",
                 calibration / "static_dma.csv",

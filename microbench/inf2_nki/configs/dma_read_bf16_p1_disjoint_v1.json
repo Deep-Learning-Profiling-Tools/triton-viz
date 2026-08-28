@@ -1,0 +1,19 @@
+{
+  "suite": "inf2_nki_dma_read_bf16_p1_disjoint_v1",
+  "description": "Disjoint p=1 BF16 directional controls for the compiler's small-partition DMA regime.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {
+      "name": "dma_partition_surface",
+      "kind": "dma_bandwidth",
+      "dtype": "bfloat16",
+      "repeat": 1,
+      "modes": ["hbm_to_sbuf_stream"],
+      "matrix": {
+        "p": [1],
+        "f": [48, 96, 192, 384, 768, 1536, 3072, 6144]
+      }
+    }
+  ]
+}

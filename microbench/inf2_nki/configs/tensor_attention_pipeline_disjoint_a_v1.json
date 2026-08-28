@@ -1,0 +1,17 @@
+{
+  "suite": "inf2_tensor_attention_pipeline_disjoint_a_v1",
+  "description": "Independent QK-normalize-PV controls, widths disjoint from attention holdout and suite B.",
+  "warmup": 10,
+  "iters": 100,
+  "benchmarks": [
+    {
+      "name": "tensor_attention_pipeline_a",
+      "kind": "tensor_attention_pipeline",
+      "matrix": {
+        "dv": [48, 80, 112, 160, 224, 320, 448, 496],
+        "repeat": [1],
+        "dtype": ["float32"]
+      }
+    }
+  ]
+}

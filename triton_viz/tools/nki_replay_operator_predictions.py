@@ -9,6 +9,8 @@ import statistics
 from pathlib import Path
 
 from triton_viz.tools.nki_cost_model import (
+    AttentionPipelineCalibration,
+    NormPipelineCalibration,
     CompositionalLoweringCalibration,
     ComputeCalibration,
     CostModel,
@@ -53,6 +55,12 @@ FIELDS = [
     "predicted_resource_overlap_us",
     "whole_program_routing_covered",
     "predicted_without_completion_floor_us",
+    "attention_pipeline_completion_us",
+    "attention_pipeline_covered",
+    "attention_pipeline_ood",
+    "norm_pipeline_completion_us",
+    "norm_pipeline_covered",
+    "norm_pipeline_ood",
     "compute_only_error_pct",
     "compute_dma_error_pct",
     "resource_overlap_error_pct",
@@ -147,7 +155,8 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--trace-filename", default="trace.jsonl")
     parser.add_argument("--tensor-calibration-csv", type=Path)
     parser.add_argument("--tensor-source-geometry-csv", type=Path)
-    parser.add_argument("--attention-repeat-reference-root", type=Path)
+    parser.add_argument("--attention-pipeline-calibration-csv", type=Path)
+    parser.add_argument("--norm-pipeline-calibration-csv", type=Path)
     parser.add_argument("--structural-static-dma-csv", type=Path, required=True)
     parser.add_argument("--runtime-overhead-csv", type=Path)
     parser.add_argument("--strided-dma-csv", type=Path)
@@ -268,6 +277,16 @@ def main(argv: list[str] | None = None) -> int:
                     TensorDotCountCalibration.from_csv(args.tensor_source_geometry_csv)
                     if args.tensor_source_geometry_csv else None
                 ),
+                attention_pipeline_calibration=(
+                    AttentionPipelineCalibration.from_csv(
+                        args.attention_pipeline_calibration_csv
+                    )
+                    if args.attention_pipeline_calibration_csv else None
+                ),
+                norm_pipeline_calibration=(
+                    NormPipelineCalibration.from_csv(args.norm_pipeline_calibration_csv)
+                    if args.norm_pipeline_calibration_csv else None
+                ),
                 tensor_instruction_calibration=None,
                 structural_static_dma=StructuralStaticDmaCalibration.from_csv(
                     args.structural_static_dma_csv
@@ -302,6 +321,30 @@ def main(argv: list[str] | None = None) -> int:
         trace = args.root / case_name / args.trace_filename
         events = [json.loads(line) for line in trace.read_text().splitlines() if line]
         tensor_dots = [event for event in events if event.get("op") == "dot"]
+        reduction_count = sum(event.get("op") == "reduce_sum" for event in events)
+        rsqrt_count = sum(event.get("api_op") == "rsqrt" for event in events)
+        broadcast_count = sum(event.get("api_op") == "broadcast_to" for event in events)
+        norm_structure = None
+        if not tensor_dots and rsqrt_count and broadcast_count >= 1:
+            if reduction_count >= 2 and broadcast_count >= 2:
+                norm_structure = "two_reduce_rsqrt_broadcast_affine"
+            elif reduction_count == 1:
+                norm_structure = "one_reduce_rsqrt_broadcast_multiply"
+        if norm_structure and args.norm_pipeline_calibration_csv:
+            marker = events[0]
+            marker["norm_pipeline_structure"] = norm_structure
+            marker["norm_pipeline_dtype"] = source["dtype"]
+            marker["norm_pipeline_partition_count"] = int(source["rows"])
+            marker["norm_pipeline_broadcast_instances"] = broadcast_count
+            marker["norm_pipeline_free_dim"] = int(source["cols"])
+        attention_signature = (
+            len(tensor_dots) == 2
+            and sum(event.get("op") == "tensor_transpose" for event in events) >= 3
+            and sum(event.get("op") == "reduce_sum" for event in events) >= 2
+        )
+        if attention_signature and args.attention_pipeline_calibration_csv:
+            for event in tensor_dots:
+                event["attention_pipeline_value_width"] = int(source["cols"])
         if tensor_dots and args.tensor_source_geometry_csv:
             def unique_tiles(index: int, storage_key: str, ranges_key: str) -> int:
                 values = set()
@@ -383,34 +426,12 @@ def main(argv: list[str] | None = None) -> int:
         hardware_nc_us = float(source["hardware_nc_p50_us"])
         hardware_tensor_us = float(source.get("hardware_tensor_active_us") or 0.0)
         hardware_tensor_reference = "operator_results"
-        if args.attention_repeat_reference_root:
-            repeated = []
-            for repeat_dir in sorted(args.attention_repeat_reference_root.glob("rep_*")):
-                repeat_summary = (
-                    repeat_dir / case_name / "hardware/explorer_summary.json"
-                )
-                if not repeat_summary.is_file():
-                    continue
-                repeat_profile = next(
-                    iter(json.loads(repeat_summary.read_text()).values())
-                )
-                value = float(
-                    repeat_profile.get("tensor_engine_active_time") or 0
-                ) * 1e6
-                if value > 0:
-                    repeated.append(value)
-            if len(repeated) >= 3:
-                hardware_tensor_us = statistics.median(repeated)
-                hardware_tensor_reference = (
-                    f"median_of_{len(repeated)}_independent_repeats"
-                )
         hardware_vector_us = float(source.get("hardware_vector_active_us") or 0.0)
         hardware_scalar_us = float(source.get("hardware_scalar_active_us") or 0.0)
-        summary_path = args.root / case_name / "hardware/explorer_summary.json"
+        # Target post-compile artifacts are never opened. All scoring labels
+        # must already be present in the saved aggregate operator CSV (or an
+        # explicitly supplied aggregate-only GpSimd reference CSV).
         profile = {}
-        if not args.target_aggregate_labels_only and summary_path.is_file():
-            summary = json.loads(summary_path.read_text(encoding="utf-8"))
-            profile = next(iter(summary.values()), {})
         if case_name in gpsimd_references:
             hardware_gpsimd_us = statistics.median(gpsimd_references[case_name])
             hardware_gpsimd_reference = (
@@ -421,7 +442,7 @@ def main(argv: list[str] | None = None) -> int:
                 profile.get("gpsimd_engine_active_time") or 0.0
             ) * 1e6
             hardware_gpsimd_reference = (
-                "explorer_summary" if profile else "missing_zero"
+                "missing_aggregate_reference"
             )
         counter_dynamic_dma_us = (
             float(profile.get("software_dynamic_dma_active_time") or 0.0)
@@ -460,7 +481,7 @@ def main(argv: list[str] | None = None) -> int:
             0.0,
             hardware_gpsimd_us - components["gpsimd_runtime_baseline_ns"] / 1000.0,
         )
-        payload_reference = "explorer_active_minus_independent_runtime_control"
+        payload_reference = "saved_aggregate_active_minus_independent_runtime_control"
         has_tensor_events = any(
             event.get("op") in {"dot", "tensor_transpose"}
             for event in model_events
@@ -504,6 +525,21 @@ def main(argv: list[str] | None = None) -> int:
                     "without_structured_completion_floor"
                 ]
                 / 1000.0,
+                "attention_pipeline_completion_us": components[
+                    "attention_pipeline_completion_ns"
+                ]
+                / 1000.0,
+                "attention_pipeline_covered": int(
+                    components["attention_pipeline_covered"]
+                ),
+                "attention_pipeline_ood": int(
+                    components["attention_pipeline_ood"]
+                ),
+                "norm_pipeline_completion_us": components[
+                    "norm_pipeline_completion_ns"
+                ] / 1000.0,
+                "norm_pipeline_covered": int(components["norm_pipeline_covered"]),
+                "norm_pipeline_ood": int(components["norm_pipeline_ood"]),
                 "compute_only_error_pct": (components["compute_only"] / 1000.0 - hardware_nc_us)
                 / hardware_nc_us
                 * 100,

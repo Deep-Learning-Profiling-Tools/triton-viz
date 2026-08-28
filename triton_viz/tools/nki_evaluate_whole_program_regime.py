@@ -67,6 +67,7 @@ def _source_sample(root: Path, row: dict[str, str]) -> dict:
     return {
         **descriptor,
         "column": int(row["cols"]),
+        "completion_ns": float(row["hardware_nc_p50_us"]) * 1000.0,
         "actual": {
             engine: float(profile.get(f"{engine}_engine_active_time") or 0.0)
             * 1e6
@@ -78,6 +79,10 @@ def _source_sample(root: Path, row: dict[str, str]) -> dict:
 def _wape(pairs: list[tuple[float, float]]) -> float:
     denominator = sum(actual for _, actual in pairs)
     return sum(abs(predicted - actual) for predicted, actual in pairs) / denominator * 100.0
+
+
+def _mape(pairs: list[tuple[float, float]]) -> float:
+    return sum(abs(predicted - actual) / actual for predicted, actual in pairs) / len(pairs) * 100.0
 
 
 def evaluate(root: Path) -> dict:
@@ -92,6 +97,7 @@ def evaluate(root: Path) -> dict:
         train = [sample for sample in samples if sample["column"] != held_column]
         test = [sample for sample in samples if sample["column"] == held_column]
         pairs = {engine: [] for engine in ("vector", "scalar", "gpsimd")}
+        completion_pairs = []
         ood = []
         for sample in test:
             candidates = [item for item in train if item["key"] == sample["key"]]
@@ -111,18 +117,31 @@ def evaluate(root: Path) -> dict:
             for engine in pairs:
                 prediction = sum(item["actual"][engine] for item in nearest) / len(nearest)
                 pairs[engine].append((prediction, sample["actual"][engine]))
+            completion_pairs.append(
+                (
+                    sum(item["completion_ns"] for item in nearest) / len(nearest),
+                    sample["completion_ns"],
+                )
+            )
         folds.append(
             {
                 "held_column": held_column,
                 "cases": len(test),
                 "covered_cases": len(test) - len(ood),
                 "ood_cases": ood,
+                "completion_mape_pct": _mape(completion_pairs) if completion_pairs else None,
                 **{
                     f"{engine}_wape_pct": _wape(values) if values else None
                     for engine, values in pairs.items()
                 },
             }
         )
+    mean_completion_mape = sum(
+        fold["completion_mape_pct"] for fold in folds
+    ) / len(folds)
+    coverage_pct = sum(fold["covered_cases"] for fold in folds) / sum(
+        fold["cases"] for fold in folds
+    ) * 100.0
     return {
         "schema": "triton-viz.whole-program-regime-control-cv-v1",
         "protocol": "leave-one-free-dimension-out; nearest source transfer geometry within exact reusable program grammar",
@@ -131,9 +150,10 @@ def evaluate(root: Path) -> dict:
             engine: sum(fold[f"{engine}_wape_pct"] for fold in folds) / len(folds)
             for engine in ("vector", "scalar", "gpsimd")
         },
-        "coverage_pct": sum(fold["covered_cases"] for fold in folds)
-        / sum(fold["cases"] for fold in folds)
-        * 100.0,
+        "mean_completion_mape_pct": mean_completion_mape,
+        "completion_gate_pct": 20.0,
+        "completion_gate_pass": coverage_pct == 100.0 and mean_completion_mape < 20.0,
+        "coverage_pct": coverage_pct,
         "target_postcompile_prediction_reads": False,
     }
 

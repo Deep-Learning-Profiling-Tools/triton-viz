@@ -41,7 +41,8 @@ def test_payload_labels_do_not_read_target_instruction_mapping():
         "mapping_audit",
     ):
         assert forbidden not in source
-    assert "explorer_active_minus_independent_runtime_control" in source
+    assert "saved_aggregate_active_minus_independent_runtime_control" in source
+    assert "explorer_summary.json" not in source
 
 
 def test_source_trace_refresh_never_opens_target_results_or_hardware():

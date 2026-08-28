@@ -629,6 +629,117 @@ class TensorDotCountCalibration:
 
 
 @dataclass
+class AttentionPipelineCalibration:
+    """Control-only TensorE and completion surface for QK-normalize-PV DAGs."""
+
+    points: dict[str, list[tuple[int, float, float]]]
+
+    @classmethod
+    def from_csv(cls, path: str | Path) -> "AttentionPipelineCalibration":
+        points: dict[str, list[tuple[int, float, float]]] = {}
+        with Path(path).open(encoding="utf-8", newline="") as file:
+            for row in csv.DictReader(file):
+                dtype = TensorCalibrationSurface._normalize_dtype(row["dtype"])
+                points.setdefault(dtype, []).append(
+                    (
+                        int(row["value_width"]),
+                        float(row["tensor_active_ns"]),
+                        float(row["nc_completion_ns"]),
+                    )
+                )
+        for values in points.values():
+            values.sort()
+        if not points:
+            raise ValueError(f"No attention-pipeline calibration rows in {path}")
+        return cls(points)
+
+    def predict_ns(self, dtype: str, value_width: int) -> tuple[float, float, str]:
+        values = self.points.get(TensorCalibrationSurface._normalize_dtype(dtype), [])
+        if len(values) < 2 or value_width <= 0:
+            return 0.0, 0.0, "missing"
+        match = "interpolated"
+        if value_width <= values[0][0]:
+            lower, upper = values[0], values[1]
+            match = "ood_extrapolated"
+        elif value_width >= values[-1][0]:
+            lower, upper = values[-2], values[-1]
+            match = "ood_extrapolated" if value_width > values[-1][0] else "exact"
+        else:
+            upper_index = next(i for i, row in enumerate(values) if row[0] >= value_width)
+            lower, upper = values[upper_index - 1], values[upper_index]
+            if upper[0] == value_width:
+                return upper[1], upper[2], "exact"
+        weight = (value_width - lower[0]) / (upper[0] - lower[0])
+        return (
+            lower[1] + weight * (upper[1] - lower[1]),
+            lower[2] + weight * (upper[2] - lower[2]),
+            match,
+        )
+
+
+@dataclass
+class NormPipelineCalibration:
+    """Control-only completion for reduce-rsqrt-broadcast pipeline structures."""
+
+    points: dict[tuple[str, str, int, int, int], list[tuple[int, float]]]
+
+    @classmethod
+    def from_csv(cls, path: str | Path) -> "NormPipelineCalibration":
+        points: dict[tuple[str, str, int, int, int], list[tuple[int, float]]] = {}
+        with Path(path).open(encoding="utf-8", newline="") as file:
+            for row in csv.DictReader(file):
+                free_dim = int(row["free_dim"])
+                key = (
+                    TensorCalibrationSurface._normalize_dtype(row["dtype"]),
+                    row["structure"],
+                    int(row["partition_count"]),
+                    int(row["broadcast_instances"]),
+                    1 if free_dim <= 2048 else 2,
+                )
+                points.setdefault(key, []).append(
+                    (free_dim, float(row["nc_completion_ns"]))
+                )
+        for values in points.values():
+            values.sort()
+        if not points:
+            raise ValueError(f"No norm pipeline calibration rows in {path}")
+        return cls(points)
+
+    def predict_ns(
+        self, dtype: str, structure: str, partition_count: int,
+        broadcast_instances: int, free_dim: int
+    ) -> tuple[float, str]:
+        regime = 1 if free_dim <= 2048 else 2
+        values = self.points.get(
+            (
+                TensorCalibrationSurface._normalize_dtype(dtype),
+                structure,
+                partition_count,
+                broadcast_instances,
+                regime,
+            ),
+            [],
+        )
+        if not values:
+            return 0.0, "missing"
+        if len(values) == 1:
+            return values[0][1], "ood_clamped"
+        if free_dim <= values[0][0]:
+            lower, upper, match = values[0], values[1], "ood_extrapolated"
+        elif free_dim >= values[-1][0]:
+            lower, upper = values[-2], values[-1]
+            match = "exact" if free_dim == values[-1][0] else "ood_extrapolated"
+        else:
+            upper_index = next(i for i, row in enumerate(values) if row[0] >= free_dim)
+            lower, upper = values[upper_index - 1], values[upper_index]
+            if upper[0] == free_dim:
+                return upper[1], "exact"
+            match = "interpolated"
+        weight = (free_dim - lower[0]) / (upper[0] - lower[0])
+        return lower[1] + weight * (upper[1] - lower[1]), match
+
+
+@dataclass
 class TensorInstructionCalibration:
     """Tensor active-time fits keyed by static compiler lowering density.
 
@@ -1768,10 +1879,16 @@ class WholeProgramRoutingCalibration:
             ])
 
     def predict_ns(self, events: list[dict[str, Any]], dtype: str) -> dict[str, float] | None:
-        from triton_viz.tools.nki_evaluate_whole_program_regime import source_descriptor_from_events
+        from triton_viz.tools.nki_evaluate_whole_program_regime import (
+            source_descriptor_from_events,
+        )
 
         descriptor = source_descriptor_from_events(events, dtype)
-        candidates = [sample for sample in self.samples if sample["key"] == descriptor["key"]]
+        candidates = [
+            sample
+            for sample in self.samples
+            if sample["key"] == descriptor["key"]
+        ]
         if not candidates:
             return None
         distance = min(
@@ -1787,6 +1904,26 @@ class WholeProgramRoutingCalibration:
             engine: statistics.mean(sample["actual"][engine] for sample in nearest) * 1000.0
             for engine in (ENGINE_VECTOR, ENGINE_SCALAR, ENGINE_GPSIMD)
         }
+
+    def predict_completion_ns(
+        self, events: list[dict[str, Any]], dtype: str
+    ) -> float | None:
+        """Predict NC completion from an independent source-regime control."""
+        from triton_viz.tools.nki_evaluate_whole_program_regime import source_descriptor_from_events
+
+        descriptor = source_descriptor_from_events(events, dtype)
+        candidates = [sample for sample in self.samples if sample["key"] == descriptor["key"]]
+        if not candidates:
+            return None
+        distance = min(
+            abs(sample["distance_feature"] - descriptor["distance_feature"])
+            for sample in candidates
+        )
+        nearest = [
+            sample for sample in candidates
+            if abs(sample["distance_feature"] - descriptor["distance_feature"]) == distance
+        ]
+        return statistics.mean(sample["completion_ns"] for sample in nearest)
 
 
 @dataclass
@@ -1821,6 +1958,8 @@ class CostModel:
     strided_dma_calibration: StridedDmaCalibration | None = None
     tensor_calibration: TensorCalibrationSurface | None = None
     tensor_dot_count_calibration: TensorDotCountCalibration | None = None
+    attention_pipeline_calibration: AttentionPipelineCalibration | None = None
+    norm_pipeline_calibration: NormPipelineCalibration | None = None
     tensor_instruction_calibration: TensorInstructionCalibration | None = None
     strict_calibration: bool = False
     enable_structured_completion_floor: bool = True
@@ -2897,6 +3036,20 @@ def simulate(
         == ENGINE_TENSOR
     ]
     tensor_startup_ns = 0.0
+    attention_completion_ns = 0.0
+    attention_pipeline_match = "disabled"
+    norm_completion_ns = 0.0
+    norm_pipeline_match = "disabled"
+    norm_markers = [event for event in source_events if event.get("norm_pipeline_structure")]
+    if model.norm_pipeline_calibration is not None and norm_markers:
+        marker = norm_markers[0]
+        norm_completion_ns, norm_pipeline_match = model.norm_pipeline_calibration.predict_ns(
+            str(marker.get("norm_pipeline_dtype") or "float32"),
+            str(marker["norm_pipeline_structure"]),
+            int(marker["norm_pipeline_partition_count"]),
+            int(marker["norm_pipeline_broadcast_instances"]),
+            int(marker["norm_pipeline_free_dim"]),
+        )
     tensor_domain_ood = 0
     micro_dag_engine_coverage: set[str] = set()
     source_compute_regions = {
@@ -2949,12 +3102,29 @@ def simulate(
                 calibrated_dot_events[0].get("tensor_dot_count") or 0
             )
             calibrated_tensor_active_ns = 0.0
+            attention_value_width = int(
+                calibrated_dot_events[0].get("attention_pipeline_value_width") or 0
+            )
             source_dot_count = int(
                 calibrated_dot_events[0].get("tensor_source_dot_count") or 0
             )
             source_dot_surface_used = False
             if (
+                model.attention_pipeline_calibration is not None
+                and len(calibrated_dot_events) == 2
+                and attention_value_width > 0
+            ):
+                (
+                    calibrated_tensor_active_ns,
+                    attention_completion_ns,
+                    attention_pipeline_match,
+                ) = model.attention_pipeline_calibration.predict_ns(
+                    dtype, attention_value_width
+                )
+                source_dot_surface_used = calibrated_tensor_active_ns > 0
+            if (
                 model.tensor_dot_count_calibration is not None
+                and not source_dot_surface_used
                 and source_dot_count == len(calibrated_dot_events)
             ):
                 calibrated_tensor_active_ns, _match = (
@@ -3200,6 +3370,7 @@ def simulate(
     # occupancy replaces only Vector/Scalar/GpSimd work and provides a physical
     # makespan lower bound.  This avoids inventing target compiler Flow edges.
     whole_program_routing_match = "disabled"
+    whole_program_completion_ns = 0.0
     value_dtypes = [
         str(value)
         for event in source_events
@@ -3216,6 +3387,12 @@ def simulate(
             whole_program_routing_match = "covered"
             engine_busy.update(routed_busy)
             makespan = max(makespan, max(routed_busy.values(), default=0.0))
+            whole_program_completion_ns = (
+                model.whole_program_routing.predict_completion_ns(
+                    routing_events, source_dtype
+                )
+                or 0.0
+            )
         else:
             whole_program_routing_match = "ood"
 
@@ -3275,7 +3452,13 @@ def simulate(
     # is not represented by DMA active time.  It is a geometry-keyed lower
     # bound on end-to-end completion, not an additive operator residual.
     without_structured_completion_ns = max(final_ns, strided_completion_ns)
-    final_ns = max(without_structured_completion_ns, structured_completion_ns)
+    final_ns = max(
+        without_structured_completion_ns,
+        structured_completion_ns,
+        attention_completion_ns,
+        norm_completion_ns,
+        whole_program_completion_ns,
+    )
     structured_completion_activated = (
         model.enable_structured_completion_floor
         and structured_completion_ns > without_structured_completion_ns
@@ -3291,9 +3474,24 @@ def simulate(
             "whole_program_routing_covered": float(
                 whole_program_routing_match == "covered"
             ),
+            "whole_program_completion_ns": whole_program_completion_ns,
             "runtime_critical_path_extension": final_ns - makespan,
             "without_structured_completion_floor": without_structured_completion_ns,
             "structured_completion_floor_ns": structured_completion_ns,
+            "attention_pipeline_completion_ns": attention_completion_ns,
+            "attention_pipeline_covered": float(
+                attention_pipeline_match in {"exact", "interpolated"}
+            ),
+            "attention_pipeline_ood": float(
+                attention_pipeline_match == "ood_extrapolated"
+            ),
+            "norm_pipeline_completion_ns": norm_completion_ns,
+            "norm_pipeline_covered": float(
+                norm_pipeline_match in {"exact", "interpolated"}
+            ),
+            "norm_pipeline_ood": float(
+                norm_pipeline_match in {"ood_extrapolated", "ood_clamped", "missing"}
+            ),
             "structured_completion_floor_activated": float(
                 structured_completion_activated
             ),

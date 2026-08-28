@@ -19,6 +19,7 @@ try:
         StructuralStaticDmaCalibration,
         StridedDmaCalibration,
         StructuredControlCalibration,
+        WholeProgramRoutingCalibration,
         TensorCalibrationSurface,
         TensorInstructionCalibration,
         StaticOpcodePayloadCalibration,
@@ -1197,6 +1198,26 @@ def test_compositional_runtime_baseline_is_reported_separately_from_payload():
     assert result.engine_busy_ns["scalar"] == pytest.approx(25.0)
     assert result.components_ns["scalar_runtime_baseline_ns"] == pytest.approx(25.0)
     assert result.components_ns["gpsimd_runtime_baseline_ns"] == 0.0
+
+
+def test_whole_program_completion_uses_nearest_source_geometry(monkeypatch):
+    monkeypatch.setattr(
+        "triton_viz.tools.nki_evaluate_whole_program_regime.source_descriptor_from_events",
+        lambda events, dtype: {"key": (dtype, "linear"), "distance_feature": 90.0},
+    )
+    calibration = WholeProgramRoutingCalibration([
+        {
+            "key": ("float32", "linear"),
+            "distance_feature": 40.0,
+            "completion_ns": 8_000.0,
+        },
+        {
+            "key": ("float32", "linear"),
+            "distance_feature": 100.0,
+            "completion_ns": 12_000.0,
+        },
+    ])
+    assert calibration.predict_completion_ns([], "float32") == 12_000.0
 
 
 def test_tensor_calibration_is_dtype_throughput_without_shape_lookup(tmp_path):

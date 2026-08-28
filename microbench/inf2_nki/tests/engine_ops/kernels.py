@@ -344,6 +344,59 @@ def tensor_matmul_transpose_pipeline_work_units(
     }
 
 
+def tensor_attention_pipeline_factory(
+    *, dv: int, repeat: int = 1, mode: str = "dependent",
+    dtype_name: str = "float32",
+):
+    """Independent QK-normalize-PV control for attention resource behavior.
+
+    The control preserves the two dependent Dot phases and the intervening
+    normalization/reuse edge, but owns its implementation and uses widths
+    disjoint from the attention holdout.  It is a compiler-behavior control,
+    not an operator replay or target-derived label.
+    """
+    del repeat, mode
+    kernel_dtype_name = dtype_name
+
+    @nki.jit
+    def kernel(q, k, v):
+        kdtype = dtype_for_load(kernel_dtype_name, q.dtype)
+        q_tile = nl.load(q)
+        k_tile = nl.load(k)
+        v_tile = nl.load(v)
+
+        q_t = nisa.tensor_copy(nisa.nc_transpose(q_tile), dtype=kdtype)
+        k_t = nisa.tensor_copy(nisa.nc_transpose(k_tile), dtype=kdtype)
+
+        scores_psum = nisa.nc_matmul(stationary=q_t, moving=k_t)
+        scores = nisa.tensor_copy(scores_psum, dtype=nl.float32)
+        row_max = nl.max(scores, axis=1, keepdims=True)
+        exp_scores = nl.exp(nl.subtract(scores, row_max))
+        row_sum = nl.sum(exp_scores, axis=1, keepdims=True)
+        probs_t = nisa.tensor_copy(nisa.nc_transpose(exp_scores), dtype=kdtype)
+
+        acc_psum = nisa.nc_matmul(stationary=probs_t, moving=v_tile)
+        acc = nisa.tensor_copy(acc_psum, dtype=nl.float32)
+        normalized = nl.divide(acc, row_sum)
+        out = nl.ndarray((128, dv), dtype=kdtype, buffer=nl.shared_hbm)
+        nl.store(out, value=nisa.tensor_copy(normalized, dtype=kdtype))
+        return out
+
+    return kernel, [(128, 128), (128, 128), (128, dv)], (1,)
+
+
+def tensor_attention_pipeline_work_units(
+    *, dv: int, repeat: int = 1, mode: str = "dependent",
+    dtype_name: str = "float32",
+) -> dict[str, int]:
+    return {
+        "matmul_flops": 2 * 128 * 128 * (128 + dv),
+        "logical_instructions": 12,
+        "dot_count": 2,
+        "attention_value_width": dv,
+    }
+
+
 def work_units(*, p: int | None = None, f: int | None = None, m: int | None = None, k: int | None = None, n: int | None = None, repeat: int, mode: str = "", **_: object) -> dict[str, int]:
     if m is not None and k is not None and n is not None:
         return {"matmul_flops": 2 * m * n * k * repeat, "logical_instructions": repeat}
