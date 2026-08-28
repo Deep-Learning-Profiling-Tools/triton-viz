@@ -287,7 +287,6 @@ def main(argv: list[str] | None = None) -> int:
                     NormPipelineCalibration.from_csv(args.norm_pipeline_calibration_csv)
                     if args.norm_pipeline_calibration_csv else None
                 ),
-                tensor_instruction_calibration=None,
                 structural_static_dma=StructuralStaticDmaCalibration.from_csv(
                     args.structural_static_dma_csv
                 ),

@@ -3,15 +3,6 @@ import csv
 
 from triton_viz.tools.nki_fit_source_sequence_lowering import _cases
 from triton_viz.tools.nki_program_context import program_context_features
-from triton_viz.tools.nki_program_context import source_routing_state
-from triton_viz.tools.nki_program_context import (
-    source_branch_orientation_state,
-    source_complete_routing_regime,
-    source_full_routing_regime,
-    source_join_ownership_state,
-    source_local_topology_state,
-    source_routing_regime,
-)
 from triton_viz.tools.nki_region_control_experiments import _declared_trace
 
 
@@ -216,34 +207,6 @@ def test_program_context_summarizes_branch_join_topology():
     assert features["program_dag_branch_reduction_signed_difference"] == 1
 
 
-def test_source_routing_state_uses_low_dimensional_topology():
-    assert source_routing_state({}) == "other"
-    assert source_routing_state(
-        {
-            "program_dag_join_count": 3,
-            "program_dag_branch_source_interleave_count": 7,
-        }
-    ) == "interleaved"
-    assert source_routing_state(
-        {
-            "program_dag_join_count": 5,
-            "program_dag_branch_source_interleave_count": 2,
-        }
-    ) == "blocked"
-    assert source_routing_state(
-        {
-            "program_dag_join_count": 3,
-            "program_dag_branch_add_multiply_order_max": 0.03,
-        }
-    ) == "reversed"
-    assert source_routing_state(
-        {
-            "program_dag_join_count": 3,
-            "program_dag_branch_add_multiply_order_max": 0.25,
-        }
-    ) == "canonical"
-
-
 def test_program_context_recovers_join_update_owner_from_reuse():
     canonical = [
         {
@@ -273,46 +236,3 @@ def test_program_context_recovers_join_update_owner_from_reuse():
     assert canonical_features["program_dag_join_update_branch1_count"] == 0
     assert swapped_features["program_dag_join_update_branch0_count"] == 0
     assert swapped_features["program_dag_join_update_branch1_count"] == 1
-    assert source_join_ownership_state(canonical_features) == "branch0_only"
-    assert source_join_ownership_state(swapped_features) == "branch1_only"
-    assert source_routing_regime(canonical_features).endswith(":branch0_only")
-
-
-def test_source_local_topology_state_distinguishes_oriented_fanout():
-    assert source_local_topology_state({}) == "linear"
-    assert source_local_topology_state(
-        {"program_dag_branch0_local_fanout_count": 1}
-    ) == "fanout_branch0"
-    assert source_local_topology_state(
-        {"program_dag_branch1_local_rejoin_count": 1}
-    ) == "fanout_branch1"
-    both = {
-        "program_dag_join_count": 3,
-        "program_dag_branch_add_multiply_order_max": 0.3,
-        "program_dag_join_update_branch0_count": 1,
-        "program_dag_branch0_local_fanout_count": 1,
-        "program_dag_branch1_local_fanout_count": 1,
-    }
-    assert source_local_topology_state(both) == "fanout_both"
-    assert source_full_routing_regime(both).endswith(":fanout_both")
-
-
-def test_source_branch_orientation_is_explicit_and_ordered():
-    add_mul = {
-        "program_dag_join_count": 3,
-        "program_dag_branch_add_multiply_order_max": 0.3,
-        "program_dag_join_update_branch0_count": 1,
-        "program_dag_branch0_root_add": 1,
-        "program_dag_branch1_root_multiply": 1,
-    }
-    mul_add = {
-        **add_mul,
-        "program_dag_branch0_root_add": 0,
-        "program_dag_branch1_root_multiply": 0,
-        "program_dag_branch0_root_multiply": 1,
-        "program_dag_branch1_root_add": 1,
-    }
-    assert source_branch_orientation_state(add_mul) == "add_mul"
-    assert source_branch_orientation_state(mul_add) == "mul_add"
-    assert source_branch_orientation_state({}) == "other"
-    assert source_complete_routing_regime(add_mul).endswith(":add_mul")

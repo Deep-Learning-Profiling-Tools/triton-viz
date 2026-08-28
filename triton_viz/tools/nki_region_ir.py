@@ -149,7 +149,6 @@ def build_region_ir(
         token not in _REDUCTIONS and arity >= 2
         for token, arity in zip(tokens, input_arity)
     )
-
     producer: dict[int, int] = {}
     producer_shapes: dict[int, list[int]] = {}
     edges: list[list[int]] = []
@@ -909,25 +908,3 @@ def structural_calibration_key(region: dict[str, Any]) -> str:
         f"|pbcast={partition_broadcast_bucket}"
         f"|p={partition_count}|pbucket={partition_bucket}"
     )
-
-
-def grammar_catalog() -> dict[str, Any]:
-    """Return a JSON-serializable catalog of the production lowering rules."""
-    return {
-        "catalog_schema_version": 1,
-        "region_ir_schema": {
-            "name": REGION_IR_SCHEMA_NAME,
-            "current_version": REGION_IR_SCHEMA_VERSION,
-            "supported_versions": sorted(SUPPORTED_REGION_IR_SCHEMA_VERSIONS),
-        },
-        "rules": [
-            {
-                "rule_id": rule.rule_id,
-                "priority": rule.priority,
-                "condition": rule.condition,
-                "rationale": rule.rationale,
-                "evidence": list(rule.evidence),
-            }
-            for rule in GRAMMAR_RULES
-        ],
-    }

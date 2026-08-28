@@ -9,7 +9,6 @@ from triton_viz.tools.nki_region_ir import (
     build_region_ir,
     completion_calibration_dtype,
     compositional_features,
-    grammar_catalog,
     match_structural_family,
     region_ir_structural_key,
     structural_calibration_key,
@@ -402,12 +401,3 @@ def test_grammar_classification_is_independent_of_operator_case_and_pointer_meta
 )
 def test_declarative_rules_preserve_established_family_names(region, expected):
     assert structural_family({"schema_version": 1, **region}) == expected
-
-
-def test_grammar_catalog_preserves_rule_metadata():
-    catalog = grammar_catalog()
-    assert catalog["region_ir_schema"]["current_version"] == REGION_IR_SCHEMA_VERSION
-    assert {rule["rule_id"] for rule in catalog["rules"]} >= {
-        "reduction.broadcast",
-        "elementwise.arity_chain",
-    }
