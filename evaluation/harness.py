@@ -351,8 +351,17 @@ def _run_one_cutile(spec: LaunchSpec, seed: int) -> dict[str, Any]:
 def _dynamic_track(spec: LaunchSpec, seed: int) -> dict[str, Any]:
     import triton_viz
     from triton_viz.clients import RaceDetector
+    from triton_viz.clients.race_detector.hb_common import (
+        UnsupportedSymbolicRaceQuery,
+    )
 
-    det = RaceDetector()
+    # abort_on_error: once any capture path marks the launch unsupported,
+    # finalize() discards every record and reports nothing, so all further
+    # interpretation is provably dead work — the sweep had rows spinning
+    # 40-60 s after their mark. Every mark site marks BEFORE raising, so
+    # catching the abort and running finalize() classifies the launch
+    # exactly as the mark-and-continue mode would have.
+    det = RaceDetector(abort_on_error=True)
     args = spec.make_args(seed)  # fresh tensors; the interpreter mutates them
     t0 = time.perf_counter()
     error = None
@@ -364,6 +373,8 @@ def _dynamic_track(spec: LaunchSpec, seed: int) -> dict[str, Any]:
     except TimeoutError as e:
         error = str(e)
         timed_out = True
+    except UnsupportedSymbolicRaceQuery:
+        det.finalize()  # idempotent: reads the mark, sets "unsupported"
     except Exception as e:  # noqa: BLE001
         error = f"{type(e).__name__}: {e}"
     elapsed = time.perf_counter() - t0
