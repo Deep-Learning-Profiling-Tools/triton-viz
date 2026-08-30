@@ -200,101 +200,6 @@ class DmaCalibrationSurface:
 
 
 @dataclass
-class StaticDmaCalibrationSurface:
-    """Measured incremental SBUF scatter latency indexed by ``(p, x, y)``."""
-
-    points: dict[tuple[int, int, int], float]
-
-    @classmethod
-    def from_csv(
-        cls,
-        path: str | Path,
-        benchmark_name: str = "static_dma_surface",
-    ) -> StaticDmaCalibrationSurface:
-        scatter: dict[tuple[int, int, int], float] = {}
-        baseline: dict[tuple[int, int, int], float] = {}
-        with Path(path).open(encoding="utf-8", newline="") as file:
-            for row in csv.DictReader(file):
-                if row.get("row_type") != "benchmark" or row.get("status") != "ok":
-                    continue
-                if row.get("spec.name") != benchmark_name:
-                    continue
-                try:
-                    key = (
-                        int(float(row["work.partition_count"])),
-                        int(float(row["work.scatter_rows"])),
-                        int(float(row["work.scatter_columns"])),
-                    )
-                    latency_ns = float(row["latency.nc_latency.p50_us"]) * 1000.0
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if min(key) <= 0 or not math.isfinite(latency_ns) or latency_ns <= 0:
-                    continue
-                mode = row.get("mode") or row.get("spec.mode")
-                target = baseline if mode == "hbm_roundtrip_baseline" else scatter
-                previous = target.get(key)
-                if previous is not None and not math.isclose(
-                    previous, latency_ns, rel_tol=1e-9, abs_tol=1e-9
-                ):
-                    raise ValueError(
-                        f"Conflicting Static DMA calibration rows for {key}: "
-                        f"{previous} versus {latency_ns}"
-                    )
-                target[key] = latency_ns
-        points = {
-            key: max(0.0, latency_ns - baseline[key])
-            for key, latency_ns in scatter.items()
-            if key in baseline
-        }
-        if not points:
-            raise ValueError(f"No paired static_dma_surface calibration rows in {path}")
-        return cls(points)
-
-    def latency_ns(self, partitions: int, x: int, y: int) -> float:
-        """Return exact or log-space inverse-distance interpolated group latency."""
-        exact = self.points.get((partitions, x, y))
-        if exact is not None:
-            return exact
-        if partitions <= 0 or x <= 0 or y <= 0:
-            raise ValueError(
-                "Static DMA geometry must be positive, received "
-                f"partitions={partitions}, x={x}, y={y}"
-            )
-        bounds = tuple(
-            (
-                min(point[axis] for point in self.points),
-                max(point[axis] for point in self.points),
-            )
-            for axis in range(3)
-        )
-        target = (
-            min(max(partitions, bounds[0][0]), bounds[0][1]),
-            min(max(x, bounds[1][0]), bounds[1][1]),
-            min(max(y, bounds[2][0]), bounds[2][1]),
-        )
-        log_target = tuple(math.log2(value) for value in target)
-        nearest = sorted(
-            self.points.items(),
-            key=lambda item: sum(
-                (math.log2(item[0][axis]) - log_target[axis]) ** 2 for axis in range(3)
-            ),
-        )[:8]
-        weighted = 0.0
-        weight_sum = 0.0
-        for point, latency in nearest:
-            distance = math.sqrt(
-                sum(
-                    (math.log2(point[axis]) - log_target[axis]) ** 2
-                    for axis in range(3)
-                )
-            )
-            weight = 1.0 / max(distance, 1e-9)
-            weighted += weight * latency
-            weight_sum += weight
-        return weighted / weight_sum
-
-
-@dataclass
 class StructuralStaticDmaCalibration:
     """Compiler-generated Static DMA busy time keyed by structural grammar."""
 
@@ -964,187 +869,6 @@ class ComputeCalibration:
 
 
 @dataclass
-class LoweringExpansionCalibration:
-    """Level-A source fusion signature to effective per-engine instructions.
-
-    Points are keyed by ``(signature, dtype, engine, free_dim)`` and carry an
-    effective instruction count plus the input-stream class used by Level B.
-    Effective counts may be fractional: they represent measured engine active
-    time divided by the calibrated single-instruction cost at that shape.
-    """
-
-    points: dict[tuple[str, str, str, int], tuple[float, int]]
-    fixed_points: dict[tuple[str, str, str, int], float] = field(default_factory=dict)
-
-    @classmethod
-    def from_csv(cls, path: str | Path) -> LoweringExpansionCalibration:
-        points: dict[tuple[str, str, str, int], tuple[float, int]] = {}
-        fixed_points: dict[tuple[str, str, str, int], float] = {}
-        with Path(path).open(encoding="utf-8", newline="") as file:
-            for row in csv.DictReader(file):
-                try:
-                    key = (
-                        str(row["fusion_signature"]).strip(),
-                        ComputeCalibration._norm_dtype(row.get("dtype")),
-                        str(row["engine"]).strip().lower(),
-                        int(float(row["free_dim"])),
-                    )
-                    value = (
-                        float(row["effective_instruction_count"]),
-                        int(float(row.get("input_stream_count") or 1)),
-                    )
-                except (KeyError, TypeError, ValueError):
-                    continue
-                if key[0] and key[2] and key[3] > 0 and value[0] > 0:
-                    points[key] = value
-                    try:
-                        fixed_points[key] = max(
-                            0.0, float(row.get("kernel_control_active_ns") or 0)
-                        )
-                    except (TypeError, ValueError):
-                        fixed_points[key] = 0.0
-        if not points:
-            raise ValueError(f"No lowering expansion calibration rows in {path}")
-        return cls(points, fixed_points)
-
-    def fixed_ns(self, signature: str, dtype: str, engine: str, free_dim: int) -> float:
-        """Return instruction-audited fixed kernel-control work for a region."""
-        dtype = ComputeCalibration._norm_dtype(dtype)
-        rows = [
-            (free, value)
-            for (
-                sig,
-                calibrated_dtype,
-                calibrated_engine,
-                free,
-            ), value in self.fixed_points.items()
-            if sig == signature
-            and calibrated_dtype == dtype
-            and calibrated_engine == engine
-        ]
-        if not rows:
-            return 0.0
-        exact = next((value for free, value in rows if free == free_dim), None)
-        return (
-            exact
-            if exact is not None
-            else min(rows, key=lambda row: abs(row[0] - free_dim))[1]
-        )
-
-    def expansions(
-        self, signature: str, dtype: str, free_dim: int, pattern: str | None = None
-    ) -> dict[str, tuple[float, int]]:
-        """Return exact/interpolated target-engine expansions for one group."""
-        dtype = ComputeCalibration._norm_dtype(dtype)
-        by_dtype: dict[tuple[str, str], list[tuple[int, float, int]]] = {}
-        lookup_signature = signature
-        if not any(key[0] == signature for key in self.points) and pattern:
-            lookup_signature = f"pattern:{pattern}"
-        for (
-            sig,
-            calibrated_dtype,
-            engine,
-            calibrated_free,
-        ), value in self.points.items():
-            if sig == lookup_signature:
-                by_dtype.setdefault((engine, calibrated_dtype), []).append(
-                    (calibrated_free, value[0], value[1])
-                )
-        result: dict[str, tuple[float, int]] = {}
-        engines = {engine for engine, _ in by_dtype}
-        for engine in engines:
-            rows = (
-                by_dtype.get((engine, dtype)) or by_dtype.get((engine, "float32")) or []
-            )
-            exact = next((row for row in rows if row[0] == free_dim), None)
-            if exact is not None:
-                result[engine] = (exact[1], exact[2])
-                continue
-            rows = sorted(rows)
-            target = min(max(free_dim, rows[0][0]), rows[-1][0])
-            lower = max(
-                (row for row in rows if row[0] <= target), key=lambda row: row[0]
-            )
-            upper = min(
-                (row for row in rows if row[0] >= target), key=lambda row: row[0]
-            )
-            if lower[0] == upper[0]:
-                result[engine] = (lower[1], lower[2])
-            else:
-                weight = (math.log2(target) - math.log2(lower[0])) / (
-                    math.log2(upper[0]) - math.log2(lower[0])
-                )
-                count = lower[1] + weight * (upper[1] - lower[1])
-                result[engine] = (count, lower[2] if weight < 0.5 else upper[2])
-        return result
-
-
-@dataclass
-class CompositionalLoweringCalibration:
-    """Additive Level-A coefficients over structured region IR features."""
-
-    coefficients: dict[tuple[str, str, str], dict[str, float]]
-
-    @classmethod
-    def from_csv(cls, path: str | Path) -> CompositionalLoweringCalibration:
-        coefficients = {}
-        with Path(path).open(encoding="utf-8", newline="") as file:
-            for row in csv.DictReader(file):
-                key = (
-                    str(row["engine"]),
-                    ComputeCalibration._norm_dtype(row["dtype"]),
-                    str(row["target"]),
-                )
-                coefficients.setdefault(key, {})[str(row["feature"])] = float(
-                    row["coefficient"]
-                )
-        if not coefficients:
-            raise ValueError(f"No compositional lowering coefficients in {path}")
-        return cls(coefficients)
-
-    def predict(self, region_ir: dict[str, Any]) -> dict[str, tuple[float, int, float]]:
-        from triton_viz.tools.nki_region_ir import compositional_features
-
-        features = compositional_features(region_ir)
-        dtype = ComputeCalibration._norm_dtype(region_ir.get("dtype"))
-        result = {}
-        for engine, streams in (("vector", 2), ("scalar", 1)):
-
-            def value(target, engine=engine):
-                weights = self.coefficients.get((engine, dtype, target))
-                if not weights:
-                    return 0.0
-                return max(
-                    0.0,
-                    sum(
-                        weights.get(name, 0.0) * amount
-                        for name, amount in features.items()
-                    ),
-                )
-
-            count = value("effective_count")
-            if count > 0:
-                result[engine] = (count, streams, value("fixed_ns"))
-        return result
-
-    def runtime_baseline_ns(
-        self, dtype: str, partition_count: int
-    ) -> dict[str, float]:
-        normalized = ComputeCalibration._norm_dtype(dtype)
-        nearest = min((1, 16, 128), key=lambda value: abs(value - partition_count))
-        feature = f"partition_p{nearest}"
-        return {
-            engine: max(
-                0.0,
-                self.coefficients.get(
-                    (engine, normalized, "runtime_baseline_ns"), {}
-                ).get(feature, 0.0),
-            )
-            for engine in (ENGINE_VECTOR, ENGINE_SCALAR, ENGINE_GPSIMD)
-        }
-
-
-@dataclass
 class StructuredControlCalibration:
     """Interpolated points keyed by reusable structural grammar families."""
 
@@ -1662,14 +1386,11 @@ class CostModel:
     dma_calibration: DmaCalibrationSurface | None = None
     dma_write_calibration: DmaCalibrationSurface | None = None
     dma_transpose_calibration: DmaCalibrationSurface | None = None
-    static_dma_calibration: StaticDmaCalibrationSurface | None = None
     structural_static_dma: StructuralStaticDmaCalibration | None = None
     # Level-B per-instruction compute cost (VectorE/ScalarE). When present,
     # NkiCompute/binary/reduce events cost their lowered-instruction count times
     # the measured single-instruction cost instead of the hardcoded VectorE fit.
     compute_calibration: ComputeCalibration | None = None
-    lowering_calibration: LoweringExpansionCalibration | None = None
-    compositional_lowering: CompositionalLoweringCalibration | None = None
     structured_control_lowering: StructuredControlCalibration | None = None
     whole_program_routing: WholeProgramRoutingCalibration | None = None
     strided_dma_calibration: StridedDmaCalibration | None = None
@@ -1868,16 +1589,6 @@ class CostModel:
             nbytes = int(event.get("bytes", 0))
             if engine == ENGINE_DMA:
                 return self._dma_cost_ns(event, nbytes)
-            if engine == ENGINE_STATIC_DMA and self.static_dma_calibration is not None:
-                copies = int(event.get("static_dma_group_copies") or 0)
-                x = int(event.get("static_dma_group_x") or 0)
-                y = int(event.get("static_dma_group_y") or 0)
-                partitions = int(event.get("partition_count") or 0)
-                if copies > 0 and x > 0 and y > 0:
-                    return (
-                        self.static_dma_calibration.latency_ns(partitions, x, y)
-                        / copies
-                    )
             if self.onchip_transfer_calibration is not None:
                 item_bytes = int(event.get("item_bytes") or 0)
                 if item_bytes <= 0:
@@ -2145,11 +1856,7 @@ def _expand_lowering_groups(
 ) -> list[dict[str, Any]]:
     """Replace calibrated source fusion groups with per-engine Level-A work."""
     source = list(events)
-    if (
-        model.lowering_calibration is None
-        and model.compositional_lowering is None
-        and model.structured_control_lowering is None
-    ) or model.compute_calibration is None:
+    if model.structured_control_lowering is None or model.compute_calibration is None:
         return source
     expanded: list[dict[str, Any]] = []
     index = 0
@@ -2176,13 +1883,7 @@ def _expand_lowering_groups(
                 "float32",
             )
         )
-        targets = (
-            model.lowering_calibration.expansions(
-                signature, dtype, free_dim, str(event.get("fusion_pattern") or "")
-            )
-            if model.lowering_calibration is not None
-            else {}
-        )
+        targets: dict[str, Any] = {}
         structured = {}
         lowering_free_dim = free_dim
         region_ir = dict(event["region_ir"]) if event.get("region_ir") else {}
@@ -2192,15 +1893,6 @@ def _expand_lowering_groups(
                 region_ir["partition_count"] = compute_region.partition_count
                 region_ir["logical_free_dim"] = compute_region.logical_free_dim
                 lowering_free_dim = compute_region.logical_free_dim
-        if (
-            not targets
-            and model.compositional_lowering is not None
-            and event.get("region_ir")
-        ):
-            structured = model.compositional_lowering.predict(region_ir)
-            targets = {
-                engine: (value[0], value[1]) for engine, value in structured.items()
-            }
         if (
             not targets
             and model.structured_control_lowering is not None
@@ -2526,25 +2218,15 @@ def _expand_lowering_groups(
                     "input_stream_count": streams,
                     "lowering_expansion": count,
                     "lowering_fixed_ns": (
-                        model.lowering_calibration.fixed_ns(
-                            signature, dtype, engine, free_dim
-                        )
-                        if model.lowering_calibration is not None and not structured
-                        else (
-                            structured.get(engine, (0.0, streams, 0.0))[2]
-                            if int(group) == 0
-                            else 0.0
-                        )
+                        structured.get(engine, (0.0, streams, 0.0))[2]
+                        if int(group) == 0
+                        else 0.0
                     ),
                     "lowered_from_signature": signature,
                     "level_a_match": (
                         structured_provenance.get(engine, "structured")
                         if model.structured_control_lowering is not None
-                        else (
-                            "compositional"
-                            if model.compositional_lowering is not None
-                            else "signature"
-                        )
+                        else "signature"
                     ),
                     "micro_dag_match": dag_match,
                     "micro_dag_region": str(
@@ -3048,13 +2730,6 @@ def simulate(
         (int(event.get("partition_count") or 1) for event in source_events),
         default=1,
     )
-    if model.compositional_lowering is not None:
-        for engine, baseline_ns in model.compositional_lowering.runtime_baseline_ns(
-            source_dtype, max_partitions
-        ).items():
-            if whole_program_routing_match != "covered":
-                engine_busy[engine] = engine_busy.get(engine, 0.0) + baseline_ns
-            engine_runtime_baseline_ns[engine] = baseline_ns
     compute_critical_ns = max(
         engine_busy.get(ENGINE_VECTOR, 0.0),
         engine_busy.get(ENGINE_SCALAR, 0.0),
@@ -3227,9 +2902,7 @@ def main() -> None:  # pragma: no cover - thin CLI wrapper
     parser.add_argument("--dma-calibration-csv", type=Path, default=None)
     parser.add_argument("--dma-write-calibration-csv", type=Path, default=None)
     parser.add_argument("--dma-transpose-calibration-csv", type=Path, default=None)
-    parser.add_argument("--static-dma-calibration-csv", type=Path, default=None)
     parser.add_argument("--compute-calibration-csv", type=Path, default=None)
-    parser.add_argument("--lowering-calibration-csv", type=Path, default=None)
     parser.add_argument(
         "--kernel-overhead-us",
         type=float,
@@ -3261,19 +2934,9 @@ def main() -> None:  # pragma: no cover - thin CLI wrapper
         if args.dma_transpose_calibration_csv
         else None
     )
-    static_dma_calibration = (
-        StaticDmaCalibrationSurface.from_csv(args.static_dma_calibration_csv)
-        if args.static_dma_calibration_csv
-        else None
-    )
     compute_calibration = (
         ComputeCalibration.from_csv(args.compute_calibration_csv)
         if args.compute_calibration_csv
-        else None
-    )
-    lowering_calibration = (
-        LoweringExpansionCalibration.from_csv(args.lowering_calibration_csv)
-        if args.lowering_calibration_csv
         else None
     )
     result = simulate_jsonl(
@@ -3282,9 +2945,7 @@ def main() -> None:  # pragma: no cover - thin CLI wrapper
             dma_calibration=calibration,
             dma_write_calibration=write_calibration,
             dma_transpose_calibration=transpose_calibration,
-            static_dma_calibration=static_dma_calibration,
             compute_calibration=compute_calibration,
-            lowering_calibration=lowering_calibration,
             kernel_overhead_ns=max(0.0, args.kernel_overhead_us * 1000.0),
         ),
     )

@@ -13,7 +13,6 @@ from triton_viz.tools.nki_cost_model import (
     DmaElapsedCalibration,
     OnChipTransferCalibration,
     GlobalCompletionCalibration,
-    CompositionalLoweringCalibration,
     ComputeCalibration,
     CostModel,
     DmaCalibrationSurface,
@@ -150,7 +149,6 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--compute-calibration-csv", type=Path, required=True)
     parser.add_argument("--structured-control-csv", type=Path, required=True)
     parser.add_argument("--whole-program-control-root", type=Path)
-    parser.add_argument("--compositional-lowering-csv", type=Path)
     parser.add_argument("--trace-filename", default="trace.jsonl")
     parser.add_argument("--tensor-calibration-csv", type=Path)
     parser.add_argument("--tensor-source-geometry-csv", type=Path)
@@ -223,13 +221,6 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 compute_calibration=ComputeCalibration.from_csv(
                     args.compute_calibration_csv
-                ),
-                compositional_lowering=(
-                    CompositionalLoweringCalibration.from_csv(
-                        args.compositional_lowering_csv
-                    )
-                    if args.compositional_lowering_csv
-                    else None
                 ),
                 structured_control_lowering=StructuredControlCalibration.from_csv(
                     args.structured_control_csv

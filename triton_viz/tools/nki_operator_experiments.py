@@ -37,11 +37,9 @@ from triton_viz.clients.tracer.tracer import Tracer
 from triton_viz.core.trace import launches
 from triton_viz.core.trace import trace as tv_trace
 from triton_viz.tools.nki_cost_model import (
-    CompositionalLoweringCalibration,
     ComputeCalibration,
     CostModel,
     DmaCalibrationSurface,
-    LoweringExpansionCalibration,
     StructuralStaticDmaCalibration,
     StridedDmaCalibration,
     StructuredControlCalibration,
@@ -809,18 +807,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Level-B per-instruction VectorE/ScalarE cost surface.",
     )
     parser.add_argument(
-        "--lowering-calibration-csv",
-        type=Path,
-        default=None,
-        help="Level-A fusion-signature to per-engine expansion surface.",
-    )
-    parser.add_argument(
-        "--compositional-lowering-csv",
-        type=Path,
-        default=None,
-        help="Structured additive Level-A coefficients (no operator signatures).",
-    )
-    parser.add_argument(
         "--structured-control-csv",
         type=Path,
         default=None,
@@ -864,16 +850,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.compute_calibration_csv
         else None
     )
-    lowering_calib = (
-        LoweringExpansionCalibration.from_csv(args.lowering_calibration_csv)
-        if args.lowering_calibration_csv
-        else None
-    )
-    compositional = (
-        CompositionalLoweringCalibration.from_csv(args.compositional_lowering_csv)
-        if args.compositional_lowering_csv
-        else None
-    )
     structured_controls = (
         StructuredControlCalibration.from_csv(args.structured_control_csv)
         if args.structured_control_csv
@@ -901,8 +877,6 @@ def main(argv: list[str] | None = None) -> int:
         dma_calibration=calib,
         dma_write_calibration=write_calib,
         compute_calibration=compute_calib,
-        lowering_calibration=lowering_calib,
-        compositional_lowering=compositional,
         structured_control_lowering=structured_controls,
         structural_static_dma=structural_static_dma,
         strided_dma_calibration=strided_dma,

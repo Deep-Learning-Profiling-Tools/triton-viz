@@ -13,8 +13,6 @@ try:
         CostModel,
         ComputeCalibration,
         DmaCalibrationSurface,
-        LoweringExpansionCalibration,
-        StaticDmaCalibrationSurface,
         StructuralStaticDmaCalibration,
         StridedDmaCalibration,
         StructuredControlCalibration,
@@ -456,42 +454,6 @@ def test_kernel_overhead_changes_makespan_not_engine_busy_time():
     assert adjusted.engine_busy_ns == baseline.engine_busy_ns
 
 
-def test_static_dma_surface_loads_paired_incremental_latency(tmp_path):
-    path = tmp_path / "static.csv"
-    fields = [
-        "row_type", "status", "spec.name", "mode",
-        "work.partition_count", "work.scatter_rows", "work.scatter_columns",
-        "latency.nc_latency.p50_us",
-    ]
-    with path.open("w", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=fields)
-        writer.writeheader()
-        for mode, latency in (
-            ("hbm_roundtrip_baseline", 8.0),
-            ("sbuf_transpose_scatter", 20.0),
-        ):
-            writer.writerow({
-                "row_type": "benchmark",
-                "status": "ok",
-                "spec.name": "static_dma_surface",
-                "mode": mode,
-                "work.partition_count": 8,
-                "work.scatter_rows": 4,
-                "work.scatter_columns": 8,
-                "latency.nc_latency.p50_us": latency,
-            })
-    surface = StaticDmaCalibrationSurface.from_csv(path)
-    assert surface.latency_ns(8, 4, 8) == pytest.approx(12_000)
-
-    model = CostModel(static_dma_calibration=surface)
-    event = {
-        "op": "transfer", "engine": "static_dma", "bytes": 32,
-        "partition_count": 8, "static_dma_group_copies": 32,
-        "static_dma_group_x": 4, "static_dma_group_y": 8,
-    }
-    assert model.cost_ns(event) == pytest.approx(375)
-
-
 def test_structural_static_dma_uses_source_visible_padded_geometry(tmp_path):
     path = tmp_path / "padded_static.csv"
     path.write_text(
@@ -891,46 +853,6 @@ def test_operator_agnostic_access_and_compute_feature_schema():
     assert region.partition_count == 16
 
 
-def test_lowering_calibration_expands_one_fusion_group_across_engines():
-    level_b = ComputeCalibration({
-        ("vector", "float32", 2): (10.0, 1.0),
-        ("scalar", "float32", 1): (5.0, 0.5),
-    })
-    level_a = LoweringExpansionCalibration({
-        ("subtract_exp", "float32", "vector", 100): (2.0, 2),
-        ("subtract_exp", "float32", "scalar", 100): (3.0, 1),
-    })
-    events = [
-        {"seq": 1, "op": "compute", "api_op": "subtract", "engine": "vector",
-         "input_shape": [128, 100], "output_shape": [128, 100],
-         "output_dtype": "float32", "fusion_signature": "subtract_exp",
-         "fusion_group": 0, "input_ptrs": [10, 11], "output_ptr": 12},
-        {"seq": 2, "op": "compute", "api_op": "exp", "engine": "scalar",
-         "input_shape": [128, 100], "output_shape": [128, 100],
-         "output_dtype": "float32", "fusion_signature": "subtract_exp",
-         "fusion_group": 0, "input_ptrs": [12], "output_ptr": 13},
-    ]
-    result = simulate(events, CostModel(
-        compute_calibration=level_b, lowering_calibration=level_a
-    ))
-    assert result.engine_busy_ns["vector"] == pytest.approx(220.0)
-    assert result.engine_busy_ns["scalar"] == pytest.approx(165.0)
-    assert result.predicted_latency_ns == pytest.approx(220.0)
-
-
-def test_lowering_calibration_adds_instruction_audited_fixed_work():
-    level_b = ComputeCalibration({("vector", "float32", 2): (10.0, 1.0)})
-    level_a = LoweringExpansionCalibration(
-        {("add", "float32", "vector", 100): (2.0, 2)},
-        {("add", "float32", "vector", 100): 30.0},
-    )
-    event = {"op": "compute", "api_op": "add", "engine": "vector",
-             "input_shape": [128, 100], "output_shape": [128, 100],
-             "output_dtype": "float32", "fusion_signature": "add", "fusion_group": 0}
-    result = simulate([event], CostModel(compute_calibration=level_b, lowering_calibration=level_a))
-    assert result.engine_busy_ns["vector"] == pytest.approx(250.0)
-
-
 def test_strict_compute_calibration_uses_value_dtype_for_bool_predicates():
     calibration = ComputeCalibration({("vector", "float32", 2): (10.0, 1.0)})
     result = simulate(
@@ -976,48 +898,6 @@ def test_compute_calibration_strict_dtype_rejects_silent_fp32_fallback():
                 strict_calibration=True,
             ),
         )
-
-
-def test_compositional_lowering_uses_region_features_without_signature_row():
-    from triton_viz.tools.nki_cost_model import CompositionalLoweringCalibration
-    level_b = ComputeCalibration({("vector", "float32", 2): (10.0, 1.0)})
-    structured = CompositionalLoweringCalibration({
-        ("vector", "float32", "effective_count"): {"intercept": 1.0, "two_input_elementwise_count": 2.0},
-        ("vector", "float32", "fixed_ns"): {"intercept": 7.0},
-    })
-    event = {"op": "compute", "api_op": "add", "input_shape": [128, 100], "output_shape": [128, 100],
-             "output_dtype": "float32", "fusion_signature": "unseen", "fusion_group": 0,
-             "region_ir": {"dtype": "float32", "logical_free_dim": 100,
-                           "two_input_elementwise_count": 2}}
-    result = simulate([event], CostModel(compute_calibration=level_b, compositional_lowering=structured))
-    assert result.engine_busy_ns["vector"] == pytest.approx(557.0)
-
-
-def test_compositional_runtime_baseline_is_reported_separately_from_payload():
-    from triton_viz.tools.nki_cost_model import CompositionalLoweringCalibration
-
-    level_b = ComputeCalibration({("vector", "float32", 2): (10.0, 1.0)})
-    structured = CompositionalLoweringCalibration({
-        ("vector", "float32", "effective_count"): {"intercept": 1.0},
-        ("vector", "float32", "runtime_baseline_ns"): {"partition_p128": 400.0},
-        ("scalar", "float32", "runtime_baseline_ns"): {"partition_p128": 25.0},
-    })
-    event = {
-        "op": "compute", "api_op": "add", "input_shape": [128, 100],
-        "output_shape": [128, 100], "output_dtype": "float32",
-        "partition_count": 128,
-        "region_ir": {"dtype": "float32", "partition_count": 128,
-                      "logical_free_dim": 100},
-    }
-    result = simulate(
-        [event],
-        CostModel(compute_calibration=level_b, compositional_lowering=structured),
-    )
-    assert result.engine_busy_ns["vector"] == pytest.approx(510.0)
-    assert result.components_ns["vector_runtime_baseline_ns"] == pytest.approx(400.0)
-    assert result.engine_busy_ns["scalar"] == pytest.approx(25.0)
-    assert result.components_ns["scalar_runtime_baseline_ns"] == pytest.approx(25.0)
-    assert result.components_ns["gpsimd_runtime_baseline_ns"] == 0.0
 
 
 def test_tensor_calibration_is_dtype_throughput_without_shape_lookup(tmp_path):
