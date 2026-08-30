@@ -1039,7 +1039,7 @@ class CompiledRaceDetector(Client):
             # attribute, never worded as a race). Still-SAT keeps the
             # race path with the PINNED reports, whose witnesses are
             # in-extent by construction (replayable by C2).
-            scoped = self._launch_scoped_requery(enc, lg)
+            scoped = self._launch_scoped_requery(enc, lg, found)
             if scoped is not None:
                 if not scoped:
                     return ("proved-launch", exact + widened)
@@ -1072,7 +1072,9 @@ class CompiledRaceDetector(Client):
             )
         return ("proved", "T1")
 
-    def _launch_scoped_requery(self, enc: Any, lg: tuple[int, ...] | None):
+    def _launch_scoped_requery(
+        self, enc: Any, lg: tuple[int, ...] | None, prior_reports: list[Any]
+    ):
         """Re-run the two-copy query with the grid pinned to the launch
         extent. symbolic_grid's symbolic dims are interned by name
         (``grid_i``) and NumPrograms terms in the already-encoded records
@@ -1081,11 +1083,27 @@ class CompiledRaceDetector(Client):
         list ([] = UNSAT at the launch extent), or None when no launch
         grid is available or the pinned query cannot decide (Z3 unknown /
         solver error) — the caller then keeps the any-grid reports:
-        fail-closed, never a silent launch-scoped claim."""
+        fail-closed, never a silent launch-scoped claim.
+
+        The requery restricts itself to the record pairs behind
+        ``prior_reports``:
+        pinning adds constraints to the same system, so a pair with no
+        any-grid report (every query UNSAT) stays UNSAT under the pins
+        (UNSAT monotonicity) and re-solving it would buy nothing — on
+        the matmul family those already-UNSAT queries are the expensive
+        ones, and this restriction removes the second full pass that
+        used to double the row's wall time."""
         if lg is None:
             return None
         from z3 import IntVal, set_param
 
+        pair_ids = frozenset(
+            (
+                min(r.first.event_id, r.second.event_id),
+                max(r.first.event_id, r.second.event_id),
+            )
+            for r in prior_reports
+        )
         grid = symbolic_grid(enc, lg)
         lg3 = tuple(int(d) for d in lg) + (1, 1, 1)
         pins = tuple(
@@ -1099,6 +1117,7 @@ class CompiledRaceDetector(Client):
                 arange_dict=enc.arange_dict,
                 extra_assumptions=pins,
                 ablations=self.ablations,
+                only_pairs=pair_ids,
             ).find_races()
         except Exception:  # noqa: BLE001 — includes Z3 unknown (Unsupported…)
             return None

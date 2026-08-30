@@ -294,11 +294,22 @@ class TwoCopySymbolicHBSolver:
         arange_dict: dict[Any, Any] | None = None,
         extra_assumptions: tuple[Any, ...] = (),
         ablations: tuple[str, ...] = (),
+        only_pairs: frozenset[tuple[int, int]] | None = None,
     ) -> None:
         self.records = list(records)
         self.grid = self._normalize_grid(grid)
         self.arange_dict = dict(arange_dict or {})
         self.extra_assumptions = tuple(extra_assumptions)
+        # Requery restriction (sound by UNSAT monotonicity): when set,
+        # only event pairs whose UNORDERED record-id pair is listed are
+        # queried. The caller may use this ONLY when every omitted pair
+        # is already known UNSAT under a WEAKER system (fewer
+        # assumptions): adding constraints (here: grid pins in
+        # extra_assumptions) cannot turn an UNSAT query SAT, so the
+        # omitted pairs contribute no reports either way. Keyed by
+        # record event_id and unordered, so every lane and both
+        # orientations of a listed record pair are still queried.
+        self.only_pairs = only_pairs
         # The launch's premises after per-copy substitution (loop-iterator
         # ranges and, decisively, the awaited exit predicates): the
         # feasibility query asserts them, because activity gating folds
@@ -430,6 +441,8 @@ class TwoCopySymbolicHBSolver:
         candidates = []
         for a in events_a:
             for b in events_b:
+                if self._pair_excluded(a, b):
+                    continue
                 solver = self._new_solver()
                 solver.add(self._race_expr(a, b))
                 t0 = _time.perf_counter()
@@ -481,6 +494,15 @@ class TwoCopySymbolicHBSolver:
             + (f" ({detail})" if detail else "")
         )
 
+    def _pair_excluded(self, a: SymbolicMemoryEvent, b: SymbolicMemoryEvent) -> bool:
+        """True when an ``only_pairs`` restriction is active and this
+        record pair is not in it (see ``__init__``); the pair's queries
+        are then skipped as already-known UNSAT."""
+        if self.only_pairs is None:
+            return False
+        lo, hi = sorted((a.event_id, b.event_id))
+        return (lo, hi) not in self.only_pairs
+
     @staticmethod
     def _race_query_is_sat(
         solver: Solver, a: SymbolicMemoryEvent, b: SymbolicMemoryEvent
@@ -527,6 +549,8 @@ class TwoCopySymbolicHBSolver:
         out = []
         for a in events_a:
             for b in events_b:
+                if self._pair_excluded(a, b):
+                    continue
                 lane_cond = self._intra_pair_lane_condition(a, b)
                 if lane_cond is None:
                     continue
