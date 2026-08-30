@@ -1,7 +1,6 @@
 import json
 import csv
 
-from triton_viz.tools.nki_fit_source_sequence_lowering import _cases
 from triton_viz.tools.nki_program_context import program_context_features
 from triton_viz.tools.nki_region_control_experiments import _declared_trace
 
@@ -99,69 +98,6 @@ def test_program_context_reports_precision_and_materialization_roles():
     assert features["program_input_bf16_region_count"] == 2
     assert features["program_accumulator_fp32_region_count"] == 1
     assert features["program_mixed_precision_region_count"] == 1
-
-
-def test_source_sequence_cases_use_declared_trace_semantics(tmp_path):
-    case = tmp_path / "phase1" / (
-        "control_sequence_factorialdag2k__p64__f1792__n3000__bfloat16"
-    )
-    case.mkdir(parents=True)
-    declared_region = {
-        "dtype": "bfloat16",
-        "input_dtype": "bfloat16",
-        "accumulator_dtype": "bfloat16",
-        "partition_count": 64,
-        "free_dim": 2048,
-        "logical_free_dim": 1792,
-        "op_histogram": {"multiply": 1},
-        "reduction_count": 0,
-        "one_input_elementwise_count": 0,
-        "two_input_elementwise_count": 1,
-    }
-    dependency_region = {**declared_region, "dtype": "float32"}
-    for name, region in (
-        ("trace.jsonl", declared_region),
-        ("dependency_trace.jsonl", dependency_region),
-    ):
-        (case / name).write_text(
-            json.dumps(
-                {
-                    "op": "compute",
-                    "api_op": "multiply",
-                    "fusion_group": 0,
-                    "fusion_group_index": 0,
-                    "input_dtypes": [region["dtype"], region["dtype"]],
-                    "region_ir": region,
-                }
-            )
-            + "\n",
-            encoding="utf-8",
-        )
-    with (tmp_path / "phase1" / "control_results.csv").open(
-        "w", encoding="utf-8", newline=""
-    ) as file:
-        writer = csv.DictWriter(
-            file,
-            fieldnames=(
-                "case",
-                "vector_active_ns",
-                "scalar_active_ns",
-                "gpsimd_active_ns",
-            ),
-        )
-        writer.writeheader()
-        writer.writerow(
-            {
-                "case": case.name,
-                "vector_active_ns": 1_000,
-                "scalar_active_ns": 2_000,
-                "gpsimd_active_ns": 3_000,
-            }
-        )
-
-    rows = _cases([tmp_path / "phase1"], {})
-    assert len(rows) == 3
-    assert {row["dtype"] for row in rows} == {"bfloat16"}
 
 
 def test_program_context_summarizes_branch_join_topology():

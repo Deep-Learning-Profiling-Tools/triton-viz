@@ -210,16 +210,18 @@ separate directory or standalone MAPE path):
   `dv_size={64,128,256,512}`. `report.json` carries these limits under
   `attention_coverage`.
 
-The one-command MAPE summary for every collected holdout point (all existing
-operators plus TensorE and attention) is available from the frozen replays:
+The authoritative all-points headline (unique cases only, no split
+double-counting) comes from the unified aggregator over the frozen replays:
 
 ```sh
-python -m triton_viz.tools.nki_operator_mape \
-  /tmp/nki_cost_model_run/evaluation/*.csv
+python -m triton_viz.tools.nki_aggregate_unified_replay \
+  /tmp/nki_cost_model_run/evaluation \
+  --output-prefix /tmp/nki_cost_model_run/evaluation/unified
 ```
 
-`evaluation/report.json` remains the authoritative per-split, per-operator
-breakdown; the helper is a convenience for the all-points number.
+It writes `unified_cases.csv` and `unified_report.json` with the NC-p50 MAPE
+and per-engine WAPE; `evaluation/report.json` remains the per-split,
+per-operator breakdown.
 
 See `microbench/inf2_nki/README.md` for individual microbenchmark commands,
 schema details, and lower-level troubleshooting.

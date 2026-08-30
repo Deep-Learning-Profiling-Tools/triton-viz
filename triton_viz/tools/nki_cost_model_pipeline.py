@@ -626,9 +626,19 @@ def _evaluate_replays(
                 "--strict-calibration",
             ]
             if split_name in {"formal_fp32_v1", "full_fp32_v1", "full_bf16_v1"}:
+                # These splits are the whole-program grammar family, so they
+                # replay with the same strided-DMA busy surface and the same
+                # control-routed engine occupancy the frozen result used.
+                suffix = "bf16" if split["dtype"] == "bfloat16" else "fp32"
                 args[args.index("--output"):args.index("--output")] = [
                     "--strided-dma-csv",
                     str(root / "calibration" / "strided_dma.csv"),
+                    "--whole-program-control-root",
+                    str(
+                        root
+                        / "stage2_controls"
+                        / f"source_sequence_disjoint_{suffix}_v1"
+                    ),
                 ]
             _run(args, dry_run)
             outputs.append((split_name, output))

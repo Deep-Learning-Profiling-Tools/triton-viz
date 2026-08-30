@@ -59,30 +59,6 @@ def _load_json(path: Path) -> dict:
     return json.loads(path.read_text(encoding="utf-8"))
 
 
-def load_runtime_engine_baselines(path: Path | None) -> dict[tuple[str, int, str], float]:
-    """Load engine fixed costs measured by independent dma-only controls."""
-    if path is None:
-        return {}
-    baselines: dict[tuple[str, int, str], list[float]] = {}
-    with path.open(encoding="utf-8") as file:
-        for line in file:
-            row = json.loads(line)
-            spec = row.get("spec") or {}
-            export = row.get("profile_export") or {}
-            if row.get("status") != "ok" or spec.get("mode") != "dma_only":
-                continue
-            stdout = export.get("stdout")
-            if not stdout:
-                continue
-            profile = next(iter(json.loads(stdout).values()), {})
-            for engine in ("vector", "scalar", "gpsimd"):
-                active_ns = float(profile.get(f"{engine}_engine_active_time", 0.0)) * 1e9
-                if active_ns > 0:
-                    key = (str(spec["dtype"]), int(spec["p"]), engine)
-                    baselines.setdefault(key, []).append(active_ns)
-    return {key: statistics.median(values) for key, values in baselines.items()}
-
-
 def runtime_engine_baseline_ns(
     baselines: dict[tuple[str, int, str], float],
     dtype: str,

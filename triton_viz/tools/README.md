@@ -44,30 +44,29 @@ trace + parquet
   structured Level-A expansion, dependency-aware scheduling, and simulation.
 - `nki_fit_structured_controls.py`: exports the operator-independent grammar,
   dtype, shape, engine, instruction-count, effective-count, and fixed-work table.
-- `nki_grammar_report.py`: exports the machine-readable rule catalog and one
-  coverage row per source region, retaining OOD regions in the denominator.
-- `nki_compare_lowering.py`: aligns mapped region/engine opcode fingerprints
-  across two manifested runs and reports same lowering, structural drift, and
-  missing cases without inferring stability from version strings alone.
 - `nki_explorer.py`: shared, completeness-checked parquet export that handles
   Explorer's known post-flush process hang without waiting out every timeout.
 - `nki_provenance.py`: builds canonical compiler-stack fingerprints and
   classifies environment differences without claiming that a version match or
   mismatch proves lowering stability.
-- `nki_evaluate_structured_holdout.py`: compares predicted versus mapped ISA
-  count and active time without silently fitting holdout operators. Region-level
-  errors are emitted only for engines with complete payload mapping; incomplete
-  rows remain in the CSV as `insufficient_mapping` with blank error fields.
 - `nki_fit_structural_static_dma.py`: exports compiler-generated Static DMA
   busy time from controls using structural rule sequence, element width, and
   free dimension; it never keys on operator names.
 - `nki_replay_operator_predictions.py`: replays calibrated predictions on saved
   traces and hardware counters without recompilation or holdout fitting.
-- `nki_fit_runtime_overhead.py`: fits dtype-isolated mechanism-level sequencer,
-  engine activation, partition, packet, and synchronization costs from
-  orthogonal controls for NC-p50 prediction.
 - `nki_fit_strided_dma.py`: fits compiler-generated strided/Static-DMA packet
   train busy time from independent access-geometry controls.
+- `nki_fit_global_completion.py`: fits the single global NC completion model
+  (one overlap fraction and one launch/drain constant, no structural key) from
+  independent whole-program controls.
+- `nki_fit_dma_elapsed.py`: fits the global DMA descriptor-issue interval that
+  bounds queue-elapsed time for fragmented transfers.
+- `nki_fit_attention_pipeline.py`: freezes the TensorE busy surface for
+  QK-normalize-PV Dot pipelines from independent control grids.
+- `nki_fit_tensor_source_geometry.py`: freezes the TensorE busy surface keyed by
+  source-visible tiled-Dot geometry.
+- `nki_aggregate_unified_replay.py`: aggregates every replayed split into the
+  authoritative unique-case NC-p50 headline and per-engine WAPE.
 - `nki_cost_model_pipeline.py`: three-stage `collect`, `fit`, and `evaluate`
   entry point for calibration, Tilebench holdouts, MAPE and ablation reports.
 - `nki_region_control_experiments.py`: compiles and profiles minimal lowering
@@ -172,37 +171,11 @@ wrapper for consumers that only need the established family string. Unknown
 operations are reported as OOD and can be rejected with `strict=True`; they are
 never silently treated as validated grammar coverage.
 
-Export the current catalog and audit one or more result trees with:
-
-```bash
-python -m triton_viz.tools.nki_grammar_report \
-  <control-root> <operator-holdout-root> \
-  --output-dir /tmp/nki_grammar_report
-```
-
-This writes `grammar_report.json` (versioned Region IR metadata, rules,
-conditions, evidence labels, and coverage totals) plus `region_coverage.csv`
-(case/region identity, rule match, evidence, and OOD reasons). Empty and OOD
-regions remain in the coverage denominator.
-
 Every new microbenchmark run manifest also contains a structured
 `compiler_fingerprint` with package/tool versions, hardware/platform identity,
 repository revision, and Region IR schema. A changed fingerprint requires a
 canary run; it is provenance evidence, not a substitute for the artifact-level
 lowering comparison.
-
-Compare two complete, source-mapped control roots with:
-
-```bash
-python -m triton_viz.tools.nki_compare_lowering \
-  <reference-root> <candidate-root> \
-  --output-dir /tmp/nki_lowering_diff
-```
-
-Both roots must contain `experiment_manifest.json`; missing provenance is an
-error. The result separates provenance differences from observed opcode/count
-differences. Use a repeated compile under the same fingerprint first to measure
-compiler nondeterminism, then compare compiler versions.
 
 ## External operator validation
 
@@ -228,16 +201,6 @@ For a strict test, do not add rmsnorm/layernorm mapping rows to the structured
 CSV. Leave-one-operator-out experiments may use
 `nki_fit_structured_controls --include-case-prefix control_ rmsnorm` (or
 `layernorm`) and must label the opposite operator as holdout.
-
-Audit mapped holdouts independently:
-
-```bash
-python -m triton_viz.tools.nki_evaluate_structured_holdout \
-  <mapped-holdout-root> \
-  --compute-calibration-csv /tmp/compute_calibration_v2.csv \
-  --structured-control-csv /tmp/structured_control_lowering.csv \
-  --output /tmp/region_count_audit.csv
-```
 
 Do not interpret a zero mapped instruction count as observed zero work. The
 evaluator reads `mapped_payload_coverage_percent` from each mapping audit and
@@ -278,7 +241,6 @@ PYTHONPATH=$PWD pytest -q -m "" \
   tests/nki/test_nki_instruction_source_mapping.py \
   tests/nki/test_nki_region_ir.py \
   tests/nki/test_nki_cost_model.py \
-  tests/nki/test_nki_model_experiments.py
 ```
 
 ## Known limitations
