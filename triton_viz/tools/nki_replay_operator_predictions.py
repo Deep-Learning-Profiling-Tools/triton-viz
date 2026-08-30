@@ -55,6 +55,7 @@ FIELDS = [
     "predicted_compute_dma_us",
     "predicted_resource_overlap_us",
     "whole_program_routing_covered",
+    "whole_program_routing_clamped",
     "predicted_makespan_only_us",
     "predicted_dma_queue_floor_us",
     "dma_descriptor_count",
@@ -468,6 +469,9 @@ def main(argv: list[str] | None = None) -> int:
                 / 1000.0,
                 "whole_program_routing_covered": int(
                     components.get("whole_program_routing_covered", 0.0)
+                ),
+                "whole_program_routing_clamped": int(
+                    components.get("whole_program_routing_clamped", 0.0)
                 ),
                 "predicted_makespan_only_us": components["makespan_only_ns"] / 1000.0,
                 "predicted_dma_queue_floor_us": components["dma_queue_floor_ns"]

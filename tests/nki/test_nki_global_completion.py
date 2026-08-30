@@ -163,3 +163,51 @@ def test_global_completion_fit_refuses_target(tmp_path):
                 str(tmp_path / "cv.json"),
             ]
         )
+
+
+def test_whole_program_routing_interpolates_and_flags_clamping():
+    """Engine occupancy is read by interpolation, not nearest neighbour."""
+    from triton_viz.tools.nki_cost_model import WholeProgramRoutingCalibration
+
+    def sample(distance, vector):
+        return {
+            "key": ("float32", 128, (), 1, 0, 0),
+            "distance_feature": float(distance),
+            "actual": {"vector": vector, "scalar": 0.0, "gpsimd": 0.0},
+        }
+
+    calibration = WholeProgramRoutingCalibration(
+        [sample(1000.0, 10.0), sample(3000.0, 30.0)]
+    )
+
+    class _Descriptor:
+        pass
+
+    def predict(distance):
+        original = calibration.predict_with_provenance.__globals__
+        # drive the lookup directly through a stubbed descriptor
+        import triton_viz.tools.nki_evaluate_whole_program_regime as regime
+
+        saved = regime.source_descriptor_from_events
+        regime.source_descriptor_from_events = lambda events, dtype, case="": {
+            "case": "",
+            "key": ("float32", 128, (), 1, 0, 0),
+            "distance_feature": float(distance),
+        }
+        try:
+            return calibration.predict_with_provenance([], "float32")
+        finally:
+            regime.source_descriptor_from_events = saved
+        assert original
+
+    busy, match = predict(2000.0)
+    assert match == "interpolated"
+    assert busy["vector"] == pytest.approx(20_000.0)
+
+    busy, match = predict(1000.0)
+    assert match == "exact"
+    assert busy["vector"] == pytest.approx(10_000.0)
+
+    busy, match = predict(5000.0)
+    assert match == "clamped"
+    assert busy["vector"] == pytest.approx(30_000.0)

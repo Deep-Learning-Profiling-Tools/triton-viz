@@ -96,24 +96,38 @@ def evaluate(root: Path) -> dict:
             if not candidates:
                 ood.append(sample["case"])
                 continue
-            nearest_distance = min(
-                abs(item["distance_feature"] - sample["distance_feature"])
-                for item in candidates
-            )
-            nearest = [
-                item
-                for item in candidates
-                if abs(item["distance_feature"] - sample["distance_feature"])
-                == nearest_distance
-            ]
+            # Mirror production: interpolate the control surface in the program
+            # transfer size rather than snapping to the nearest control point.
+            by_distance: dict[float, list[dict]] = {}
+            for item in candidates:
+                by_distance.setdefault(float(item["distance_feature"]), []).append(item)
+            knots = sorted(by_distance)
+            distance = float(sample["distance_feature"])
+
+            def mean_at(knot: float, field: str, engine: str | None = None) -> float:
+                group = by_distance[knot]
+                if engine is None:
+                    return sum(item[field] for item in group) / len(group)
+                return sum(item[field][engine] for item in group) / len(group)
+
+            if distance in by_distance or len(knots) < 2 or not (
+                knots[0] < distance < knots[-1]
+            ):
+                anchor = min(knots, key=lambda knot: abs(knot - distance))
+                weight, lower, upper = 0.0, anchor, anchor
+            else:
+                upper = next(knot for knot in knots if knot > distance)
+                lower = max(knot for knot in knots if knot < distance)
+                weight = (distance - lower) / (upper - lower)
+
+            def blend(field: str, engine: str | None = None) -> float:
+                low = mean_at(lower, field, engine)
+                return low + weight * (mean_at(upper, field, engine) - low)
+
             for engine in pairs:
-                prediction = sum(item["actual"][engine] for item in nearest) / len(nearest)
-                pairs[engine].append((prediction, sample["actual"][engine]))
+                pairs[engine].append((blend("actual", engine), sample["actual"][engine]))
             completion_pairs.append(
-                (
-                    sum(item["completion_ns"] for item in nearest) / len(nearest),
-                    sample["completion_ns"],
-                )
+                (blend("completion_ns"), sample["completion_ns"])
             )
         folds.append(
             {
@@ -136,7 +150,7 @@ def evaluate(root: Path) -> dict:
     ) * 100.0
     return {
         "schema": "triton-viz.whole-program-regime-control-cv-v1",
-        "protocol": "leave-one-free-dimension-out; nearest source transfer geometry within exact reusable program grammar",
+        "protocol": "leave-one-free-dimension-out; linear interpolation in source transfer geometry within exact reusable program grammar",
         "folds": folds,
         "mean_wape_pct": {
             engine: sum(fold[f"{engine}_wape_pct"] for fold in folds) / len(folds)
