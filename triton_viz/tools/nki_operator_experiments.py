@@ -42,7 +42,6 @@ from triton_viz.tools.nki_cost_model import (
     CostModel,
     DmaCalibrationSurface,
     LoweringExpansionCalibration,
-    RuntimeOverheadCalibration,
     StructuralStaticDmaCalibration,
     StridedDmaCalibration,
     StructuredControlCalibration,
@@ -786,7 +785,6 @@ def main(argv: list[str] | None = None) -> int:
         help="Control-derived compiler Static DMA busy-time calibration.",
     )
     parser.add_argument("--kernel-overhead-us", type=float, default=0.0)
-    parser.add_argument("--runtime-overhead-csv", type=Path, default=None)
     parser.add_argument("--strided-dma-csv", type=Path, default=None)
     parser.add_argument("--dma-queue-count", type=int, default=1)
     parser.add_argument("--warmup", type=int, default=10)
@@ -894,11 +892,6 @@ def main(argv: list[str] | None = None) -> int:
         if args.structural_static_dma_csv
         else None
     )
-    runtime_overhead = (
-        RuntimeOverheadCalibration.from_csv(args.runtime_overhead_csv)
-        if args.runtime_overhead_csv
-        else None
-    )
     strided_dma = (
         StridedDmaCalibration.from_csv(args.strided_dma_csv)
         if args.strided_dma_csv
@@ -912,7 +905,6 @@ def main(argv: list[str] | None = None) -> int:
         compositional_lowering=compositional,
         structured_control_lowering=structured_controls,
         structural_static_dma=structural_static_dma,
-        runtime_overhead_calibration=runtime_overhead,
         strided_dma_calibration=strided_dma,
         tensor_calibration=tensor_calibration,
         kernel_overhead_ns=max(0.0, args.kernel_overhead_us * 1000.0),

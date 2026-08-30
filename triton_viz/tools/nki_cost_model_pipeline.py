@@ -30,11 +30,11 @@ TOOL_MODULES = {
     "triton_viz.tools.nki_operator_experiments": "triton_viz.tools.nki_operator_experiments",
     "triton_viz.tools.nki_fit_structured_controls": "triton_viz.tools.nki_fit_structured_controls",
     "triton_viz.tools.nki_fit_structural_static_dma": "triton_viz.tools.nki_fit_structural_static_dma",
-    "triton_viz.tools.nki_fit_runtime_overhead": "triton_viz.tools.nki_fit_runtime_overhead",
     "triton_viz.tools.nki_fit_strided_dma": "triton_viz.tools.nki_fit_strided_dma",
     "triton_viz.tools.nki_fit_tensor_source_geometry": "triton_viz.tools.nki_fit_tensor_source_geometry",
     "triton_viz.tools.nki_fit_attention_pipeline": "triton_viz.tools.nki_fit_attention_pipeline",
-    "triton_viz.tools.nki_fit_norm_pipeline": "triton_viz.tools.nki_fit_norm_pipeline",
+    "triton_viz.tools.nki_fit_global_completion": "triton_viz.tools.nki_fit_global_completion",
+    "triton_viz.tools.nki_fit_dma_elapsed": "triton_viz.tools.nki_fit_dma_elapsed",
     "triton_viz.tools.nki_replay_operator_predictions": "triton_viz.tools.nki_replay_operator_predictions",
 }
 
@@ -137,7 +137,6 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
     root.mkdir(parents=True, exist_ok=True)
     configs = [
         "engine_lowering_sweep.json",
-        "runtime_overhead.json",
         "dma_partition_surface.json",
         "dma_partition_large_free.json",
         "dma_read_bf16_surface.json",
@@ -217,8 +216,6 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
             dry_run,
         )
     for name, free_dims in (
-        ("norm_pipeline_reference_v1", (96, 160, 1792, 2304)),
-        ("norm_pipeline_disjoint_a_v1", (96, 384, 768, 1536, 3072, 3584)),
     ):
         _run(
             _module(
@@ -401,8 +398,6 @@ def fit(root: Path, dry_run: bool) -> None:
             "control",
             "--max-tensor-wape",
             20,
-            "--max-nc-mape",
-            20,
             "--cv-output",
             calibration / "attention_pipeline_strict_cv_v1.json",
             "--output",
@@ -410,21 +405,39 @@ def fit(root: Path, dry_run: bool) -> None:
         ),
         dry_run,
     )
-    norm_pipeline = calibration / "norm_pipeline_frozen_v2.csv"
-    norm_cv = calibration / "norm_pipeline_strict_cv_v2.json"
+    global_completion = calibration / "global_completion_frozen_v1.csv"
+    global_completion_cv = calibration / "global_completion_strict_cv_v1.json"
     _run(
         _module(
-            "triton_viz.tools.nki_fit_norm_pipeline",
-            root / "stage2_controls" / "norm_pipeline_reference_v1" / "control_results.csv",
-            root / "stage2_controls" / "norm_pipeline_disjoint_a_v1" / "control_results.csv",
+            "triton_viz.tools.nki_fit_global_completion",
+            root / "stage2_controls" / "source_sequence_disjoint_fp32_v1",
+            root / "stage2_controls" / "source_sequence_disjoint_bf16_v1",
             "--artifact-role",
             "control",
             "--max-mean-mape",
             20,
             "--cv-output",
-            norm_cv,
+            global_completion_cv,
             "--output",
-            norm_pipeline,
+            global_completion,
+        ),
+        dry_run,
+    )
+    dma_elapsed = calibration / "dma_elapsed_frozen_v1.csv"
+    _run(
+        _module(
+            "triton_viz.tools.nki_fit_dma_elapsed",
+            root / "microbench" / "dma_strided_store_surface" / "results.jsonl",
+            "--artifact-role",
+            "control",
+            "--global-completion-csv",
+            global_completion,
+            "--max-mean-mape",
+            20,
+            "--cv-output",
+            calibration / "dma_elapsed_strict_cv_v1.json",
+            "--output",
+            dma_elapsed,
         ),
         dry_run,
     )
@@ -479,28 +492,6 @@ def fit(root: Path, dry_run: bool) -> None:
         ),
         dry_run,
     )
-    for dtype, output_name in (
-        ("float32", "runtime_overhead.csv"),
-        ("bfloat16", "runtime_overhead_bf16.csv"),
-    ):
-        _run(_module(
-            "triton_viz.tools.nki_fit_runtime_overhead",
-            root / "microbench" / "runtime_overhead" / "results.jsonl",
-            "--dma-read-surface-csv",
-            calibration / "microbench.csv",
-            "--dma-read-bf16-surface-csv",
-            calibration / "dma_read_bf16_surface.csv",
-            "--dma-write-surface-csv",
-            calibration / "dma_write_fp32.csv",
-            "--dma-write-bf16-surface-csv",
-            calibration / "dma_write_bf16.csv",
-            "--compute-calibration-csv",
-            compute,
-            "--output",
-            calibration / output_name,
-            "--dtype",
-            dtype,
-        ), dry_run)
     _run(
         _module(
             "triton_viz.tools.nki_fit_strided_dma",
@@ -526,8 +517,6 @@ def fit(root: Path, dry_run: bool) -> None:
                     "tensor_attention_boundary_disjoint_v1",
                 )
             ],
-            root / "stage2_controls" / "norm_pipeline_reference_v1" / "experiment_manifest.json",
-            root / "stage2_controls" / "norm_pipeline_disjoint_a_v1" / "experiment_manifest.json",
         ]
         write_model_manifest(
             calibration,
@@ -548,13 +537,13 @@ def fit(root: Path, dry_run: bool) -> None:
                 *attention_control_csvs,
                 attention_pipeline,
                 calibration / "attention_pipeline_strict_cv_v1.json",
-                norm_pipeline,
-                norm_cv,
+                global_completion,
+                global_completion_cv,
+                dma_elapsed,
+                calibration / "dma_elapsed_strict_cv_v1.json",
                 compute,
                 structured,
                 calibration / "static_dma.csv",
-                calibration / "runtime_overhead.csv",
-                calibration / "runtime_overhead_bf16.csv",
                 calibration / "strided_dma.csv",
             ],
             source_manifests=source_manifests,
@@ -591,16 +580,14 @@ def _replay_args(root: Path, holdout: Path, output: Path, dtype: str) -> list[st
         calibration / "tensor_source_geometry_frozen_v5.csv",
         "--attention-pipeline-calibration-csv",
         calibration / "attention_pipeline_frozen_v1.csv",
-        "--norm-pipeline-calibration-csv",
-        calibration / "norm_pipeline_frozen_v2.csv",
+        "--global-completion-csv",
+        calibration / "global_completion_frozen_v1.csv",
+        "--dma-elapsed-csv",
+        calibration / "dma_elapsed_frozen_v1.csv",
+        "--onchip-transfer-csv",
+        calibration / "onchip_transfer_frozen_v1.csv",
         "--structural-static-dma-csv",
         calibration / "static_dma.csv",
-        "--runtime-overhead-csv",
-        (
-            calibration / "runtime_overhead_bf16.csv"
-            if dtype == "bfloat16"
-            else calibration / "runtime_overhead.csv"
-        ),
         "--output",
         output,
     )
@@ -677,13 +664,15 @@ def evaluate(root: Path, dry_run: bool) -> None:
                 calibration / "tensor_attention_pipeline_disjoint_b_v1.csv",
                 calibration / "attention_pipeline_frozen_v1.csv",
                 calibration / "attention_pipeline_strict_cv_v1.json",
-                calibration / "norm_pipeline_frozen_v2.csv",
-                calibration / "norm_pipeline_strict_cv_v2.json",
+                calibration / "global_completion_frozen_v1.csv",
+                calibration / "global_completion_strict_cv_v1.json",
+                calibration / "dma_elapsed_frozen_v1.csv",
+                calibration / "dma_elapsed_strict_cv_v1.json",
+                calibration / "onchip_transfer_frozen_v1.csv",
+                calibration / "onchip_transfer_strict_cv_v1.json",
                 calibration / "compute.csv",
                 calibration / "structured_compute.csv",
                 calibration / "static_dma.csv",
-                calibration / "runtime_overhead.csv",
-                calibration / "runtime_overhead_bf16.csv",
                 calibration / "strided_dma.csv",
             ],
             current_fingerprint=collect_compiler_fingerprint(
@@ -768,7 +757,7 @@ def evaluate(root: Path, dry_run: bool) -> None:
         "compute_only_mape_pct": "compute_only_error_pct",
         "compute_plus_dma_mape_pct": "compute_dma_error_pct",
         "resource_overlap_mape_pct": "resource_overlap_error_pct",
-        "without_completion_floor_mape_pct": "without_completion_floor_error_pct",
+        "makespan_only_mape_pct": "makespan_only_error_pct",
         "final_nc_p50_mape_pct": "nc_error_pct",
     }
     auxiliary_rows = rows_by_split.get("auxiliary_bf16_v1", [])
@@ -979,17 +968,12 @@ def evaluate(root: Path, dry_run: bool) -> None:
     report["formal_fp32_dma_surface_max_log_distance"] = max(
         float(row["dma_surface_max_log_distance"]) for row in formal_rows
     )
-    report["formal_fp32_completion_audit"] = {
-        "exact": sum(int(row["completion_exact_count"]) for row in formal_rows),
-        "interpolated": sum(
-            int(row["completion_interpolated_count"]) for row in formal_rows
-        ),
-        "ood": sum(int(row["completion_ood_count"]) for row in formal_rows),
+    report["formal_fp32_global_completion_audit"] = {
         "activated_cases": sum(
-            int(row["completion_floor_activated"]) for row in formal_rows
+            int(row["global_completion_activated"]) for row in formal_rows
         ),
         "activation_rate": statistics.mean(
-            int(row["completion_floor_activated"]) for row in formal_rows
+            int(row["global_completion_activated"]) for row in formal_rows
         ),
     }
     report["formal_fp32_operator_mape_pct"] = {

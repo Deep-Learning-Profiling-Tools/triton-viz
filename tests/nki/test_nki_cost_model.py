@@ -14,7 +14,6 @@ try:
         ComputeCalibration,
         DmaCalibrationSurface,
         LoweringExpansionCalibration,
-        RuntimeOverheadCalibration,
         StaticDmaCalibrationSurface,
         StructuralStaticDmaCalibration,
         StridedDmaCalibration,
@@ -685,7 +684,7 @@ def test_versioned_load_compute_store_forms_cross_engine_critical_path():
 
 def test_strided_dma_interpolates_between_independent_control_sizes():
     calibration = StridedDmaCalibration(
-        {("float32", 2, 128): [(512, 600.0, 900.0), (2048, 2600.0, 3300.0)]}
+        {("float32", 2, 128): [(512, 600.0, 0.0), (2048, 2600.0, 0.0)]}
     )
     events = [{
         "op": "store",
@@ -696,12 +695,14 @@ def test_strided_dma_interpolates_between_independent_control_sizes():
         "item_bytes": 4,
     }]
 
-    assert calibration.predict(events) == pytest.approx((1266.6666667, 1700.0))
+    assert calibration.predict_components(events) == pytest.approx(
+        (1266.6666667, 0.0)
+    )
 
 
 def test_strided_dma_uses_explicit_bfloat16_transfer_dtype():
     calibration = StridedDmaCalibration(
-        {("bfloat16", 2, 1): [(512, 400.0, 900.0)]}
+        {("bfloat16", 2, 1): [(512, 400.0, 0.0)]}
     )
     events = [{
         "op": "store",
@@ -715,152 +716,7 @@ def test_strided_dma_uses_explicit_bfloat16_transfer_dtype():
         "src_dtype": "bfloat16",
     }]
 
-    assert calibration.predict(events) == (400.0, 900.0)
-
-
-def test_structured_multi_reduction_completion_is_operator_agnostic_floor():
-    region = {
-        "dtype": "float32",
-        "free_dim": 512,
-        "logical_free_dim": 512,
-        "partition_count": 128,
-        "reduction_count": 2,
-        "reduction_kind": "reduce_sum",
-        "op_histogram": {"reduce_sum": 2, "multiply": 3},
-        "two_input_elementwise_count": 3,
-    }
-    key = structural_calibration_key(region)
-    calibration = StructuredControlCalibration(
-        points={}, completion_points={(key, "float32"): [(512, 53_000.0)]}
-    )
-    events = [{
-        "seq": 1,
-        "op": "compute",
-        "engine": "vector",
-        "elements": 512,
-        "region_ir": region,
-    }]
-
-    result = simulate(
-        events, CostModel(structured_control_lowering=calibration)
-    )
-    assert result.predicted_latency_ns == 53_000.0
-
-    non_reduction = {**region, "reduction_count": 0}
-    assert calibration.predict_completion_ns(non_reduction) == 0.0
-
-
-def test_completion_lookup_reports_exact_ood_and_exclusions():
-    region = {
-        "dtype": "float32",
-        "free_dim": 512,
-        "logical_free_dim": 512,
-        "partition_count": 128,
-        "reduction_count": 1,
-        "op_histogram": {"reduce_sum": 1},
-    }
-    key = structural_calibration_key(region)
-    calibration = StructuredControlCalibration(
-        points={},
-        completion_points={(key, "float32"): [(128, 10_000), (512, 20_000)]},
-    )
-    assert calibration.completion_lookup(region) == (20_000, "exact")
-    assert calibration.completion_lookup(
-        region, excluded_free_dims={512}
-    ) == (0.0, "ood")
-    assert calibration.completion_lookup(
-        region, excluded_calibration_keys={key}
-    ) == (0.0, "excluded_grammar")
-
-
-def test_completion_lookup_interpolates_linearly_in_active_free_width():
-    region = {
-        "dtype": "float32",
-        "free_dim": 512,
-        "logical_free_dim": 512,
-        "partition_count": 128,
-        "reduction_count": 1,
-        "op_histogram": {"reduce_sum": 1},
-    }
-    key = structural_calibration_key(region)
-    calibration = StructuredControlCalibration(
-        points={},
-        completion_points={(key, "float32"): [(128, 10_000), (2048, 30_000)]},
-    )
-
-    assert calibration.completion_lookup(region) == (14_000, "interpolated")
-
-
-def test_completion_lookup_keys_mixed_precision_by_source_input_dtype():
-    region = {
-        "dtype": "float32",
-        "input_dtype": "bfloat16",
-        "accumulator_dtype": "float32",
-        "free_dim": 512,
-        "logical_free_dim": 512,
-        "partition_count": 128,
-        "reduction_count": 1,
-        "op_histogram": {"reduce_sum": 1},
-    }
-    key = structural_calibration_key(region)
-    calibration = StructuredControlCalibration(
-        points={},
-        completion_points={(key, "bfloat16"): [(512, 20_000)]},
-    )
-
-    assert calibration.completion_lookup(region) == (20_000, "exact")
-
-
-def test_completion_lookup_uses_explicit_source_rule_fallback():
-    region = {
-        "dtype": "float32",
-        "logical_free_dim": 512,
-        "partition_count": 128,
-        "reduction_count": 2,
-        "rsqrt_count": 1,
-        "has_mask_or_tail": True,
-        "op_histogram": {"reduce_sum": 2, "rsqrt": 1, "multiply": 9},
-    }
-    key = structural_calibration_key(region)
-    rule_key = (key.split("|", 1)[0], True, "float32")
-    source_key = key.replace("multiply:9", "multiply:10")
-    calibration = StructuredControlCalibration(
-        points={},
-        completion_points={},
-        completion_rule_points={
-            rule_key: [
-                (128, 42_000, source_key),
-                (512, 44_000, source_key),
-                (2048, 45_000, source_key),
-            ]
-        },
-    )
-    assert calibration.completion_lookup(region) == (44_000, "rule_fallback")
-
-
-def test_completion_lookup_prefers_same_ops_across_mask_context():
-    region = {
-        "dtype": "float32",
-        "logical_free_dim": 512,
-        "partition_count": 128,
-        "reduction_count": 2,
-        "has_mask_or_tail": True,
-        "op_histogram": {"max": 1, "exp": 1, "reduce_sum": 1},
-    }
-    key = structural_calibration_key(region)
-    rule_id = key.split("|", 1)[0]
-    ops = next(part[4:] for part in key.split("|") if part.startswith("ops="))
-    calibration = StructuredControlCalibration(
-        points={},
-        completion_points={},
-        completion_semantic_points={
-            (rule_id, ops, "float32"): [(512, 13_000, "unmasked-control")]
-        },
-        completion_rule_points={
-            (rule_id, True, "float32"): [(512, 30_000, "other-ops-control")]
-        },
-    )
-    assert calibration.completion_lookup(region) == (13_000, "semantic_fallback")
+    assert calibration.predict_components(events) == (400.0, 0.0)
 
 
 def test_exact_micro_dag_uses_flow_predecessors_and_calibrated_engine_work():
@@ -899,7 +755,6 @@ def test_exact_micro_dag_uses_flow_predecessors_and_calibrated_engine_work():
             (key, "vector", "float32"): [(128, 2.0, 2, 0.0)],
             (key, "scalar", "float32"): [(128, 1.0, 1, 0.0)],
         },
-        completion_points={},
         micro_dags={(key, "float32", 128): dag},
     )
     level_b = ComputeCalibration(
@@ -967,7 +822,6 @@ def test_micro_dag_opcode_timing_preserves_calibrated_engine_totals():
     }
     structured = StructuredControlCalibration(
         points={(key, "vector", "float32"): [(128, 2.0, 2, 0.0)]},
-        completion_points={},
         micro_dags={(key, "float32", 128): dag},
         opcode_timing_points={
             ("vector", "float32", "REDUCE"): [(128, 1000.0)],
@@ -1035,37 +889,6 @@ def test_operator_agnostic_access_and_compute_feature_schema():
     assert region is not None
     assert region.op_histogram == (("add", 2),)
     assert region.partition_count == 16
-
-
-def test_runtime_overhead_is_a_concurrent_path_and_reports_control_domain():
-    calibration = RuntimeOverheadCalibration(
-        sequencer_base_ns=100,
-        vector_activation_ns=20,
-        partition_log2_ns=10,
-        dma_packet_log2_ns=5,
-        partition_min=1,
-        partition_max=128,
-        free_access_min=128,
-        free_access_max=2048,
-    )
-    events = [{
-        "seq": 0, "op": "compute", "engine": "vector", "elements": 500,
-        "partition_count": 16, "free_dim": 128,
-    }]
-    result = simulate(
-        events,
-        CostModel(
-            vector_startup_ns=0,
-            vector_elements_per_ns=1,
-            runtime_overhead_calibration=calibration,
-        ),
-    )
-    # Runtime setup overlaps engine work: it is max(500, 100+20+4*10),
-    # never an additive residual on top of the scheduler result.
-    assert result.predicted_latency_ns == pytest.approx(500)
-    assert result.components_ns["runtime_control_in_domain"] == 0.0
-    assert calibration.in_domain(16, 512)
-    assert not calibration.in_domain(16, 4096)
 
 
 def test_lowering_calibration_expands_one_fusion_group_across_engines():
@@ -1195,26 +1018,6 @@ def test_compositional_runtime_baseline_is_reported_separately_from_payload():
     assert result.engine_busy_ns["scalar"] == pytest.approx(25.0)
     assert result.components_ns["scalar_runtime_baseline_ns"] == pytest.approx(25.0)
     assert result.components_ns["gpsimd_runtime_baseline_ns"] == 0.0
-
-
-def test_whole_program_completion_uses_nearest_source_geometry(monkeypatch):
-    monkeypatch.setattr(
-        "triton_viz.tools.nki_evaluate_whole_program_regime.source_descriptor_from_events",
-        lambda events, dtype: {"key": (dtype, "linear"), "distance_feature": 90.0},
-    )
-    calibration = WholeProgramRoutingCalibration([
-        {
-            "key": ("float32", "linear"),
-            "distance_feature": 40.0,
-            "completion_ns": 8_000.0,
-        },
-        {
-            "key": ("float32", "linear"),
-            "distance_feature": 100.0,
-            "completion_ns": 12_000.0,
-        },
-    ])
-    assert calibration.predict_completion_ns([], "float32") == 12_000.0
 
 
 def test_tensor_calibration_is_dtype_throughput_without_shape_lookup(tmp_path):

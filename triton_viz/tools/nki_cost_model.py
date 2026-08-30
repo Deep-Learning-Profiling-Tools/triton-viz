@@ -629,22 +629,23 @@ class TensorDotCountCalibration:
 
 @dataclass
 class AttentionPipelineCalibration:
-    """Control-only TensorE and completion surface for QK-normalize-PV DAGs."""
+    """Control-only TensorE busy surface for QK-normalize-PV Dot DAGs.
 
-    points: dict[str, list[tuple[int, float, float]]]
+    This is an engine occupancy model, not a completion floor: it supplies the
+    TensorE active time that source geometry alone cannot identify for a
+    two-Dot normalise-and-reuse pipeline.
+    """
+
+    points: dict[str, list[tuple[int, float]]]
 
     @classmethod
     def from_csv(cls, path: str | Path) -> "AttentionPipelineCalibration":
-        points: dict[str, list[tuple[int, float, float]]] = {}
+        points: dict[str, list[tuple[int, float]]] = {}
         with Path(path).open(encoding="utf-8", newline="") as file:
             for row in csv.DictReader(file):
                 dtype = TensorCalibrationSurface._normalize_dtype(row["dtype"])
                 points.setdefault(dtype, []).append(
-                    (
-                        int(row["value_width"]),
-                        float(row["tensor_active_ns"]),
-                        float(row["nc_completion_ns"]),
-                    )
+                    (int(row["value_width"]), float(row["tensor_active_ns"]))
                 )
         for values in points.values():
             values.sort()
@@ -652,10 +653,10 @@ class AttentionPipelineCalibration:
             raise ValueError(f"No attention-pipeline calibration rows in {path}")
         return cls(points)
 
-    def predict_ns(self, dtype: str, value_width: int) -> tuple[float, float, str]:
+    def predict_ns(self, dtype: str, value_width: int) -> tuple[float, str]:
         values = self.points.get(TensorCalibrationSurface._normalize_dtype(dtype), [])
         if len(values) < 2 or value_width <= 0:
-            return 0.0, 0.0, "missing"
+            return 0.0, "missing"
         match = "interpolated"
         if value_width <= values[0][0]:
             lower, upper = values[0], values[1]
@@ -667,75 +668,209 @@ class AttentionPipelineCalibration:
             upper_index = next(i for i, row in enumerate(values) if row[0] >= value_width)
             lower, upper = values[upper_index - 1], values[upper_index]
             if upper[0] == value_width:
-                return upper[1], upper[2], "exact"
+                return upper[1], "exact"
         weight = (value_width - lower[0]) / (upper[0] - lower[0])
-        return (
-            lower[1] + weight * (upper[1] - lower[1]),
-            lower[2] + weight * (upper[2] - lower[2]),
-            match,
+        return lower[1] + weight * (upper[1] - lower[1]), match
+
+
+@dataclass
+class DmaElapsedCalibration:
+    """Descriptor-issue bound on DMA *elapsed* time.
+
+    A DMA transfer's bandwidth model prices the bytes it moves, but the queue
+    is occupied per *descriptor*, not per byte.  A contiguous run costs one
+    descriptor; a fragmented free axis costs one descriptor per element, and
+    the independent strided-store controls show the resulting elapsed time can
+    exceed measured DMA active time by more than 10x.  The physical bound is
+
+        ``elapsed_ns >= descriptor_count * ns_per_descriptor``
+
+    where ``descriptor_count`` comes from the access geometry alone
+    (partition count and free-axis stride) and ``ns_per_descriptor`` is one
+    global measured issue interval.  It never lowers the bandwidth estimate.
+    """
+
+    ns_per_descriptor: float
+    measured_min_descriptors: float = 0.0
+    measured_max_descriptors: float = float("inf")
+
+    @classmethod
+    def from_csv(cls, path: str | Path) -> "DmaElapsedCalibration":
+        with Path(path).open(encoding="utf-8", newline="") as file:
+            rows = list(csv.DictReader(file))
+        if len(rows) != 1:
+            raise ValueError(
+                f"DMA elapsed calibration must be a single global row: {path}"
+            )
+        return cls(
+            ns_per_descriptor=float(rows[0]["ns_per_descriptor"]),
+            measured_min_descriptors=float(rows[0].get("measured_min_descriptors") or 0.0),
+            measured_max_descriptors=float(
+                rows[0].get("measured_max_descriptors") or float("inf")
+            ),
+        )
+
+    @staticmethod
+    def serial_descriptor_count(pattern: AccessPattern, engines: int) -> float:
+        """Descriptors that must issue back to back on one queue.
+
+        A contiguous (or stride-0 broadcast) free axis coalesces into one bulk
+        descriptor per partition, and those descriptors are striped across the
+        DMA engines, so their issue cost is ``ceil(partitions / engines)`` and
+        is negligible beside the bandwidth term.  A fragmented free axis
+        instead produces one descriptor per active element on a single queue,
+        which is the regime the independent strided controls measure.
+        """
+        if pattern.active_access_count <= 0:
+            return 0.0
+        if pattern.free_stride_items in (0, 1):
+            partitions = max(1, pattern.partition_count)
+            return math.ceil(partitions / max(1, engines))
+        return float(pattern.active_access_count)
+
+    def queue_floor_ns(
+        self, events: Iterable[dict[str, Any]], engines: int
+    ) -> tuple[float, float, float]:
+        """Least DMA-resource occupancy implied by descriptor issue.
+
+        Descriptors from every transfer share the same issue path, so the bound
+        is on their total, not on any single transfer.  It is a floor on DMA
+        engine busy time, never an addition to the bandwidth estimate.
+
+        Returns the floor, the total descriptor count, and the count coming
+        from fragmented transfers, which is the quantity the controls measured
+        and therefore the one whose domain must be reported.
+        """
+        descriptors = 0.0
+        fragmented = 0.0
+        for event in events:
+            pattern = AccessPattern.from_event(event)
+            if pattern is None:
+                continue
+            count = self.serial_descriptor_count(pattern, engines)
+            descriptors += count
+            if pattern.free_stride_items not in (0, 1):
+                fragmented += count
+        return descriptors * self.ns_per_descriptor, descriptors, fragmented
+
+    def fragmented_out_of_domain(self, fragmented_descriptors: float) -> bool:
+        """Whether a fragmented transfer total leaves the measured domain."""
+        if fragmented_descriptors <= 0:
+            return False
+        return not (
+            self.measured_min_descriptors
+            <= fragmented_descriptors
+            <= self.measured_max_descriptors
         )
 
 
 @dataclass
-class NormPipelineCalibration:
-    """Control-only completion for reduce-rsqrt-broadcast pipeline structures."""
+class OnChipTransferCalibration:
+    """Measured PSUM/SBUF on-chip copy latency, keyed by generic geometry.
 
-    points: dict[tuple[str, str, int, int, int], list[tuple[int, float]]]
+    An on-chip transfer is not an HBM transfer: no bandwidth surface applies to
+    it, and the engine that performs it is occupied for a latency that grows
+    with the free width of the tile being moved.  Independent ``onchip_copy``
+    controls isolate that latency by differencing repeats, so the fit contains
+    no setup or store cost.  The model is ``startup + ns_per_free_elem * free``
+    keyed by ``(engine, dtype)`` with an explicit measured free-width domain;
+    it replaces a hardcoded placeholder and is not keyed by program structure.
+    """
+
+    points: dict[tuple[str, str], tuple[float, float, int, int]]
 
     @classmethod
-    def from_csv(cls, path: str | Path) -> "NormPipelineCalibration":
-        points: dict[tuple[str, str, int, int, int], list[tuple[int, float]]] = {}
+    def from_csv(cls, path: str | Path) -> "OnChipTransferCalibration":
+        points: dict[tuple[str, str], tuple[float, float, int, int]] = {}
         with Path(path).open(encoding="utf-8", newline="") as file:
             for row in csv.DictReader(file):
-                free_dim = int(row["free_dim"])
                 key = (
-                    TensorCalibrationSurface._normalize_dtype(row["dtype"]),
-                    row["structure"],
-                    int(row["partition_count"]),
-                    int(row["broadcast_instances"]),
-                    1 if free_dim <= 2048 else 2,
+                    str(row["engine"]).strip().lower(),
+                    ComputeCalibration._norm_dtype(row["dtype"]),
                 )
-                points.setdefault(key, []).append(
-                    (free_dim, float(row["nc_completion_ns"]))
+                points[key] = (
+                    float(row["startup_ns"]),
+                    float(row["ns_per_free_elem"]),
+                    int(float(row["domain_min_free"])),
+                    int(float(row["domain_max_free"])),
                 )
-        for values in points.values():
-            values.sort()
         if not points:
-            raise ValueError(f"No norm pipeline calibration rows in {path}")
+            raise ValueError(f"No on-chip transfer calibration rows in {path}")
         return cls(points)
 
-    def predict_ns(
-        self, dtype: str, structure: str, partition_count: int,
-        broadcast_instances: int, free_dim: int
+    def latency_ns(
+        self, engine: str, dtype: str, free_elements: int
     ) -> tuple[float, str]:
-        regime = 1 if free_dim <= 2048 else 2
-        values = self.points.get(
-            (
-                TensorCalibrationSurface._normalize_dtype(dtype),
-                structure,
-                partition_count,
-                broadcast_instances,
-                regime,
-            ),
-            [],
+        key = (str(engine).strip().lower(), ComputeCalibration._norm_dtype(dtype))
+        point = self.points.get(key)
+        if point is None:
+            # The controls measured the Vector copy path; other engines reuse
+            # that latency rather than inventing a second unmeasured surface.
+            point = next(
+                (
+                    value
+                    for (candidate, candidate_dtype), value in self.points.items()
+                    if candidate_dtype == key[1]
+                ),
+                None,
+            )
+            if point is None:
+                return 0.0, "missing"
+        startup, per_elem, low, high = point
+        free = max(1, int(free_elements))
+        match = "in_domain" if low <= free <= high else "ood_extrapolated"
+        return max(0.0, startup + per_elem * free), match
+
+
+@dataclass
+class GlobalCompletionCalibration:
+    """One global, structure-free NC completion model.
+
+    Independent control programs show that end-to-end NC latency is not the
+    dependency makespan: a fixed fraction of the non-critical engines' work
+    fails to overlap with the critical engine, and every kernel pays a fixed
+    launch/drain cost.  Both quantities are single global numbers measured as
+    ``NC-p50 minus measured engine active time`` over independent controls and
+    gated by leave-one-entire-free-dimension-out CV.  There is deliberately no
+    structural, operator or grammar key: this term is applied identically to
+    every program, which is what distinguishes it from the per-structure
+    completion lookup tables it replaces.
+
+    A pipeline-depth refinement of ``overlap_fraction`` (making the residue of
+    each engine depend on how many independent work items the source DAG gives
+    it) was fitted and cross-validated on a control set spanning both a serial
+    whole-program family and a software-pipelined tiled-Dot family.  It won the
+    control CV decisively and still failed to improve the authoritative target
+    metric, so it was rejected; see the 2026-08-30 status entry.
+    """
+
+    overlap_fraction: float
+    completion_offset_ns: float
+
+    @classmethod
+    def from_csv(cls, path: str | Path) -> "GlobalCompletionCalibration":
+        with Path(path).open(encoding="utf-8", newline="") as file:
+            rows = list(csv.DictReader(file))
+        if len(rows) != 1:
+            raise ValueError(
+                f"Global completion calibration must be a single global row: {path}"
+            )
+        return cls(
+            overlap_fraction=float(rows[0]["overlap_fraction"]),
+            completion_offset_ns=float(rows[0]["completion_offset_ns"]),
         )
-        if not values:
-            return 0.0, "missing"
-        if len(values) == 1:
-            return values[0][1], "ood_clamped"
-        if free_dim <= values[0][0]:
-            lower, upper, match = values[0], values[1], "ood_extrapolated"
-        elif free_dim >= values[-1][0]:
-            lower, upper = values[-2], values[-1]
-            match = "exact" if free_dim == values[-1][0] else "ood_extrapolated"
-        else:
-            upper_index = next(i for i, row in enumerate(values) if row[0] >= free_dim)
-            lower, upper = values[upper_index - 1], values[upper_index]
-            if upper[0] == free_dim:
-                return upper[1], "exact"
-            match = "interpolated"
-        weight = (free_dim - lower[0]) / (upper[0] - lower[0])
-        return lower[1] + weight * (upper[1] - lower[1]), match
+
+    def predict_ns(self, engine_busy_ns: dict[str, float]) -> float:
+        if not engine_busy_ns:
+            return max(0.0, self.completion_offset_ns)
+        busy = list(engine_busy_ns.values())
+        critical = max(busy)
+        return max(
+            0.0,
+            critical
+            + self.overlap_fraction * (sum(busy) - critical)
+            + self.completion_offset_ns,
+        )
 
 
 @dataclass
@@ -1014,26 +1149,16 @@ class StructuredControlCalibration:
     """Interpolated points keyed by reusable structural grammar families."""
 
     points: dict[tuple[str, str, str], list[tuple[int, float, int, float]]]
-    completion_points: dict[tuple[str, str], list[tuple[int, float]]]
     micro_dags: dict[tuple[str, str, int], dict[str, Any]] = field(
         default_factory=dict
     )
     opcode_timing_points: dict[
         tuple[str, str, str], list[tuple[int, float]]
     ] = field(default_factory=dict)
-    completion_rule_points: dict[
-        tuple[str, bool, str], list[tuple[int, float, str]]
-    ] = field(default_factory=dict)
-    completion_semantic_points: dict[
-        tuple[str, str, str], list[tuple[int, float, str]]
-    ] = field(default_factory=dict)
 
     @classmethod
     def from_csv(cls, path: str | Path) -> StructuredControlCalibration:
         points = {}
-        completion_points = {}
-        completion_rule_points = {}
-        completion_semantic_points = {}
         micro_dags = {}
         opcode_timing_samples: dict[
             tuple[str, str, str, int, str], list[float]
@@ -1053,31 +1178,6 @@ class StructuredControlCalibration:
                         float(row["fixed_ns"]),
                     )
                 )
-                completion_ns = float(row.get("nc_completion_ns") or 0.0)
-                if completion_ns > 0:
-                    completion_points.setdefault((key[0], key[2]), []).append(
-                        (int(row["free_dim"]), completion_ns)
-                    )
-                    rule_id = key[0].split("|", 1)[0]
-                    masked = "|mask=1|" in key[0]
-                    completion_rule_points.setdefault(
-                        (rule_id, masked, key[2]), []
-                    ).append(
-                        (int(row["free_dim"]), completion_ns, key[0])
-                    )
-                    ops = next(
-                        (
-                            part.removeprefix("ops=")
-                            for part in key[0].split("|")
-                            if part.startswith("ops=")
-                        ),
-                        "",
-                    )
-                    completion_semantic_points.setdefault(
-                        (rule_id, ops, key[2]), []
-                    ).append(
-                        (int(row["free_dim"]), completion_ns, key[0])
-                    )
                 raw_dag = row.get("micro_dag_json") or ""
                 if raw_dag:
                     dag_key = (key[0], key[2], int(row["free_dim"]))
@@ -1120,14 +1220,7 @@ class StructuredControlCalibration:
             opcode_timing_points.setdefault(
                 (engine, dtype, opcode), []
             ).append((free_dim, statistics.median(values)))
-        return cls(
-            points,
-            completion_points,
-            micro_dags,
-            opcode_timing_points,
-            completion_rule_points,
-            completion_semantic_points,
-        )
+        return cls(points, micro_dags, opcode_timing_points)
 
     def micro_dag_lookup(
         self, region_ir: dict[str, Any]
@@ -1177,103 +1270,6 @@ class StructuredControlCalibration:
             math.log2(upper[0]) - math.log2(lower[0])
         )
         return lower[1] + weight * (upper[1] - lower[1]), "interpolated"
-
-    def completion_lookup(
-        self,
-        region_ir: dict[str, Any],
-        *,
-        excluded_free_dims: set[int] | None = None,
-        excluded_calibration_keys: set[str] | None = None,
-    ) -> tuple[float, str]:
-        """Return completion floor plus exact/interpolated/OOD provenance.
-
-        The exclusion arguments support honest leave-one-control-out audits
-        without refitting on holdout measurements.
-        """
-        from triton_viz.tools.nki_region_ir import (
-            completion_calibration_dtype,
-            structural_calibration_key,
-        )
-
-        if int(region_ir.get("reduction_count") or 0) <= 0:
-            return 0.0, "not_applicable"
-        calibration_key = structural_calibration_key(region_ir)
-        if calibration_key in (excluded_calibration_keys or set()):
-            return 0.0, "excluded_grammar"
-        key = (
-            calibration_key,
-            ComputeCalibration._norm_dtype(completion_calibration_dtype(region_ir)),
-        )
-        excluded_free_dims = excluded_free_dims or set()
-        rows = sorted(
-            {
-                row
-                for row in self.completion_points.get(key, [])
-                if int(row[0]) not in excluded_free_dims
-            }
-        )
-        match = "exact"
-        if not rows:
-            rule_id = calibration_key.split("|", 1)[0]
-            ops = next(
-                (
-                    part.removeprefix("ops=")
-                    for part in calibration_key.split("|")
-                    if part.startswith("ops=")
-                ),
-                "",
-            )
-            semantic_rows = self.completion_semantic_points.get(
-                (rule_id, ops, key[1]), []
-            )
-            rows = sorted(
-                {
-                    (free_dim, completion_ns)
-                    for free_dim, completion_ns, source_key in semantic_rows
-                    if source_key not in (excluded_calibration_keys or set())
-                    and free_dim not in excluded_free_dims
-                }
-            )
-            if rows:
-                match = "semantic_fallback"
-        if not rows:
-            masked = "|mask=1|" in calibration_key
-            rule_rows = self.completion_rule_points.get(
-                (rule_id, masked, key[1]), []
-            )
-            rows = sorted(
-                {
-                    (free_dim, completion_ns)
-                    for free_dim, completion_ns, source_key in rule_rows
-                    if source_key not in (excluded_calibration_keys or set())
-                    and free_dim not in excluded_free_dims
-                }
-            )
-            if not rows:
-                return 0.0, "ood"
-            match = "rule_fallback"
-        free = int(region_ir.get("logical_free_dim") or region_ir.get("free_dim") or 1)
-        exact = [row for row in rows if row[0] == free]
-        if exact:
-            return statistics.median(row[1] for row in exact), match
-        if free < rows[0][0] or free > rows[-1][0]:
-            return 0.0, "ood"
-        lower = max((row for row in rows if row[0] <= free), default=rows[0])
-        upper = min((row for row in rows if row[0] >= free), default=rows[-1])
-        if lower[0] == upper[0]:
-            return lower[1], "interpolated"
-        # Whole-kernel completion controls scale with active free-width in the
-        # independently held interior folds.  Interpolating wall time in log-F
-        # systematically overweights the lower endpoint (the control-only
-        # source-sequence audit is 9.64/7.48% at F=512/1024); linear-F reduces
-        # those same untouched folds to 2.51/1.04%.  Keep extrapolation OOD.
-        weight = (free - lower[0]) / (upper[0] - lower[0])
-        value = lower[1] + weight * (upper[1] - lower[1])
-        return value, match if match.endswith("_fallback") else "interpolated"
-
-    def predict_completion_ns(self, region_ir: dict[str, Any]) -> float:
-        """Backward-compatible numeric completion-floor lookup."""
-        return self.completion_lookup(region_ir)[0]
 
     def predict_points(
         self, region_ir: dict[str, Any]
@@ -1362,75 +1358,20 @@ class StructuredControlCalibration:
 
 
 @dataclass
-class RuntimeOverheadCalibration:
-    """Mechanism-level NC runtime costs fitted from orthogonal controls."""
-
-    sequencer_base_ns: float
-    vector_activation_ns: float = 0.0
-    scalar_activation_ns: float = 0.0
-    tensor_activation_ns: float = 0.0
-    cross_engine_sync_ns: float = 0.0
-    partition_log2_ns: float = 0.0
-    dma_packet_log2_ns: float = 0.0
-    partition_min: float = 1.0
-    partition_max: float = 128.0
-    free_access_min: float = 128.0
-    free_access_max: float = 2048.0
-
-    @classmethod
-    def from_csv(cls, path: str | Path) -> RuntimeOverheadCalibration:
-        with Path(path).open(encoding="utf-8", newline="") as file:
-            rows = list(csv.DictReader(file))
-        if len(rows) != 1:
-            raise ValueError("runtime calibration CSV must contain exactly one row")
-        row = rows[0]
-        return cls(
-            **{
-                field.name: float(row.get(field.name) or 0.0)
-                for field in fields(cls)
-            }
-        )
-
-    def predict_ns(
-        self,
-        engine_busy_ns: dict[str, float],
-        cross_engine_edges: int,
-        partition_count: int,
-        free_access_count: int,
-    ) -> float:
-        return max(
-            0.0,
-            self.sequencer_base_ns
-            + self.vector_activation_ns * int(ENGINE_VECTOR in engine_busy_ns)
-            + self.scalar_activation_ns * int(ENGINE_SCALAR in engine_busy_ns)
-            + self.tensor_activation_ns * int(ENGINE_TENSOR in engine_busy_ns)
-            + self.cross_engine_sync_ns * max(0, cross_engine_edges)
-            + self.partition_log2_ns * math.log2(max(1, partition_count))
-            + self.dma_packet_log2_ns
-            * math.log2(max(1, free_access_count) / 128.0),
-        )
-
-    def in_domain(self, partition_count: int, free_access_count: int) -> bool:
-        """Whether runtime geometry lies inside the measured control box."""
-        return (
-            self.partition_min <= partition_count <= self.partition_max
-            and self.free_access_min <= free_access_count <= self.free_access_max
-        )
-
-
-@dataclass
 class StridedDmaCalibration:
-    """Access-geometry busy-time and completion calibration for strided stores."""
+    """Access-geometry DMA busy-time calibration for strided stores.
 
-    points: dict[
-        tuple[str, int, int], list[tuple[int, float, float, float]]
-    ]
+    This is an engine occupancy surface only.  The independent strided controls
+    also measured an end-to-end packet/queue tail, but that column was a
+    per-geometry completion floor and has been removed along with every other
+    per-structure completion table.
+    """
+
+    points: dict[tuple[str, int, int], list[tuple[int, float, float]]]
 
     @classmethod
     def from_csv(cls, path: str | Path) -> StridedDmaCalibration:
-        points: dict[
-            tuple[str, int, int], list[tuple[int, float, float, float]]
-        ] = {}
+        points: dict[tuple[str, int, int], list[tuple[int, float, float]]] = {}
         with Path(path).open(encoding="utf-8", newline="") as file:
             for row in csv.DictReader(file):
                 key = (
@@ -1446,14 +1387,13 @@ class StridedDmaCalibration:
                             or row["dma_active_ns"]
                         ),
                         float(row.get("static_dma_active_ns") or 0.0),
-                        float(row.get("nc_completion_ns") or 0.0),
                     )
                 )
         return cls(points)
 
     def predict_components(
         self, events: Iterable[dict[str, Any]]
-    ) -> tuple[float, float, float] | None:
+    ) -> tuple[float, float] | None:
         patterns = [
             (event, pattern)
             for event in events
@@ -1477,20 +1417,11 @@ class StridedDmaCalibration:
         rows = self.points.get((dtype, stride, partitions), [])
         if not rows:
             return None
-        # Backward compatibility for in-memory/old CSV points stored as
-        # (free, total_dma, completion): treat total as dynamic and static=0.
-        rows = sorted(
-            (
-                row
-                if len(row) == 4
-                else (row[0], row[1], 0.0, row[2])
-            )
-            for row in rows
-        )
+        rows = sorted(rows)
         lower = max((row for row in rows if row[0] <= free), default=rows[0])
         upper = min((row for row in rows if row[0] >= free), default=rows[-1])
         if lower[0] == upper[0]:
-            return lower[1], lower[2], lower[3]
+            return lower[1], lower[2]
         # Interpolate only between independent control sizes. Values outside
         # their measured range remain clamped and are reported as OOD by the
         # experiment layer rather than silently extrapolated.
@@ -1498,18 +1429,7 @@ class StridedDmaCalibration:
         return (
             lower[1] + weight * (upper[1] - lower[1]),
             lower[2] + weight * (upper[2] - lower[2]),
-            lower[3] + weight * (upper[3] - lower[3]),
         )
-
-    def predict(
-        self, events: Iterable[dict[str, Any]]
-    ) -> tuple[float, float] | None:
-        """Backward-compatible total DMA busy/completion lookup."""
-        result = self.predict_components(events)
-        if result is None:
-            return None
-        dynamic_ns, static_ns, completion_ns = result
-        return dynamic_ns + static_ns, completion_ns
 
     @staticmethod
     def matched_indices(events: Iterable[dict[str, Any]]) -> list[int]:
@@ -1690,26 +1610,6 @@ class WholeProgramRoutingCalibration:
             for engine in (ENGINE_VECTOR, ENGINE_SCALAR, ENGINE_GPSIMD)
         }
 
-    def predict_completion_ns(
-        self, events: list[dict[str, Any]], dtype: str
-    ) -> float | None:
-        """Predict NC completion from an independent source-regime control."""
-        from triton_viz.tools.nki_evaluate_whole_program_regime import source_descriptor_from_events
-
-        descriptor = source_descriptor_from_events(events, dtype)
-        candidates = [sample for sample in self.samples if sample["key"] == descriptor["key"]]
-        if not candidates:
-            return None
-        distance = min(
-            abs(sample["distance_feature"] - descriptor["distance_feature"])
-            for sample in candidates
-        )
-        nearest = [
-            sample for sample in candidates
-            if abs(sample["distance_feature"] - descriptor["distance_feature"]) == distance
-        ]
-        return statistics.mean(sample["completion_ns"] for sample in nearest)
-
 
 @dataclass
 class CostModel:
@@ -1739,21 +1639,14 @@ class CostModel:
     compositional_lowering: CompositionalLoweringCalibration | None = None
     structured_control_lowering: StructuredControlCalibration | None = None
     whole_program_routing: WholeProgramRoutingCalibration | None = None
-    runtime_overhead_calibration: RuntimeOverheadCalibration | None = None
     strided_dma_calibration: StridedDmaCalibration | None = None
     tensor_calibration: TensorCalibrationSurface | None = None
     tensor_dot_count_calibration: TensorDotCountCalibration | None = None
     attention_pipeline_calibration: AttentionPipelineCalibration | None = None
-    norm_pipeline_calibration: NormPipelineCalibration | None = None
+    dma_elapsed_calibration: DmaElapsedCalibration | None = None
+    onchip_transfer_calibration: OnChipTransferCalibration | None = None
+    global_completion_calibration: GlobalCompletionCalibration | None = None
     strict_calibration: bool = False
-    enable_structured_completion_floor: bool = True
-    completion_excluded_free_dims: frozenset[int] = field(default_factory=frozenset)
-    completion_excluded_partition_counts: frozenset[int] = field(
-        default_factory=frozenset
-    )
-    completion_excluded_calibration_keys: frozenset[str] = field(
-        default_factory=frozenset
-    )
 
     # On-chip copy (VectorE/ScalarE moving PSUM<->SBUF): cheaper per byte.
     onchip_startup_ns: float = 100.0
@@ -1952,6 +1845,22 @@ class CostModel:
                         self.static_dma_calibration.latency_ns(partitions, x, y)
                         / copies
                     )
+            if self.onchip_transfer_calibration is not None:
+                item_bytes = int(event.get("item_bytes") or 0)
+                if item_bytes <= 0:
+                    item_bytes = 2 if "16" in _compute_value_dtype(event) else 4
+                free_bytes = int(event.get("free_bytes_per_partition") or 0)
+                free_elements = (
+                    free_bytes // item_bytes
+                    if free_bytes > 0
+                    else max(1, nbytes // max(1, int(event.get("partition_count") or 1)) // item_bytes)
+                )
+                latency_ns, match = self.onchip_transfer_calibration.latency_ns(
+                    engine, _compute_value_dtype(event), free_elements
+                )
+                if match != "missing":
+                    event["onchip_transfer_match"] = match
+                    return latency_ns
             return self.onchip_startup_ns + nbytes / self.onchip_bytes_per_ns
         # grid markers and unknown ops take no engine time.
         return 0.0
@@ -2681,46 +2590,13 @@ def simulate(
         if model.structural_static_dma is not None
         else (0.0, "none")
     )
-    completion_lookups = (
-        [
-            (
-                (0.0, "excluded_partition")
-                if int(
-                    event["region_ir"].get("partition_count") or 1
-                )
-                in model.completion_excluded_partition_counts
-                else model.structured_control_lowering.completion_lookup(
-                    event["region_ir"],
-                    excluded_free_dims=set(model.completion_excluded_free_dims),
-                    excluded_calibration_keys=set(
-                        model.completion_excluded_calibration_keys
-                    ),
-                )
-            )
-            for event in source_events
-            if event.get("region_ir")
-        ]
-        if model.structured_control_lowering is not None
-        else []
-    )
-    structured_completion_ns = (
-        max((value for value, _match in completion_lookups), default=0.0)
-        if model.enable_structured_completion_floor
-        else 0.0
-    )
-    completion_matches = Counter(match for _value, match in completion_lookups)
     strided_dma_prediction = (
         model.strided_dma_calibration.predict_components(source_events)
         if model.strided_dma_calibration is not None
         else None
     )
-    strided_completion_ns = 0.0
     if strided_dma_prediction is not None:
-        (
-            strided_dynamic_dma_ns,
-            strided_static_dma_ns,
-            strided_completion_ns,
-        ) = strided_dma_prediction
+        strided_dynamic_dma_ns, strided_static_dma_ns = strided_dma_prediction
         matched_indices = model.strided_dma_calibration.matched_indices(source_events)
         unmatched_indices = [
             index
@@ -2778,20 +2654,7 @@ def simulate(
         == ENGINE_TENSOR
     ]
     tensor_startup_ns = 0.0
-    attention_completion_ns = 0.0
     attention_pipeline_match = "disabled"
-    norm_completion_ns = 0.0
-    norm_pipeline_match = "disabled"
-    norm_markers = [event for event in source_events if event.get("norm_pipeline_structure")]
-    if model.norm_pipeline_calibration is not None and norm_markers:
-        marker = norm_markers[0]
-        norm_completion_ns, norm_pipeline_match = model.norm_pipeline_calibration.predict_ns(
-            str(marker.get("norm_pipeline_dtype") or "float32"),
-            str(marker["norm_pipeline_structure"]),
-            int(marker["norm_pipeline_partition_count"]),
-            int(marker["norm_pipeline_broadcast_instances"]),
-            int(marker["norm_pipeline_free_dim"]),
-        )
     tensor_domain_ood = 0
     micro_dag_engine_coverage: set[str] = set()
     source_compute_regions = {
@@ -2851,7 +2714,6 @@ def simulate(
             ):
                 (
                     calibrated_tensor_active_ns,
-                    attention_completion_ns,
                     attention_pipeline_match,
                 ) = model.attention_pipeline_calibration.predict_ns(
                     dtype, attention_value_width
@@ -3093,7 +2955,6 @@ def simulate(
     # occupancy replaces only Vector/Scalar/GpSimd work and provides a physical
     # makespan lower bound.  This avoids inventing target compiler Flow edges.
     whole_program_routing_match = "disabled"
-    whole_program_completion_ns = 0.0
     value_dtypes = [
         str(value)
         for event in source_events
@@ -3110,46 +2971,47 @@ def simulate(
             whole_program_routing_match = "covered"
             engine_busy.update(routed_busy)
             makespan = max(makespan, max(routed_busy.values(), default=0.0))
-            whole_program_completion_ns = (
-                model.whole_program_routing.predict_completion_ns(
-                    routing_events, source_dtype
-                )
-                or 0.0
-            )
         else:
             whole_program_routing_match = "ood"
 
-    calibrated_nc_ns = None
+    # DMA descriptor-issue floor.  Every fragmented transfer element occupies
+    # the shared DMA issue path for a measured interval, so the DMA resource
+    # cannot finish sooner than the total descriptor count times that interval.
+    # This is a physical occupancy bound on engine busy time computed from the
+    # access geometry; it is not keyed by program structure.
+    dma_queue_floor_ns = 0.0
+    dma_descriptor_count = 0.0
+    dma_fragmented_descriptors = 0.0
+    if model.dma_elapsed_calibration is not None:
+        (
+            dma_queue_floor_ns,
+            dma_descriptor_count,
+            dma_fragmented_descriptors,
+        ) = model.dma_elapsed_calibration.queue_floor_ns(
+            source_events, max(1, int(model.dma_max_engines))
+        )
+        dma_busy_before_floor = engine_busy.get(ENGINE_DMA, 0.0) + engine_busy.get(
+            ENGINE_STATIC_DMA, 0.0
+        )
+        if dma_queue_floor_ns > dma_busy_before_floor:
+            engine_busy[ENGINE_DMA] = (
+                engine_busy.get(ENGINE_DMA, 0.0)
+                + dma_queue_floor_ns
+                - dma_busy_before_floor
+            )
+            makespan = max(makespan, dma_queue_floor_ns)
+
+    # There is exactly one global overhead model: the completion term below.
+    # An earlier parametric runtime-overhead floor estimated the same physical
+    # quantity and was combined with a max, which is biased upward and double
+    # counts the launch cost the completion offset already contains.  An A/B on
+    # the 288 independent whole-program controls confirmed it: the floor moved
+    # control NC-p50 MAPE from 7.9585% to 10.9133% and the median signed error
+    # from -1.40% to +2.26%.  It was therefore removed, not retuned.
     max_partitions = max(
         (int(event.get("partition_count") or 1) for event in source_events),
         default=1,
     )
-    if model.runtime_overhead_calibration is not None:
-        max_free_access = max(
-            (
-                max(1, pattern.active_access_count // pattern.partition_count)
-                for event in source_events
-                if (
-                    pattern := AccessPattern.from_event(event)
-                ) is not None
-                and (
-                    "hbm" in pattern.src_space
-                    or "hbm" in pattern.dst_space
-                )
-            ),
-            default=1,
-        )
-        calibrated_nc_ns = max(
-            makespan,
-            model.runtime_overhead_calibration.predict_ns(
-                engine_busy, cross_engine_edges, max_partitions, max_free_access
-            ),
-        )
-        runtime_control_in_domain = model.runtime_overhead_calibration.in_domain(
-            max_partitions, max_free_access
-        )
-    else:
-        runtime_control_in_domain = None
     if model.compositional_lowering is not None:
         for engine, baseline_ns in model.compositional_lowering.runtime_baseline_ns(
             source_dtype, max_partitions
@@ -3166,26 +3028,20 @@ def simulate(
         ENGINE_STATIC_DMA, 0.0
     )
     phase_critical_ns = dma_busy_ns + compute_critical_ns
-    final_ns = (
-        calibrated_nc_ns
-        if calibrated_nc_ns is not None
-        else makespan + max(0.0, model.kernel_overhead_ns)
+    final_ns = makespan + max(0.0, model.kernel_overhead_ns)
+    # One global completion term replaces every per-structure completion
+    # lookup table.  It is applied identically to every program: a single
+    # measured non-overlap fraction of the non-critical engines plus a single
+    # measured launch/drain constant, both frozen from independent controls
+    # under leave-one-free-dimension-out CV.  There is no structural key, so
+    # no program can be given a bespoke floor.
+    makespan_only_ns = final_ns
+    global_completion_ns = (
+        model.global_completion_calibration.predict_ns(engine_busy)
+        if model.global_completion_calibration is not None
+        else 0.0
     )
-    # Independent strided controls expose a packet/queue completion tail that
-    # is not represented by DMA active time.  It is a geometry-keyed lower
-    # bound on end-to-end completion, not an additive operator residual.
-    without_structured_completion_ns = max(final_ns, strided_completion_ns)
-    final_ns = max(
-        without_structured_completion_ns,
-        structured_completion_ns,
-        attention_completion_ns,
-        norm_completion_ns,
-        whole_program_completion_ns,
-    )
-    structured_completion_activated = (
-        model.enable_structured_completion_floor
-        and structured_completion_ns > without_structured_completion_ns
-    )
+    final_ns = max(makespan_only_ns, global_completion_ns)
     return SimulationResult(
         predicted_latency_ns=final_ns,
         timeline=timeline,
@@ -3197,38 +3053,40 @@ def simulate(
             "whole_program_routing_covered": float(
                 whole_program_routing_match == "covered"
             ),
-            "whole_program_completion_ns": whole_program_completion_ns,
             "runtime_critical_path_extension": final_ns - makespan,
-            "without_structured_completion_floor": without_structured_completion_ns,
-            "structured_completion_floor_ns": structured_completion_ns,
-            "attention_pipeline_completion_ns": attention_completion_ns,
+            "makespan_only_ns": makespan_only_ns,
+            "dma_queue_floor_ns": dma_queue_floor_ns,
+            "dma_descriptor_count": dma_descriptor_count,
+            "dma_fragmented_descriptor_count": dma_fragmented_descriptors,
+            "onchip_transfer_count": float(
+                sum(
+                    1
+                    for event in source_events
+                    if event.get("onchip_transfer_match") is not None
+                )
+            ),
+            "onchip_transfer_ood": float(
+                sum(
+                    1
+                    for event in source_events
+                    if event.get("onchip_transfer_match") == "ood_extrapolated"
+                )
+            ),
+            "dma_queue_floor_ood": float(
+                model.dma_elapsed_calibration is not None
+                and model.dma_elapsed_calibration.fragmented_out_of_domain(
+                    dma_fragmented_descriptors
+                )
+            ),
+            "global_completion_ns": global_completion_ns,
+            "global_completion_activated": float(
+                global_completion_ns > makespan_only_ns
+            ),
             "attention_pipeline_covered": float(
                 attention_pipeline_match in {"exact", "interpolated"}
             ),
             "attention_pipeline_ood": float(
                 attention_pipeline_match == "ood_extrapolated"
-            ),
-            "norm_pipeline_completion_ns": norm_completion_ns,
-            "norm_pipeline_covered": float(
-                norm_pipeline_match in {"exact", "interpolated"}
-            ),
-            "norm_pipeline_ood": float(
-                norm_pipeline_match in {"ood_extrapolated", "ood_clamped", "missing"}
-            ),
-            "structured_completion_floor_activated": float(
-                structured_completion_activated
-            ),
-            "completion_exact_count": float(
-                completion_matches.get("exact", 0)
-            ),
-            "completion_interpolated_count": float(
-                completion_matches.get("interpolated", 0)
-            ),
-            "completion_rule_fallback_count": float(
-                completion_matches.get("rule_fallback", 0)
-            ),
-            "completion_semantic_fallback_count": float(
-                completion_matches.get("semantic_fallback", 0)
             ),
             **{
                 f"level_a_{match}_count": float(level_a_matches.get(match, 0))
@@ -3241,18 +3099,6 @@ def simulate(
                     "none",
                 )
             },
-            "completion_ood_count": float(completion_matches.get("ood", 0)),
-            "completion_excluded_grammar_count": float(
-                completion_matches.get("excluded_grammar", 0)
-            ),
-            "completion_excluded_partition_count": float(
-                completion_matches.get("excluded_partition", 0)
-            ),
-            "runtime_control_in_domain": (
-                float(runtime_control_in_domain)
-                if runtime_control_in_domain is not None
-                else -1.0
-            ),
             "vector_runtime_baseline_ns": engine_runtime_baseline_ns.get(
                 ENGINE_VECTOR, 0.0
             ),

@@ -161,9 +161,9 @@ def test_dma_resource_tokens_serialize_full_width_but_overlap_narrow_transfers()
     assert full.engine_busy_ns["dma"] == narrow.engine_busy_ns["dma"] == 200
 
 
-def test_strided_dma_calibration_sets_busy_time_and_completion_floor():
+def test_strided_dma_calibration_sets_busy_time_without_a_completion_floor():
     calibration = StridedDmaCalibration(
-        {("float32", 2, 128): [(512, 600_000.0, 700_000.0)]}
+        {("float32", 2, 128): [(512, 600_000.0, 0.0)]}
     )
     events = [
         {
@@ -182,5 +182,8 @@ def test_strided_dma_calibration_sets_busy_time_and_completion_floor():
         for index in (1, 2)
     ]
     result = simulate(events, CostModel(strided_dma_calibration=calibration))
+    # The independent strided controls still supply DMA busy time, but their
+    # per-geometry completion column is no longer a latency floor: only the
+    # single global completion term may raise end-to-end latency.
     assert result.engine_busy_ns["dma"] == 600_000.0
-    assert result.predicted_latency_ns == 700_000.0
+    assert result.predicted_latency_ns == 600_000.0

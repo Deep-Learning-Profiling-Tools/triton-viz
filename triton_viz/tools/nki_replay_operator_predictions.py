@@ -10,12 +10,13 @@ from pathlib import Path
 
 from triton_viz.tools.nki_cost_model import (
     AttentionPipelineCalibration,
-    NormPipelineCalibration,
+    DmaElapsedCalibration,
+    OnChipTransferCalibration,
+    GlobalCompletionCalibration,
     CompositionalLoweringCalibration,
     ComputeCalibration,
     CostModel,
     DmaCalibrationSurface,
-    RuntimeOverheadCalibration,
     StructuralStaticDmaCalibration,
     StridedDmaCalibration,
     StructuredControlCalibration,
@@ -54,17 +55,21 @@ FIELDS = [
     "predicted_compute_dma_us",
     "predicted_resource_overlap_us",
     "whole_program_routing_covered",
-    "predicted_without_completion_floor_us",
-    "attention_pipeline_completion_us",
+    "predicted_makespan_only_us",
+    "predicted_dma_queue_floor_us",
+    "dma_descriptor_count",
+    "dma_fragmented_descriptor_count",
+    "dma_queue_floor_ood",
+    "onchip_transfer_count",
+    "onchip_transfer_ood",
+    "predicted_global_completion_us",
+    "global_completion_activated",
     "attention_pipeline_covered",
     "attention_pipeline_ood",
-    "norm_pipeline_completion_us",
-    "norm_pipeline_covered",
-    "norm_pipeline_ood",
     "compute_only_error_pct",
     "compute_dma_error_pct",
     "resource_overlap_error_pct",
-    "without_completion_floor_error_pct",
+    "makespan_only_error_pct",
     "hardware_nc_p50_us",
     "nc_error_pct",
     "hardware_tensor_active_us",
@@ -112,13 +117,6 @@ FIELDS = [
     "tensor_flops_domain_ood_count",
     "tensor_static_matmul_instruction_count",
     "tensor_instruction_calibration_match",
-    "completion_exact_count",
-    "completion_interpolated_count",
-    "completion_rule_fallback_count",
-    "completion_semantic_fallback_count",
-    "completion_ood_count",
-    "completion_excluded_partition_count",
-    "completion_floor_activated",
     "level_a_exact_key_count",
     "level_a_legacy_family_count",
     "level_a_family_prefix_count",
@@ -156,9 +154,10 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--tensor-calibration-csv", type=Path)
     parser.add_argument("--tensor-source-geometry-csv", type=Path)
     parser.add_argument("--attention-pipeline-calibration-csv", type=Path)
-    parser.add_argument("--norm-pipeline-calibration-csv", type=Path)
+    parser.add_argument("--global-completion-csv", type=Path)
+    parser.add_argument("--dma-elapsed-csv", type=Path)
+    parser.add_argument("--onchip-transfer-csv", type=Path)
     parser.add_argument("--structural-static-dma-csv", type=Path, required=True)
-    parser.add_argument("--runtime-overhead-csv", type=Path)
     parser.add_argument("--strided-dma-csv", type=Path)
     parser.add_argument("--strict-calibration", action="store_true")
     parser.add_argument(
@@ -172,31 +171,6 @@ def main(argv: list[str] | None = None) -> int:
         action="append",
         default=[],
         help="Saved aggregate-only GpSimd labels; repeated cases use their median.",
-    )
-    parser.add_argument(
-        "--disable-structured-completion-floor",
-        action="store_true",
-        help="Ablation: report final latency without the structured completion floor.",
-    )
-    parser.add_argument(
-        "--completion-exclude-free-dim",
-        type=int,
-        action="append",
-        default=[],
-        help="Leave-one-F-out completion audit; repeat for multiple free dimensions.",
-    )
-    parser.add_argument(
-        "--completion-exclude-partition",
-        type=int,
-        action="append",
-        default=[],
-        help="Leave-one-partition-out completion audit.",
-    )
-    parser.add_argument(
-        "--completion-exclude-calibration-key",
-        action="append",
-        default=[],
-        help="Leave-one-grammar-control-out completion audit.",
     )
     parser.add_argument("--output", type=Path, required=True)
     args = parser.parse_args(argv)
@@ -283,17 +257,20 @@ def main(argv: list[str] | None = None) -> int:
                     )
                     if args.attention_pipeline_calibration_csv else None
                 ),
-                norm_pipeline_calibration=(
-                    NormPipelineCalibration.from_csv(args.norm_pipeline_calibration_csv)
-                    if args.norm_pipeline_calibration_csv else None
+                dma_elapsed_calibration=(
+                    DmaElapsedCalibration.from_csv(args.dma_elapsed_csv)
+                    if args.dma_elapsed_csv else None
+                ),
+                onchip_transfer_calibration=(
+                    OnChipTransferCalibration.from_csv(args.onchip_transfer_csv)
+                    if args.onchip_transfer_csv else None
+                ),
+                global_completion_calibration=(
+                    GlobalCompletionCalibration.from_csv(args.global_completion_csv)
+                    if args.global_completion_csv else None
                 ),
                 structural_static_dma=StructuralStaticDmaCalibration.from_csv(
                     args.structural_static_dma_csv
-                ),
-                runtime_overhead_calibration=(
-                    RuntimeOverheadCalibration.from_csv(args.runtime_overhead_csv)
-                    if args.runtime_overhead_csv
-                    else None
                 ),
                 strided_dma_calibration=(
                     StridedDmaCalibration.from_csv(args.strided_dma_csv)
@@ -301,18 +278,6 @@ def main(argv: list[str] | None = None) -> int:
                     else None
                 ),
                 strict_calibration=args.strict_calibration,
-                enable_structured_completion_floor=(
-                    not args.disable_structured_completion_floor
-                ),
-                completion_excluded_free_dims=frozenset(
-                    args.completion_exclude_free_dim
-                ),
-                completion_excluded_partition_counts=frozenset(
-                    args.completion_exclude_partition
-                ),
-                completion_excluded_calibration_keys=frozenset(
-                    args.completion_exclude_calibration_key
-                ),
             )
         case_name = (
             f"{source['op']}__r{source['rows']}__c{source['cols']}__{source['dtype']}"
@@ -320,22 +285,6 @@ def main(argv: list[str] | None = None) -> int:
         trace = args.root / case_name / args.trace_filename
         events = [json.loads(line) for line in trace.read_text().splitlines() if line]
         tensor_dots = [event for event in events if event.get("op") == "dot"]
-        reduction_count = sum(event.get("op") == "reduce_sum" for event in events)
-        rsqrt_count = sum(event.get("api_op") == "rsqrt" for event in events)
-        broadcast_count = sum(event.get("api_op") == "broadcast_to" for event in events)
-        norm_structure = None
-        if not tensor_dots and rsqrt_count and broadcast_count >= 1:
-            if reduction_count >= 2 and broadcast_count >= 2:
-                norm_structure = "two_reduce_rsqrt_broadcast_affine"
-            elif reduction_count == 1:
-                norm_structure = "one_reduce_rsqrt_broadcast_multiply"
-        if norm_structure and args.norm_pipeline_calibration_csv:
-            marker = events[0]
-            marker["norm_pipeline_structure"] = norm_structure
-            marker["norm_pipeline_dtype"] = source["dtype"]
-            marker["norm_pipeline_partition_count"] = int(source["rows"])
-            marker["norm_pipeline_broadcast_instances"] = broadcast_count
-            marker["norm_pipeline_free_dim"] = int(source["cols"])
         attention_signature = (
             len(tensor_dots) == 2
             and sum(event.get("op") == "tensor_transpose" for event in events) >= 3
@@ -520,25 +469,27 @@ def main(argv: list[str] | None = None) -> int:
                 "whole_program_routing_covered": int(
                     components.get("whole_program_routing_covered", 0.0)
                 ),
-                "predicted_without_completion_floor_us": components[
-                    "without_structured_completion_floor"
-                ]
+                "predicted_makespan_only_us": components["makespan_only_ns"] / 1000.0,
+                "predicted_dma_queue_floor_us": components["dma_queue_floor_ns"]
                 / 1000.0,
-                "attention_pipeline_completion_us": components[
-                    "attention_pipeline_completion_ns"
-                ]
+                "dma_descriptor_count": int(components["dma_descriptor_count"]),
+                "dma_fragmented_descriptor_count": int(
+                    components["dma_fragmented_descriptor_count"]
+                ),
+                "dma_queue_floor_ood": int(components["dma_queue_floor_ood"]),
+                "onchip_transfer_count": int(components["onchip_transfer_count"]),
+                "onchip_transfer_ood": int(components["onchip_transfer_ood"]),
+                "predicted_global_completion_us": components["global_completion_ns"]
                 / 1000.0,
+                "global_completion_activated": int(
+                    components["global_completion_activated"]
+                ),
                 "attention_pipeline_covered": int(
                     components["attention_pipeline_covered"]
                 ),
                 "attention_pipeline_ood": int(
                     components["attention_pipeline_ood"]
                 ),
-                "norm_pipeline_completion_us": components[
-                    "norm_pipeline_completion_ns"
-                ] / 1000.0,
-                "norm_pipeline_covered": int(components["norm_pipeline_covered"]),
-                "norm_pipeline_ood": int(components["norm_pipeline_ood"]),
                 "compute_only_error_pct": (components["compute_only"] / 1000.0 - hardware_nc_us)
                 / hardware_nc_us
                 * 100,
@@ -550,9 +501,8 @@ def main(argv: list[str] | None = None) -> int:
                 )
                 / hardware_nc_us
                 * 100,
-                "without_completion_floor_error_pct": (
-                    components["without_structured_completion_floor"] / 1000.0
-                    - hardware_nc_us
+                "makespan_only_error_pct": (
+                    components["makespan_only_ns"] / 1000.0 - hardware_nc_us
                 )
                 / hardware_nc_us
                 * 100,
@@ -677,27 +627,6 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "tensor_static_matmul_instruction_count": static_matmul_count,
                 "tensor_instruction_calibration_match": tensor_instruction_match,
-                "completion_exact_count": int(
-                    components.get("completion_exact_count", 0)
-                ),
-                "completion_interpolated_count": int(
-                    components.get("completion_interpolated_count", 0)
-                ),
-                "completion_rule_fallback_count": int(
-                    components.get("completion_rule_fallback_count", 0)
-                ),
-                "completion_semantic_fallback_count": int(
-                    components.get("completion_semantic_fallback_count", 0)
-                ),
-                "completion_ood_count": int(
-                    components.get("completion_ood_count", 0)
-                ),
-                "completion_excluded_partition_count": int(
-                    components.get("completion_excluded_partition_count", 0)
-                ),
-                "completion_floor_activated": int(
-                    components.get("structured_completion_floor_activated", 0)
-                ),
                 **{
                     f"structural_static_dma_{match}_count": int(
                         components.get(

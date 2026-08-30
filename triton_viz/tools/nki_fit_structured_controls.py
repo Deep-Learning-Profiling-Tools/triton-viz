@@ -12,7 +12,6 @@ from pathlib import Path
 from triton_viz.tools.nki_cost_model import ComputeCalibration
 from triton_viz.tools.nki_region_ir import (
     compositional_features,
-    completion_calibration_dtype,
     match_structural_family,
     structural_calibration_key,
 )
@@ -30,7 +29,6 @@ FIELDS = [
     "effective_count",
     "instruction_count",
     "fixed_ns",
-    "nc_completion_ns",
     "case",
     "compiler_version",
     "opcode_fingerprint",
@@ -232,29 +230,6 @@ def _micro_dag(
     )
 
 
-def _load_completion_by_case(roots: list[Path]) -> dict[str, float]:
-    """Load NeuronCore completion labels from both control result schemas."""
-    result: dict[str, float] = {}
-    for root in roots:
-        for filename in ("control_results.csv", "operator_results.csv"):
-            results_path = root / filename
-            if not results_path.is_file():
-                continue
-            with results_path.open(encoding="utf-8", newline="") as file:
-                for row in csv.DictReader(file):
-                    completion = row.get("hardware_nc_p50_us")
-                    if not completion:
-                        continue
-                    case = row.get("case")
-                    if not case and filename == "operator_results.csv":
-                        required = ("op", "rows", "cols", "dtype")
-                        if all(row.get(field) for field in required):
-                            case = "{op}__r{rows}__c{cols}__{dtype}".format(**row)
-                    if case:
-                        result[case] = float(completion) * 1000.0
-    return result
-
-
 def collect(
     roots: list[Path],
     level_b: ComputeCalibration,
@@ -266,7 +241,6 @@ def collect(
 ) -> list[dict]:
     """Collect audited Level-A points; incomplete cases remain excluded explicitly."""
     rows: list[dict] = []
-    completion_by_case = _load_completion_by_case(roots)
     traces = sorted(trace for root in roots for trace in root.glob("*/trace.jsonl"))
     for trace in traces:
         case = trace.parent
@@ -389,7 +363,6 @@ def collect(
                         else 0,
                         "instruction_count": len(selected),
                         "fixed_ns": fixed_ns,
-                        "nc_completion_ns": completion_by_case.get(case.name, 0.0),
                         "case": case.name,
                         "compiler_version": compiler_version,
                         "opcode_fingerprint": _opcode_fingerprint(selected),
@@ -429,7 +402,6 @@ def collect_source_only(
     deconvolution model.  No compiler instruction, Flow, or target timing
     metadata participates in the allocation.
     """
-    completion_by_case = _load_completion_by_case(roots)
 
     rows: list[dict] = []
     for declared_trace in sorted(
@@ -460,49 +432,8 @@ def collect_source_only(
             if summary_path.is_file()
             else {}
         )
-        completion_ns = completion_by_case.get(case.name, 0.0)
-        if completion_ns > 0:
-            for region in regions.values():
-                if int(region.get("reduction_count") or 0) <= 0:
-                    continue
-                match = match_structural_family(region)
-                rows.append(
-                    {
-                        "family": match.family,
-                        "calibration_key": structural_calibration_key(region),
-                        "rule_id": match.rule_id,
-                        "rule_evidence": ";".join(match.evidence),
-                        "ood_reasons": ";".join(match.ood_reasons),
-                        "engine": "completion",
-                        "dtype": completion_calibration_dtype(region),
-                        "free_dim": int(
-                            region.get("logical_free_dim") or region["free_dim"]
-                        ),
-                        "effective_count": 0.0,
-                        "instruction_count": 0,
-                        "fixed_ns": 0.0,
-                        "nc_completion_ns": completion_ns,
-                        "case": case.name,
-                        "compiler_version": str(profile.get("compiler_version", "")),
-                        "opcode_fingerprint": "source-only",
-                        "mapping_status": "accepted_source_only_completion",
-                        "mapping_payload_coverage_pct": 0.0,
-                        "mapping_min_confidence": 0.0,
-                        "micro_dag_json": "",
-                        "micro_dag_mapped_payload_coverage_pct": 0.0,
-                        "compositional_features_json": json.dumps(
-                            compositional_features(region),
-                            separators=(",", ":"),
-                            sort_keys=True,
-                        ),
-                        "replicate_count": 1,
-                        "effective_count_variance": 0.0,
-                        "fixed_ns_variance": 0.0,
-                    }
-                )
         # Kernel-level engine ACTIVE cannot be assigned to multiple regions
-        # without a separately audited deconvolution model. Completion is a
-        # whole-kernel floor and was safely exported above.
+        # without a separately audited deconvolution model.
         if len(regions) != 1:
             continue
         if not profile:
@@ -546,7 +477,6 @@ def collect_source_only(
                     "effective_count": active_ns / instruction_ns,
                     "instruction_count": 0,
                     "fixed_ns": 0.0,
-                    "nc_completion_ns": 0.0,
                     "case": case.name,
                     "compiler_version": str(profile.get("compiler_version", "")),
                     "opcode_fingerprint": "source-only",
@@ -588,7 +518,6 @@ def collect_legacy(paths: list[Path]) -> list[dict]:
                     "effective_count": float(row["effective_instruction_count"]),
                     "instruction_count": int(float(row["hardware_instruction_count"])),
                     "fixed_ns": 0.0,
-                    "nc_completion_ns": 0.0,
                     "case": Path(row.get("case_dir", path.stem)).name,
                     "compiler_version": "legacy-mapped",
                     "opcode_fingerprint": "legacy",
@@ -629,7 +558,6 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
             )
         effective = [float(row["effective_count"]) for row in group]
         fixed = [float(row["fixed_ns"]) for row in group]
-        completion = [float(row.get("nc_completion_ns") or 0.0) for row in group]
         instructions = [int(row["instruction_count"]) for row in group]
         row = dict(group[0])
         row.update(
@@ -637,7 +565,6 @@ def aggregate_rows(rows: list[dict]) -> list[dict]:
                 "effective_count": statistics.median(effective),
                 "instruction_count": round(statistics.median(instructions)),
                 "fixed_ns": statistics.median(fixed),
-                "nc_completion_ns": statistics.median(completion),
                 "case": ";".join(sorted(str(item["case"]) for item in group)),
                 "replicate_count": len(group),
                 "effective_count_variance": (

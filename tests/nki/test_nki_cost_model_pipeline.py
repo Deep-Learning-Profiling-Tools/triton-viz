@@ -55,8 +55,8 @@ def test_pipeline_dry_run_keeps_controls_and_holdouts_separate(tmp_path, capsys)
     assert "tensor_dot_count_low_disjoint_v3.json" in output
     assert "tensor_attention_pipeline_disjoint_a_v1.json" in output
     assert "tensor_attention_pipeline_disjoint_b_v1.json" in output
-    assert "norm_pipeline_disjoint_a_v1" in output
-    assert "runtime_overhead.json" in output
+    assert "norm_pipeline_disjoint_a_v1" not in output
+    assert "runtime_overhead.json" not in output
     assert "--skip-existing" in output
     assert "--resume" in output
 
@@ -66,10 +66,10 @@ def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, caps
     assert main(["fit", "--root", str(root), "--dry-run"]) == 0
     fit_output = capsys.readouterr().out
     assert "nki_fit_strided_dma" in fit_output
-    assert "nki_fit_runtime_overhead" in fit_output
+    assert "nki_fit_runtime_overhead" not in fit_output
     assert "nki_fit_tensor_source_geometry" in fit_output
     assert "nki_fit_attention_pipeline" in fit_output
-    assert "nki_fit_norm_pipeline" in fit_output
+    assert "nki_fit_global_completion" in fit_output
     assert "--artifact-role control" in fit_output
     assert "--max-mean-wape 20" in fit_output
     assert "nki_fit_tensor_instruction" not in fit_output
@@ -102,12 +102,14 @@ def test_pipeline_fit_and_evaluate_dry_run_use_dtype_specific_dma(tmp_path, caps
     assert "--attention-repeat-reference-root" not in evaluate_output
     assert "--tensor-source-geometry-csv" in evaluate_output
     assert "--attention-pipeline-calibration-csv" in evaluate_output
-    assert "--norm-pipeline-calibration-csv" in evaluate_output
+    assert "--global-completion-csv" in evaluate_output
     assert "--static-opcode-payload-csv" not in evaluate_output
     assert "--static-instruction-duration-csv" not in evaluate_output
     assert "--static-dma-packet-calibration-json" not in evaluate_output
-    assert "--runtime-overhead-csv" in evaluate_output
-    assert "runtime_overhead_bf16.csv" in evaluate_output
+    assert "--runtime-overhead-csv" not in evaluate_output
+    assert "--dma-elapsed-csv" in evaluate_output
+    assert "--onchip-transfer-csv" in evaluate_output
+    assert "runtime_overhead_bf16.csv" not in evaluate_output
     assert evaluate_output.count("--strict-calibration") == 12
     assert "--dma-model" not in evaluate_output
     assert "dma-affine" not in evaluate_output

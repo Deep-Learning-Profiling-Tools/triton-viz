@@ -49,10 +49,12 @@ def test_attention_pipeline_strict_control_cv(tmp_path):
     assert output.is_file()
     assert '"target_postcompile_prediction_reads": false' in cv.read_text()
     calibration = AttentionPipelineCalibration.from_csv(output)
-    tensor_ns, completion_ns, match = calibration.predict_ns("float32", 104)
+    tensor_ns, match = calibration.predict_ns("float32", 104)
     assert tensor_ns == pytest.approx(2104.0)
-    assert completion_ns == pytest.approx(10208.0)
     assert match == "interpolated"
+    # The frozen surface is engine occupancy only: no per-structure completion
+    # column survives the removal of the category completion floors.
+    assert "nc_completion_ns" not in output.read_text().splitlines()[0]
 
 
 def test_attention_pipeline_fit_refuses_target(tmp_path):
