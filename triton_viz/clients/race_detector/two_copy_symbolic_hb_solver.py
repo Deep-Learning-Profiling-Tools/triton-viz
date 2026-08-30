@@ -285,7 +285,7 @@ class TwoCopySymbolicHBSolver:
     #                 counting axiom, which is a coherence-order axiom):
     #                 isolates the immediacy/single-winner machinery.
     ABLATIONS: tuple[str, ...] = ("hb", "coherence")
-    ENUM_MAX_CASES: ClassVar[int] = 240
+    ENUM_MAX_CASES: ClassVar[int] = 1024
     ENUM_CASE_TIMEOUT_MS: ClassVar[int] = 5000
     ENUM_TOTAL_BUDGET_S: ClassVar[float] = 60.0
     # Once one query has been decided by enumeration the launch's claim
@@ -306,6 +306,7 @@ class TwoCopySymbolicHBSolver:
         ablations: tuple[str, ...] = (),
         only_pairs: frozenset[tuple[int, int]] | None = None,
         enum_fallback_grid: tuple[int, int, int] | None = None,
+        launch_ceiling: bool = False,
     ) -> None:
         self.records = list(records)
         self.grid = self._normalize_grid(grid)
@@ -325,6 +326,12 @@ class TwoCopySymbolicHBSolver:
         self.enum_fallback_grid = enum_fallback_grid
         self.enum_used = False
         self._enum_deadline: float | None = None
+        # True when this solver's strongest possible claim is ALREADY
+        # launch-scoped (the pinned requery): then a long symbolic
+        # attempt can never buy more than the enumeration fallback
+        # delivers, so the short budget applies from the first query,
+        # not only after the first enumeration.
+        self.launch_ceiling = launch_ceiling
         # Requery restriction (sound by UNSAT monotonicity): when set,
         # only event pairs whose UNORDERED record-id pair is listed are
         # queried. The caller may use this ONLY when every omitted pair
@@ -600,11 +607,16 @@ class TwoCopySymbolicHBSolver:
         return False, None
 
     def _cap_symbolic_retry(self, solver: Solver) -> None:
-        """After the first enumeration, cap this symbolic attempt's
-        budget (see ENUM_RETRY_TIMEOUT_MS). Gated on the CROSS split
-        fitting ENUM_MAX_CASES: then every possible unknown in this
-        solver is enumerable, so the cap cannot lose a decision."""
-        if self.enum_used and self._enum_pid_cases(False) is not None:
+        """Cap this symbolic attempt's budget (ENUM_RETRY_TIMEOUT_MS)
+        once a long attempt can no longer buy a stronger claim: after
+        the first enumeration (the claim is degraded to launch scope),
+        or from the start when the solver's claim ceiling is launch
+        scope by construction (the pinned requery). Gated on the CROSS
+        split fitting ENUM_MAX_CASES: then every possible unknown in
+        this solver is enumerable, so the cap cannot lose a decision."""
+        if (self.enum_used or self.launch_ceiling) and self._enum_pid_cases(
+            False
+        ) is not None:
             solver.set(timeout=self.ENUM_RETRY_TIMEOUT_MS)
 
     def _pair_excluded(self, a: SymbolicMemoryEvent, b: SymbolicMemoryEvent) -> bool:

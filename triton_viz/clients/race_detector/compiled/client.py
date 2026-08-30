@@ -1140,6 +1140,7 @@ class CompiledRaceDetector(Client):
                 ablations=self.ablations,
                 only_pairs=pair_ids,
                 enum_fallback_grid=(lg3[0], lg3[1], lg3[2]),
+                launch_ceiling=True,
             ).find_races()
         except Exception:  # noqa: BLE001 — includes Z3 unknown (Unsupported…)
             return None
