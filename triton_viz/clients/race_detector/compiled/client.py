@@ -994,16 +994,21 @@ class CompiledRaceDetector(Client):
             t0_proved = False
         if t0_proved:
             return ("proved", "T0")
-        from z3 import set_param
+        from z3 import IntVal, set_param
 
         set_param("timeout", self.T1_TIMEOUT_MS)
         try:
             enc = encode_graph(graph, params, tensors)
+            lg3: tuple[int, int, int] | None = None
+            if lg is not None:
+                padded = tuple(int(d) for d in lg) + (1, 1, 1)
+                lg3 = (padded[0], padded[1], padded[2])
             solver = TwoCopySymbolicHBSolver(
                 enc.records,
                 grid=symbolic_grid(enc, lg),
                 arange_dict=enc.arange_dict,
                 ablations=self.ablations,
+                enum_fallback_grid=lg3,
             )
             found = solver.find_races()
         except UnsupportedTTIR as e:
@@ -1057,8 +1062,22 @@ class CompiledRaceDetector(Client):
             # race queries over an unsatisfiable base system would be a
             # vacuous proof (an await's termination premise no execution
             # can meet); one satisfiability query of the base constraints
-            # discharges Feasible# before "proved" is claimed.
-            feasible = solver.check_feasibility()
+            # discharges Feasible# before "proved" is claimed. When the
+            # enumeration fallback decided any query, the race-freedom
+            # half holds only at the launch extent, so Feasible# is
+            # asserted under the same grid pins and the claim degrades
+            # to the launch rung.
+            if solver.enum_used:
+                assert lg3 is not None  # enum fires only with a launch grid
+                grid = symbolic_grid(enc, lg)
+                pins = tuple(
+                    d == IntVal(lg3[i])
+                    for i, d in enumerate(grid)
+                    if not isinstance(d, int)
+                )
+                feasible = solver.check_feasibility(extra=pins)
+            else:
+                feasible = solver.check_feasibility()
         except UnsupportedSymbolicRaceQuery as e:
             return ("unsupported", f"solver: {e}")
         finally:
@@ -1070,6 +1089,8 @@ class CompiledRaceDetector(Client):
                 "execution, so the race-freedom certificate is withheld "
                 "(vacuous proof)",
             )
+        if solver.enum_used:
+            return ("proved-launch", [])
         return ("proved", "T1")
 
     def _launch_scoped_requery(
@@ -1118,6 +1139,7 @@ class CompiledRaceDetector(Client):
                 extra_assumptions=pins,
                 ablations=self.ablations,
                 only_pairs=pair_ids,
+                enum_fallback_grid=(lg3[0], lg3[1], lg3[2]),
             ).find_races()
         except Exception:  # noqa: BLE001 — includes Z3 unknown (Unsupported…)
             return None

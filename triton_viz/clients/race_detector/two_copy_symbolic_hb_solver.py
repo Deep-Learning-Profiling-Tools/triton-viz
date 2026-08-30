@@ -94,7 +94,7 @@ Limitations (current):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any
+from typing import Any, ClassVar
 
 from z3 import (
     And,
@@ -285,6 +285,16 @@ class TwoCopySymbolicHBSolver:
     #                 counting axiom, which is a coherence-order axiom):
     #                 isolates the immediacy/single-winner machinery.
     ABLATIONS: tuple[str, ...] = ("hb", "coherence")
+    ENUM_MAX_CASES: ClassVar[int] = 240
+    ENUM_CASE_TIMEOUT_MS: ClassVar[int] = 5000
+    ENUM_TOTAL_BUDGET_S: ClassVar[float] = 60.0
+    # Once one query has been decided by enumeration the launch's claim
+    # is already scoped to its extent, so a LATER query's long symbolic
+    # attempt can no longer buy a stronger claim: it gets this short
+    # budget instead and falls through to the (near-free) enumeration.
+    # Applied only when the cross case split fits ENUM_MAX_CASES, so a
+    # query whose split would overflow keeps its full symbolic budget.
+    ENUM_RETRY_TIMEOUT_MS: ClassVar[int] = 10_000
 
     def __init__(
         self,
@@ -295,11 +305,26 @@ class TwoCopySymbolicHBSolver:
         extra_assumptions: tuple[Any, ...] = (),
         ablations: tuple[str, ...] = (),
         only_pairs: frozenset[tuple[int, int]] | None = None,
+        enum_fallback_grid: tuple[int, int, int] | None = None,
     ) -> None:
         self.records = list(records)
         self.grid = self._normalize_grid(grid)
         self.arange_dict = dict(arange_dict or {})
         self.extra_assumptions = tuple(extra_assumptions)
+        # Enumeration fallback (the concretization ladder's last rung):
+        # when a race query returns Z3-unknown and a concrete launch
+        # grid was provided, the query is re-asked as an exhaustive
+        # case split over concrete pid assignments at that extent.
+        # All-UNSAT decides the query AT THE LAUNCH EXTENT ONLY (the
+        # caller must degrade the claim to launch scope: enum_used is
+        # set); a SAT case is a normal witness with in-extent pids.
+        # Refused (the original unknown propagates) when the case
+        # count exceeds ENUM_MAX_CASES, a case is itself undecided,
+        # or ENUM_TOTAL_BUDGET_S is exhausted: fail-closed to the
+        # pre-fallback behavior.
+        self.enum_fallback_grid = enum_fallback_grid
+        self.enum_used = False
+        self._enum_deadline: float | None = None
         # Requery restriction (sound by UNSAT monotonicity): when set,
         # only event pairs whose UNORDERED record-id pair is listed are
         # queried. The caller may use this ONLY when every omitted pair
@@ -443,20 +468,30 @@ class TwoCopySymbolicHBSolver:
             for b in events_b:
                 if self._pair_excluded(a, b):
                     continue
-                solver = self._new_solver()
-                solver.add(self._race_expr(a, b))
+
+                def _build(a=a, b=b) -> Solver:
+                    s = self._new_solver()
+                    s.add(self._race_expr(a, b))
+                    return s
+
+                solver = _build()
+                self._cap_symbolic_retry(solver)
                 t0 = _time.perf_counter()
-                is_sat = self._race_query_is_sat(solver, a, b)
+                model: ModelRef | None = None
+                try:
+                    is_sat = self._race_query_is_sat(solver, a, b)
+                    if is_sat:
+                        model = solver.model()
+                except UnsupportedSymbolicRaceQuery as exc:
+                    is_sat, model = self._enumerate_pair(_build, False, exc)
                 self.query_stats.append(("cross", _time.perf_counter() - t0, is_sat))
                 if is_sat:
-                    candidates.append(
-                        (a, b, solver.model(), self._CROSS_INSTANCE_REASON)
-                    )
+                    candidates.append((a, b, model, self._CROSS_INSTANCE_REASON))
 
         candidates.extend(self._find_intra_instance_candidates(events_a, events_b))
         return self._dedupe_reports(candidates)
 
-    def check_feasibility(self) -> bool:
+    def check_feasibility(self, extra: tuple[Any, ...] = ()) -> bool:
         """Feasible# of the race-freedom certificate (paper, launch
         verdicts): does the base system admit any execution at all?
 
@@ -483,6 +518,8 @@ class TwoCopySymbolicHBSolver:
         solver = self._base_solver()
         for p in self.launch_premises:
             solver.add(p)
+        for c in extra:
+            solver.add(as_bool(c))
         result = solver.check()
         if result == sat:
             return True
@@ -493,6 +530,82 @@ class TwoCopySymbolicHBSolver:
             "Z3 could not decide the feasibility query"
             + (f" ({detail})" if detail else "")
         )
+
+    def _enum_pid_cases(
+        self, same_instance: bool
+    ) -> list[tuple[tuple[int, int, int], tuple[int, int, int]]] | None:
+        """Concrete pid assignments covering the fallback grid, or None
+        when no fallback grid is set or the case count exceeds
+        ENUM_MAX_CASES."""
+        g = self.enum_fallback_grid
+        if g is None:
+            return None
+        n = g[0] * g[1] * g[2]
+        count = n if same_instance else n * (n - 1)
+        if count <= 0 or count > self.ENUM_MAX_CASES:
+            return None
+        pids = [
+            (x, y, z) for z in range(g[2]) for y in range(g[1]) for x in range(g[0])
+        ]
+        if same_instance:
+            return [(p, p) for p in pids]
+        return [(pa, pb) for pa in pids for pb in pids if pa != pb]
+
+    def _enumerate_pair(
+        self,
+        build_solver: Any,
+        same_instance: bool,
+        original: Exception,
+    ) -> tuple[bool, ModelRef | None]:
+        """Decide one Z3-undecided pair by exhaustive concrete-pid case
+        split at the fallback grid's extent.
+
+        ``build_solver`` rebuilds the pair's solver exactly as the
+        querying loop did (base system + pair constraints + race
+        expression); each case then pins both copies' pid triples to
+        concrete values, so the disjunction of the cases is exactly the
+        original query WITH the grid bounded to the fallback extent.
+        All cases UNSAT therefore decides the query AT THAT EXTENT (the
+        caller must scope the claim accordingly); any SAT case yields a
+        normal model whose witness pids are in-extent by construction.
+        ``original`` (the symbolic attempt's unknown) is re-raised
+        whenever the split cannot be completed: too many cases, a case
+        itself undecided, or the total budget exhausted — fail-closed
+        to the pre-fallback behavior.
+        """
+        import time as _time
+
+        cases = self._enum_pid_cases(same_instance)
+        if cases is None:
+            raise original
+        self.enum_used = True
+        if self._enum_deadline is None:
+            self._enum_deadline = _time.monotonic() + self.ENUM_TOTAL_BUDGET_S
+        deadline = self._enum_deadline
+        pid_a = [Int(f"pid_a_{i}") for i in range(3)]
+        pid_b = [Int(f"pid_b_{i}") for i in range(3)]
+        for pa, pb in cases:
+            if _time.monotonic() > deadline:
+                raise original
+            solver = build_solver()
+            for i in range(3):
+                solver.add(pid_a[i] == pa[i])
+                solver.add(pid_b[i] == pb[i])
+            solver.set(timeout=self.ENUM_CASE_TIMEOUT_MS)
+            result = solver.check()
+            if result == sat:
+                return True, solver.model()
+            if result != unsat:
+                raise original
+        return False, None
+
+    def _cap_symbolic_retry(self, solver: Solver) -> None:
+        """After the first enumeration, cap this symbolic attempt's
+        budget (see ENUM_RETRY_TIMEOUT_MS). Gated on the CROSS split
+        fitting ENUM_MAX_CASES: then every possible unknown in this
+        solver is enumerable, so the cap cannot lose a decision."""
+        if self.enum_used and self._enum_pid_cases(False) is not None:
+            solver.set(timeout=self.ENUM_RETRY_TIMEOUT_MS)
 
     def _pair_excluded(self, a: SymbolicMemoryEvent, b: SymbolicMemoryEvent) -> bool:
         """True when an ``only_pairs`` restriction is active and this
@@ -554,19 +667,31 @@ class TwoCopySymbolicHBSolver:
                 lane_cond = self._intra_pair_lane_condition(a, b)
                 if lane_cond is None:
                     continue
-                solver = self._base_solver()
-                for c in same_instance:
-                    solver.add(c)
-                solver.add(lane_cond)
-                solver.add(self._race_expr(a, b))
+
+                def _build(a=a, b=b, lane_cond=lane_cond) -> Solver:
+                    s = self._base_solver()
+                    for c in same_instance:
+                        s.add(c)
+                    s.add(lane_cond)
+                    s.add(self._race_expr(a, b))
+                    return s
+
+                solver = _build()
+                self._cap_symbolic_retry(solver)
                 t0 = _time.perf_counter()
-                is_sat = self._race_query_is_sat(solver, a, b)
+                model: ModelRef | None = None
+                try:
+                    is_sat = self._race_query_is_sat(solver, a, b)
+                    if is_sat:
+                        model = solver.model()
+                except UnsupportedSymbolicRaceQuery as exc:
+                    is_sat, model = self._enumerate_pair(_build, True, exc)
                 if hasattr(self, "query_stats"):
                     self.query_stats.append(
                         ("intra", _time.perf_counter() - t0, is_sat)
                     )
                 if is_sat:
-                    out.append((a, b, solver.model(), self._INTRA_INSTANCE_REASON))
+                    out.append((a, b, model, self._INTRA_INSTANCE_REASON))
         return out
 
     def _intra_pair_lane_condition(
