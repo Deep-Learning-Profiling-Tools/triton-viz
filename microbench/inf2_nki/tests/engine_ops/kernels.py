@@ -408,3 +408,55 @@ def work_units(*, p: int | None = None, f: int | None = None, m: int | None = No
             "input_stream_count": streams,
         }
     return {"logical_instructions": repeat}
+
+
+def onchip_copy_factory(*, p: int, f: int, repeat: int, mode: str,
+                        dtype_name: str = "float32"):
+    """Return one repeat-differenced PSUM->SBUF on-chip copy benchmark.
+
+    Each iteration fills a fresh PSUM tile from SBUF and copies it back into a
+    disjoint SBUF destination, so the per-iteration slope isolates the on-chip
+    transfer cost from the fixed initialization/store/runtime instructions that
+    every kernel pays once.  PSUM is always float32; only the SBUF source and
+    destination carry ``dtype_name``.
+    """
+    if mode != "psum_to_sbuf":
+        raise ValueError("unknown on-chip copy mode")
+    kernel_dtype_name = dtype_name
+
+    @nki.jit
+    def kernel(x):
+        kdtype = dtype_for_load(kernel_dtype_name, x.dtype)
+        out = nl.ndarray((repeat, p, f), dtype=kdtype, buffer=nl.shared_hbm)
+        outs = nl.ndarray((repeat, nl.par_dim(p), f), dtype=kdtype, buffer=nl.sbuf)
+        for i in nl.static_range(repeat):
+            # The PSUM tile is filled by a memset rather than an SBUF-sourced
+            # op, so the only SBUF traffic per iteration is the copy itself.
+            # A distinct PSUM destination and a per-iteration value keep the
+            # compiler from CSE-ing the iterations into a single copy.
+            acc = nl.ndarray((nl.par_dim(p), f), dtype=nl.float32, buffer=nl.psum)
+            acc[...] = nisa.memset(
+                (p, f), float(i + 1), dtype=nl.float32,
+                engine=nisa.engine.vector, name=f"psum_fill_{i}",
+            )
+            outs[i] = nisa.tensor_copy(
+                acc, dtype=kdtype, engine=nisa.engine.vector,
+                name=f"psum_to_sbuf_{i}",
+            )
+        for i in nl.static_range(repeat):
+            nl.store(out[i], outs[i])
+        return out
+
+    return kernel, [(p, f)], (1,)
+
+
+def onchip_copy_work_units(*, p: int, f: int, repeat: int, mode: str = "",
+                           dtype_name: str = "float32", **_: object) -> dict[str, int]:
+    # PSUM is float32 regardless of the SBUF dtype, so the transferred free
+    # width in bytes is keyed off the PSUM side.
+    return {
+        "partition_count": p,
+        "free_dimension_elements": f,
+        "free_bytes_per_partition": f * 4,
+        "logical_instructions": repeat,
+    }

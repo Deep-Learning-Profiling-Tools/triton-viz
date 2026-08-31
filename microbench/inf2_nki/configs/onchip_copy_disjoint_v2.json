@@ -1,0 +1,33 @@
+{
+  "benchmarks": [
+    {
+      "kind": "onchip_copy",
+      "matrix": {
+        "dtype": [
+          "float32",
+          "bfloat16"
+        ],
+        "f": [
+          48,
+          160,
+          320
+        ],
+        "repeat": [
+          1,
+          4,
+          8,
+          16
+        ]
+      },
+      "modes": [
+        "psum_to_sbuf"
+      ],
+      "name": "onchip_copy_disjoint",
+      "p": 64
+    }
+  ],
+  "description": "Repeat-differenced PSUM-to-SBUF controls; slope versus repeat removes initialization/store/runtime instructions.",
+  "iters": 50,
+  "suite": "inf2_nki_onchip_copy_disjoint_v2",
+  "warmup": 5
+}

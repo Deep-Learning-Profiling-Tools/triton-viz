@@ -35,6 +35,7 @@ TOOL_MODULES = {
     "triton_viz.tools.nki_fit_attention_pipeline": "triton_viz.tools.nki_fit_attention_pipeline",
     "triton_viz.tools.nki_fit_global_completion": "triton_viz.tools.nki_fit_global_completion",
     "triton_viz.tools.nki_fit_dma_elapsed": "triton_viz.tools.nki_fit_dma_elapsed",
+    "triton_viz.tools.nki_fit_onchip_copy": "triton_viz.tools.nki_fit_onchip_copy",
     "triton_viz.tools.nki_replay_operator_predictions": "triton_viz.tools.nki_replay_operator_predictions",
 }
 
@@ -155,6 +156,7 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
         "tensor_dot_count_low_disjoint_v3.json",
         "tensor_attention_pipeline_disjoint_a_v1.json",
         "tensor_attention_pipeline_disjoint_b_v1.json",
+        "onchip_copy_disjoint_v2.json",
     ]
     for config in configs:
         run_id = Path(config).stem
@@ -211,31 +213,57 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
                 10,
                 "--iters",
                 100,
+                # Control-only compiler audit: exports the Explorer parquet and
+                # per-instruction source mapping that nki_fit_structured_controls
+                # needs to accept a control row.  Runs after the measurement, so
+                # it cannot perturb the timings, and it is never enabled for the
+                # strict source-only stage2 controls or for any target artifact.
+                "--postcompile-audit",
                 "--resume",
             ),
             dry_run,
         )
-    for name, free_dims in (
+    # Whole-program controls for the global NC completion model and the
+    # whole-program engine-occupancy surface.  These run the same operator
+    # programs as the holdouts but on a *disjoint* free-dimension grid
+    # (192..3584 vs the holdouts' 128..4096), so no holdout column is ever
+    # seen during calibration.
+    whole_program_ops = [
+        "interleave",
+        "kl_divergence",
+        "layernorm",
+        "mul2",
+        "relu",
+        "rmsnorm",
+        "sigmoid",
+        "softmax",
+    ]
+    for name, dtype in (
+        ("source_sequence_disjoint_fp32_v1", "float32"),
+        ("source_sequence_disjoint_bf16_v1", "bfloat16"),
     ):
         _run(
             _module(
-                "triton_viz.tools.nki_region_control_experiments",
+                "triton_viz.tools.nki_operator_experiments",
                 "--output-dir",
                 root / "stage2_controls" / name,
-                "--kinds",
-                "two_pass_reduce_multiply",
-                "two_pass_reduce_affine",
-                "--free-dims",
-                *free_dims,
-                "--dtypes",
-                "float32",
-                "bfloat16",
-                "--chains",
-                1,
-                "--p",
+                "--tilebench-ops-dir",
+                tilebench,
+                "--ops",
+                *whole_program_ops,
+                "--rows",
                 1,
                 16,
                 128,
+                "--cols",
+                192,
+                384,
+                768,
+                1536,
+                3072,
+                3584,
+                "--dtype",
+                dtype,
                 "--warmup",
                 5,
                 "--iters",
@@ -405,6 +433,31 @@ def fit(root: Path, dry_run: bool) -> None:
         ),
         dry_run,
     )
+    onchip_controls = calibration / "onchip_copy_disjoint_v2.csv"
+    _run(
+        _module(
+            "microbench.inf2_nki.profile_parser.export_csv",
+            root / "microbench" / "onchip_copy_disjoint_v2",
+            "--output",
+            onchip_controls,
+        ),
+        dry_run,
+    )
+    _run(
+        _module(
+            "triton_viz.tools.nki_fit_onchip_copy",
+            onchip_controls,
+            "--artifact-role",
+            "control",
+            "--max-mean-wape",
+            20,
+            "--cv-output",
+            calibration / "onchip_transfer_strict_cv_v1.json",
+            "--output",
+            calibration / "onchip_transfer_frozen_v1.csv",
+        ),
+        dry_run,
+    )
     global_completion = calibration / "global_completion_frozen_v1.csv"
     global_completion_cv = calibration / "global_completion_strict_cv_v1.json"
     _run(
@@ -508,13 +561,17 @@ def fit(root: Path, dry_run: bool) -> None:
                 for control_root in control_roots
             ],
             *_microbench_source_manifests(root),
+            # The whole-program controls behind the global NC completion model
+            # and the whole-program engine-occupancy surface.  Earlier revisions
+            # cited four tensor_attention_disjoint_* runs here instead; those
+            # feed no production calibration and are not produced by collect,
+            # so the bundle claimed provenance it did not have while omitting
+            # the controls it actually depends on.
             *[
-                root / "stage2_controls" / name / "run_manifest.json"
+                root / "stage2_controls" / name / "experiment_manifest.json"
                 for name in (
-                    "tensor_attention_disjoint_v1",
-                    "tensor_attention_disjoint_v2",
-                    "tensor_attention_disjoint_v3",
-                    "tensor_attention_boundary_disjoint_v1",
+                    "source_sequence_disjoint_fp32_v1",
+                    "source_sequence_disjoint_bf16_v1",
                 )
             ],
         ]
@@ -541,6 +598,12 @@ def fit(root: Path, dry_run: bool) -> None:
                 global_completion_cv,
                 dma_elapsed,
                 calibration / "dma_elapsed_strict_cv_v1.json",
+                # The on-chip PSUM/SBUF copy surface is validated by evaluate,
+                # so the bundle has to declare it.  It was added to production
+                # and to the evaluate check but never here, which only stayed
+                # invisible because evaluate was not run end-to-end afterwards.
+                calibration / "onchip_transfer_frozen_v1.csv",
+                calibration / "onchip_transfer_strict_cv_v1.json",
                 compute,
                 structured,
                 calibration / "static_dma.csv",

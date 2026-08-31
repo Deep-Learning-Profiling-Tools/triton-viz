@@ -24,9 +24,27 @@ NKI kernel
 trace + parquet
   -> source-region-to-ISA mapping
   -> Level-B instruction cost + Level-A lowering expansion
+  -> control-routed whole-program engine occupancy (interpolated)
   -> dependency/resource scheduler
-  -> per-engine busy time and predicted latency
+  -> DMA descriptor-issue floor on DMA resource occupancy
+  -> per-engine busy time
+  -> one global completion term
+  -> predicted NC latency
 ```
+
+The completion term is deliberately singular. `simulate` ends in
+
+```python
+final_ns = max(makespan_only_ns, global_completion_ns)
+```
+
+where `global_completion_ns` is
+`max(engine_busy) + beta * (sum(engine_busy) - max(engine_busy)) + offset` with
+one global `(beta, offset)` pair. No per-structure completion table and no
+second overhead floor exists; both classes of mechanism were removed because a
+lookup of a same-class program's end-to-end time is not a model, and two
+estimators of one physical quantity combined with `max()` bias the result
+upward.
 
 ## Modules
 
@@ -61,6 +79,9 @@ trace + parquet
   independent whole-program controls.
 - `nki_fit_dma_elapsed.py`: fits the global DMA descriptor-issue interval that
   bounds queue-elapsed time for fragmented transfers.
+- `nki_fit_onchip_copy.py`: fits the on-chip PSUM/SBUF copy latency surface
+  (`startup_ns + ns_per_free_elem * free`) from the repeat-differenced
+  `onchip_copy_disjoint_v2` controls; gate is leave-one-width-out.
 - `nki_fit_attention_pipeline.py`: freezes the TensorE busy surface for
   QK-normalize-PV Dot pipelines from independent control grids.
 - `nki_fit_tensor_source_geometry.py`: freezes the TensorE busy surface keyed by
@@ -75,6 +96,15 @@ trace + parquet
   Tilebench kernel source for softmax/rmsnorm/layernorm validation.
 - `nki_workload_cases.py`: shared workload-case helpers (`load_cases`,
   `write_csv`, profiling helpers) used by the operator driver and tests.
+- `nki_program_context.py`: whole-program source-visible context features
+  (region count, DAG join count, masked-event count, total transfer bytes) that
+  key the whole-program engine-occupancy surface.
+- `nki_evaluate_whole_program_regime.py`: leave-one-entire-free-dimension-out CV
+  for that surface. It mirrors production exactly, including the linear
+  interpolation in transfer size, so the gate measures what the model does.
+- `nki_features.py`: `AccessPattern` and `ComputeRegion`, the shared geometry
+  views the DMA and compute paths are keyed on (partition count, free stride,
+  active access count, item bytes, layout family).
 
 ## Environment
 
@@ -223,11 +253,17 @@ workload:
 ```bash
 python -m triton_viz.tools.nki_cost_model <trace.jsonl> \
   --compute-calibration-csv /tmp/compute_calibration_v2.csv \
-  --structured-control-csv /tmp/structured_control_lowering.csv \
   --dma-calibration-csv <read-surface.csv> \
   --dma-write-calibration-csv <write-surface.csv> \
   --dma-transpose-calibration-csv <transpose-surface.csv>
 ```
+
+This CLI is a debugging entry point that exercises the analytical/DMA path
+only. The production prediction path is `nki_replay_operator_predictions`,
+which is what `nki_cost_model_pipeline evaluate` invokes and what the reported
+MAPE comes from; it additionally supplies the structured lowering, whole-program
+routing, TensorE, on-chip transfer, DMA descriptor-issue and global completion
+calibrations.
 
 Use `python -m <module> --help` to confirm exact arguments for the checked-out
 revision. Calibration CSVs carry compiler/profile provenance and should not be
@@ -236,11 +272,18 @@ mixed across incompatible compiler fingerprints without an explicit comparison.
 ## Tests
 
 ```bash
+# the whole NKI surface
+PYTHONPATH=$PWD pytest -q -m "" tests/nki/ tests/unit/test_nki_fit_structured_controls.py
+
+# or the cost-model core only
 PYTHONPATH=$PWD pytest -q -m "" \
   tests/nki/test_nki_trace_dump.py \
   tests/nki/test_nki_instruction_source_mapping.py \
   tests/nki/test_nki_region_ir.py \
   tests/nki/test_nki_cost_model.py \
+  tests/nki/test_nki_global_completion.py \
+  tests/nki/test_nki_dma_elapsed.py \
+  tests/nki/test_nki_onchip_transfer.py
 ```
 
 ## Known limitations

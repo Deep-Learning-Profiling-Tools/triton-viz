@@ -110,10 +110,13 @@ per partition, transpose layout, and multi-block behavior:
 for config in \
   dma_free_dimension.json \
   dma_partition_surface.json \
+  dma_read_bf16_surface.json \
   dma_partition_large_free.json \
   dma_write_partition_surface.json \
+  dma_write_bf16_steady.json \
   dma_transpose_surface.json \
-  dma_transpose_pipeline.json; do
+  dma_transpose_pipeline.json \
+  dma_strided_store_surface.json; do
   python -m microbench.inf2_nki.harness.run_microbench \
     --config "microbench/inf2_nki/configs/$config" \
     --profile-export parquet
@@ -193,6 +196,43 @@ python -m triton_viz.tools.nki_fit_structured_controls \
   --legacy-level-a-csv /tmp/softmax_lowering_calibration_v2.csv \
   --output /tmp/structured_control_lowering.csv
 ```
+
+## Controls behind each production calibration
+
+Every calibration the cost model uses in production is fitted on one of the
+control suites below, gated by a leave-one-out cross-validation, and frozen
+before any holdout is replayed. The fitters take `--artifact-role control` and
+refuse target artifacts mechanically.
+
+| production calibration | control suite(s) | fitter | CV protocol and result |
+|---|---|---|---|
+| DMA read/write bandwidth surfaces | `dma_partition_surface`, `dma_read_bf16_surface`, `dma_partition_large_free`, `dma_write_partition_surface`, `dma_write_bf16_steady`, `dma_transpose_surface` | `profile_parser` export | measured `(p, free_bytes)` grid; OOD reported per event |
+| DMA descriptor-issue interval | `dma_strided_store_surface` | `nki_fit_dma_elapsed` | leave-one-free-dimension-out, **14.498%** NC-p50 MAPE |
+| strided DMA busy | `dma_strided_store_surface` | `nki_fit_strided_dma` | access-geometry grid |
+| Static DMA busy | `static_dma_surface` | `nki_fit_structural_static_dma` | structural rule sequence, never operator names |
+| Level-B per-instruction compute | `engine_lowering_sweep` | `profile_parser.fit_compute_calibration` | instruction-audited engine sweeps |
+| Level-A structured lowering | `region_controls` (see below) | `nki_fit_structured_controls` | strict mapping coverage/confidence gates |
+| on-chip PSUM/SBUF copy latency | `onchip_copy_disjoint_v2` (repeat={1,4,8,16}) | `nki_fit_onchip_copy` | leave-one-width-out, **11.322%** WAPE |
+| whole-program engine occupancy | `source_sequence_disjoint_{fp32,bf16}_v1` | interpolated control surface | leave-one-free-dimension-out, Vector **3.85%** / Scalar **3.70%** WAPE |
+| global NC completion | `source_sequence_disjoint_{fp32,bf16}_v1` | `nki_fit_global_completion` | leave-one-free-dimension-out, **9.611%** NC-p50 MAPE |
+| TensorE source geometry | `tensor_geometry_disjoint_v{3,4,5}`, `tensor_dot_count_low_disjoint_v{1,2,3}` | `nki_fit_tensor_source_geometry` | leave-one-entire-suite-out, **6.34%** BF16 / **1.45%** FP32 WAPE |
+| attention TensorE busy | `tensor_attention_pipeline_disjoint_{a,b}_v1` | `nki_fit_attention_pipeline` | leave-one-entire-width-grid-out, **0.075%** WAPE |
+
+The `onchip_copy` suite differences `repeat={1,4,8,16}` so that setup and store
+cost cancel and only the incremental copy latency is fitted.  Each iteration
+fills a fresh PSUM tile with a `memset` (not an SBUF-sourced op) and copies it
+into a disjoint SBUF destination, so the only per-iteration SBUF traffic is the
+copy itself; sourcing the fill from SBUF instead doubles `sbuf_read_bytes` and
+changes what the slope measures. The strided-store
+control issues **two** stride-2 stores into one interleaved output, so its
+fragmented descriptor count is `2 * p * f`, not `p * f`; miscounting it changes
+the fitted issue interval by exactly a factor of two.
+
+`configs/runtime_overhead.json` is retained as a runnable microbenchmark but is
+no longer part of the cost-model pipeline: the parametric runtime-overhead floor
+it fed was removed because it estimated the same physical quantity as the global
+completion offset, and combining two estimators of one quantity with `max()`
+biased predictions upward.
 
 ## Tilebench norm holdouts
 

@@ -34,6 +34,8 @@ from microbench.inf2_nki.tests.bandwidth_dma.kernels import (
     work_bytes as dma_work_bytes,
 )
 from microbench.inf2_nki.tests.engine_ops.kernels import (
+    onchip_copy_factory,
+    onchip_copy_work_units,
     scalar_exp_factory,
     tensor_matmul_factory,
     tensor_matmul_small_factory,
@@ -162,6 +164,13 @@ BENCHMARKS = {
         "input": "default",
     },
     # Cross-resource interaction and SPMD mapping probes.
+    # On-chip PSUM->SBUF copy latency (repeat-differenced).
+    "onchip_copy": {
+        "folder": "engine_ops",
+        "factory": onchip_copy_factory,
+        "work": onchip_copy_work_units,
+        "input": "default",
+    },
     "tensor_dma_overlap": {
         "folder": "overlap",
         "factory": tensor_dma_overlap_factory,
