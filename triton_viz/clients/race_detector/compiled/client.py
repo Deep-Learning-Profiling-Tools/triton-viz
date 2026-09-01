@@ -729,7 +729,14 @@ class CompiledRaceDetector(Client):
                              kernels; the in-bounds and non-aliasing
                              premises are unconditional model boundaries
                              documented with the claim, not per-launch
-                             conditions)
+                             conditions). NOTE: the paper (sec:verdicts)
+                             calls this the "assumes termination"
+                             qualifier and, per Hao 2026-08-31, exposes
+                             NO "conditional" qualifier name -- the
+                             closed world is an unconditional boundary
+                             there, discharged by the bot_r escape or
+                             fail-stop, so this field maps to
+                             assumes-termination only.
           unsupported_kind   for abstain: the stable UnsupportedTTIR kind
                              ("indirect-address", "nested-loop", ...)
         """
