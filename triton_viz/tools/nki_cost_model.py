@@ -751,6 +751,18 @@ class GlobalCompletionCalibration:
 
     overlap_fraction: float
     completion_offset_ns: float
+    # How much the non-overlapped fraction grows with engine-load imbalance.
+    # When one engine dominates, the others hide under it; when several carry
+    # comparable work they contend for issue slots and serialise.  The measure
+    # is ``(sum(busy) - max(busy)) / max(busy)``, computed from the model's own
+    # predicted busy vector -- no structural, operator or grammar key.  Zero
+    # reduces this to the single-constant form.
+    overlap_imbalance_slope: float = 0.0
+    # Launch/drain cost that scales with how many SBUF partitions the program
+    # activates.  Partition setup and the cross-partition sync that drains a
+    # kernel are tree-structured, so the measured growth is logarithmic, not
+    # linear.  ``partitions`` is source-visible geometry, not a structural key.
+    completion_offset_ns_per_log2_partition: float = 0.0
 
     @classmethod
     def from_csv(cls, path: str | Path) -> "GlobalCompletionCalibration":
@@ -763,18 +775,43 @@ class GlobalCompletionCalibration:
         return cls(
             overlap_fraction=float(rows[0]["overlap_fraction"]),
             completion_offset_ns=float(rows[0]["completion_offset_ns"]),
+            overlap_imbalance_slope=float(
+                rows[0].get("overlap_imbalance_slope") or 0.0
+            ),
+            completion_offset_ns_per_log2_partition=float(
+                rows[0].get("completion_offset_ns_per_log2_partition") or 0.0
+            ),
         )
 
-    def predict_ns(self, engine_busy_ns: dict[str, float]) -> float:
+    def effective_overlap_fraction(self, critical: float, residue: float) -> float:
+        """Non-overlapped fraction of the residue, clamped to [0, 1]."""
+        if critical <= 0.0:
+            return self.overlap_fraction
+        raw = self.overlap_fraction + self.overlap_imbalance_slope * (
+            residue / critical
+        )
+        return min(1.0, max(0.0, raw))
+
+    def offset_ns(self, partitions: int = 1) -> float:
+        """Launch/drain cost for a program activating ``partitions`` lanes."""
+        return self.completion_offset_ns + (
+            self.completion_offset_ns_per_log2_partition
+            * math.log2(max(1, partitions))
+        )
+
+    def predict_ns(
+        self, engine_busy_ns: dict[str, float], partitions: int = 1
+    ) -> float:
         if not engine_busy_ns:
-            return max(0.0, self.completion_offset_ns)
+            return max(0.0, self.offset_ns(partitions))
         busy = list(engine_busy_ns.values())
         critical = max(busy)
         return max(
             0.0,
             critical
-            + self.overlap_fraction * (sum(busy) - critical)
-            + self.completion_offset_ns,
+            + self.effective_overlap_fraction(critical, sum(busy) - critical)
+            * (sum(busy) - critical)
+            + self.offset_ns(partitions),
         )
 
 
@@ -2747,8 +2784,13 @@ def simulate(
     # under leave-one-free-dimension-out CV.  There is no structural key, so
     # no program can be given a bespoke floor.
     makespan_only_ns = final_ns
+    completion_partitions = max(
+        [int(event.get("partition_count") or 0) for event in source_events] + [1]
+    )
     global_completion_ns = (
-        model.global_completion_calibration.predict_ns(engine_busy)
+        model.global_completion_calibration.predict_ns(
+            engine_busy, completion_partitions
+        )
         if model.global_completion_calibration is not None
         else 0.0
     )

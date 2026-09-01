@@ -33,6 +33,7 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import math
 import statistics
 from pathlib import Path
 
@@ -61,6 +62,7 @@ def _control_samples(root: Path) -> list[dict[str, float]]:
                 {
                     "case": case,
                     "free_dim": int(row["cols"]),
+                    "partitions": int(row["rows"]),
                     "max_busy_ns": max(busy),
                     "sum_busy_ns": sum(busy),
                     "completion_ns": float(row["hardware_nc_p50_us"]) * 1000.0,
@@ -69,24 +71,53 @@ def _control_samples(root: Path) -> list[dict[str, float]]:
     return rows
 
 
-def _base_ns(sample: dict[str, float], beta: float) -> float:
-    return sample["max_busy_ns"] + beta * (
-        sample["sum_busy_ns"] - sample["max_busy_ns"]
-    )
+def _base_ns(sample: dict[str, float], beta: float, slope: float = 0.0) -> float:
+    """Completion base with an imbalance-dependent non-overlap fraction.
+
+    ``slope`` scales the fraction with ``residue / critical``: when one engine
+    dominates the rest hide under it, when several carry comparable work they
+    contend.  It is computed from the busy vector alone, so this stays a single
+    global rule with no structural, operator or grammar key.
+    """
+    critical = sample["max_busy_ns"]
+    residue = sample["sum_busy_ns"] - critical
+    if critical > 0.0:
+        beta = min(1.0, max(0.0, beta + slope * (residue / critical)))
+    return critical + beta * residue
 
 
-def _offset_ns(samples: list[dict[str, float]], beta: float) -> float:
+def _offset_ns(
+    samples: list[dict[str, float]],
+    beta: float,
+    slope: float = 0.0,
+    per_log2_partition: float = 0.0,
+) -> float:
     """Least-absolute-deviation constant: the median measured non-busy time."""
     return statistics.median(
-        sample["completion_ns"] - _base_ns(sample, beta) for sample in samples
+        sample["completion_ns"]
+        - _base_ns(sample, beta, slope)
+        - per_log2_partition * math.log2(max(1, sample.get("partitions", 1)))
+        for sample in samples
     )
 
 
-def _mape_pct(samples: list[dict[str, float]], beta: float, offset: float) -> float:
+def _mape_pct(
+    samples: list[dict[str, float]],
+    beta: float,
+    offset: float,
+    slope: float = 0.0,
+    per_log2_partition: float = 0.0,
+) -> float:
     return (
         100.0
         * sum(
-            abs(_base_ns(sample, beta) + offset - sample["completion_ns"])
+            abs(
+                _base_ns(sample, beta, slope)
+                + offset
+                + per_log2_partition
+                * math.log2(max(1, sample.get("partitions", 1)))
+                - sample["completion_ns"]
+            )
             / sample["completion_ns"]
             for sample in samples
         )
@@ -94,11 +125,27 @@ def _mape_pct(samples: list[dict[str, float]], beta: float, offset: float) -> fl
     )
 
 
-def _fit_beta(samples: list[dict[str, float]], fixed_beta: float | None) -> float:
-    if fixed_beta is not None:
-        return fixed_beta
-    grid = [index / 100.0 for index in range(0, 101)]
-    return min(grid, key=lambda beta: _mape_pct(samples, beta, _offset_ns(samples, beta)))
+BETA_GRID = tuple(index / 100.0 for index in range(0, 101))
+SLOPE_GRID = tuple(index / 100.0 for index in range(-40, 101, 2))
+PARTITION_GRID = tuple(float(index) * 50.0 for index in range(0, 21))
+
+
+def _fit_beta(
+    samples: list[dict[str, float]],
+    fixed_beta: float | None,
+    fit_slope: bool = False,
+    fit_partition: bool = False,
+) -> tuple[float, float, float]:
+    """Return ``(beta, slope, per_log2_partition)`` minimising control MAPE."""
+    slopes = SLOPE_GRID if fit_slope else (0.0,)
+    partition = PARTITION_GRID if fit_partition else (0.0,)
+    betas = (fixed_beta,) if fixed_beta is not None else BETA_GRID
+    return min(
+        ((b, sl, pl) for b in betas for sl in slopes for pl in partition),
+        key=lambda t: _mape_pct(
+            samples, t[0], _offset_ns(samples, t[0], t[1], t[2]), t[1], t[2]
+        ),
+    )
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -114,6 +161,19 @@ def main(argv: list[str] | None = None) -> int:
         help="Pin the overlap fraction instead of fitting it; 1.0 gives the "
         "strict single-constant sum(engine_busy)+offset model.",
     )
+    parser.add_argument(
+        "--fit-imbalance-slope",
+        action="store_true",
+        help="Also fit how the non-overlap fraction grows with engine-load "
+        "imbalance (residue/critical). Off by default: the frozen production "
+        "surface is the single-constant form.",
+    )
+    parser.add_argument(
+        "--fit-partition-offset",
+        action="store_true",
+        help="Also fit a launch/drain term proportional to log2(activated SBUF "
+        "partitions), modelling tree-structured partition setup and drain.",
+    )
     args = parser.parse_args(argv)
     if args.artifact_role != "control":
         raise SystemExit("Refusing target artifacts in global completion fit")
@@ -128,20 +188,26 @@ def main(argv: list[str] | None = None) -> int:
     for held in sorted({sample["free_dim"] for sample in samples}):
         train = [sample for sample in samples if sample["free_dim"] != held]
         test = [sample for sample in samples if sample["free_dim"] == held]
-        beta = _fit_beta(train, args.fixed_beta)
-        offset = _offset_ns(train, beta)
+        beta, slope, plog = _fit_beta(
+            train, args.fixed_beta, args.fit_imbalance_slope, args.fit_partition_offset
+        )
+        offset = _offset_ns(train, beta, slope, plog)
         folds.append(
             {
                 "held_free_dim": held,
                 "samples": len(test),
                 "fold_beta": beta,
                 "fold_offset_ns": offset,
-                "nc_mape_pct": _mape_pct(test, beta, offset),
+                "fold_imbalance_slope": slope,
+                "fold_offset_ns_per_log2_partition": plog,
+                "nc_mape_pct": _mape_pct(test, beta, offset, slope, plog),
             }
         )
     mean_mape = sum(fold["nc_mape_pct"] for fold in folds) / len(folds)
-    beta = _fit_beta(samples, args.fixed_beta)
-    offset = _offset_ns(samples, beta)
+    beta, slope, plog = _fit_beta(
+        samples, args.fixed_beta, args.fit_imbalance_slope, args.fit_partition_offset
+    )
+    offset = _offset_ns(samples, beta, slope, plog)
     passed = mean_mape < args.max_mean_mape
     report = {
         "schema": "triton-viz.global-completion-control-cv-v1",
@@ -152,6 +218,8 @@ def main(argv: list[str] | None = None) -> int:
         "mean_nc_mape_pct": mean_mape,
         "frozen_beta": beta,
         "frozen_offset_ns": offset,
+        "frozen_imbalance_slope": slope,
+        "frozen_offset_ns_per_log2_partition": plog,
         "gate_pct": args.max_mean_mape,
         "passed": passed,
         "target_postcompile_prediction_reads": False,
@@ -163,6 +231,8 @@ def main(argv: list[str] | None = None) -> int:
             fieldnames=(
                 "overlap_fraction",
                 "completion_offset_ns",
+                "overlap_imbalance_slope",
+                "completion_offset_ns_per_log2_partition",
                 "control_samples",
                 "control_cv_mean_mape_pct",
             ),
@@ -172,6 +242,8 @@ def main(argv: list[str] | None = None) -> int:
             {
                 "overlap_fraction": beta,
                 "completion_offset_ns": offset,
+                "overlap_imbalance_slope": slope,
+                "completion_offset_ns_per_log2_partition": plog,
                 "control_samples": len(samples),
                 "control_cv_mean_mape_pct": mean_mape,
             }

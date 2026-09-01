@@ -211,3 +211,60 @@ def test_whole_program_routing_interpolates_and_flags_clamping():
     busy, match = predict(5000.0)
     assert match == "clamped"
     assert busy["vector"] == pytest.approx(30_000.0)
+
+
+# --- imbalance-dependent overlap fraction -------------------------------------
+
+
+def test_imbalance_slope_defaults_to_the_single_constant_form(tmp_path):
+    """A calibration CSV without the column must behave exactly as before."""
+    path = tmp_path / "gc.csv"
+    path.write_text("overlap_fraction,completion_offset_ns\n0.55,5867.825325\n")
+    calibration = GlobalCompletionCalibration.from_csv(path)
+    assert calibration.overlap_imbalance_slope == 0.0
+    busy = {"vector": 100.0, "scalar": 50.0, "dma": 25.0}
+    assert calibration.predict_ns(busy) == pytest.approx(
+        100.0 + 0.55 * 75.0 + 5867.825325
+    )
+
+
+def test_overlap_grows_with_engine_load_imbalance():
+    """More balanced engines contend, so a larger share of the residue is serial."""
+    calibration = GlobalCompletionCalibration(
+        overlap_fraction=0.30, completion_offset_ns=0.0, overlap_imbalance_slope=0.30
+    )
+    # One dominant engine: residue/critical is small, so overlap is good.
+    dominant = calibration.effective_overlap_fraction(1000.0, 100.0)
+    # Comparable engines: residue/critical is large, so overlap is poor.
+    balanced = calibration.effective_overlap_fraction(1000.0, 1000.0)
+    assert dominant == pytest.approx(0.33)
+    assert balanced == pytest.approx(0.60)
+    assert balanced > dominant
+
+
+def test_effective_overlap_fraction_is_clamped_to_a_physical_range():
+    calibration = GlobalCompletionCalibration(
+        overlap_fraction=0.30, completion_offset_ns=0.0, overlap_imbalance_slope=5.0
+    )
+    assert calibration.effective_overlap_fraction(1.0, 100.0) == 1.0
+    negative = GlobalCompletionCalibration(
+        overlap_fraction=0.30, completion_offset_ns=0.0, overlap_imbalance_slope=-5.0
+    )
+    assert negative.effective_overlap_fraction(1.0, 100.0) == 0.0
+    # A zero critical engine falls back to the base fraction rather than dividing.
+    assert calibration.effective_overlap_fraction(0.0, 10.0) == pytest.approx(0.30)
+
+
+def test_imbalance_slope_is_read_from_csv_and_used(tmp_path):
+    path = tmp_path / "gc.csv"
+    path.write_text(
+        "overlap_fraction,completion_offset_ns,overlap_imbalance_slope\n"
+        "0.31,5080.455899717484,0.3\n"
+    )
+    calibration = GlobalCompletionCalibration.from_csv(path)
+    assert calibration.overlap_imbalance_slope == pytest.approx(0.3)
+    busy = {"vector": 200.0, "scalar": 200.0}
+    # residue/critical = 1.0 -> beta = 0.31 + 0.3 = 0.61
+    assert calibration.predict_ns(busy) == pytest.approx(
+        200.0 + 0.61 * 200.0 + 5080.455899717484
+    )

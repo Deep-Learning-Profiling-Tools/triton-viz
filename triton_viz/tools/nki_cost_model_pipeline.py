@@ -467,6 +467,13 @@ def fit(root: Path, dry_run: bool) -> None:
             root / "stage2_controls" / "source_sequence_disjoint_bf16_v1",
             "--artifact-role",
             "control",
+            # The non-overlapped share of the residue grows with engine-load
+            # imbalance; fitting that slope beats the single-constant form on
+            # the same leave-one-free-dimension-out CV (8.16% vs 9.61%).
+            "--fit-imbalance-slope",
+            # Tree-structured partition setup/drain: launch cost grows with
+            # log2(activated SBUF partitions), a spec-visible geometry term.
+            "--fit-partition-offset",
             "--max-mean-mape",
             20,
             "--cv-output",
