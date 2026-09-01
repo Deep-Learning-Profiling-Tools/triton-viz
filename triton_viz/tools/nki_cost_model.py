@@ -760,8 +760,18 @@ class GlobalCompletionCalibration:
     overlap_imbalance_slope: float = 0.0
     # Launch/drain cost that scales with how many SBUF partitions the program
     # activates.  Partition setup and the cross-partition sync that drains a
-    # kernel are tree-structured, so the measured growth is logarithmic, not
+    # kernel are tree-structured, so any growth should be logarithmic, not
     # linear.  ``partitions`` is source-visible geometry, not a structural key.
+    #
+    # NOTE: this term fits to **0.0** on the full 19-kind control set.  It was
+    # first measured at 100 ns/step on a control set that was missing seven
+    # region-control kinds, which left ``reduction.two_or_more`` with 5
+    # calibration points instead of 53.  Once that Level-A conditioning defect
+    # is repaired the partition term is no longer supported: it had been
+    # absorbing the defect, not modelling partition setup.  The mechanism is
+    # retained because a different control mix could support it and the fitter
+    # decides per calibration, but on the current production controls it is
+    # inert and the model reduces to the imbalance form.
     completion_offset_ns_per_log2_partition: float = 0.0
 
     @classmethod

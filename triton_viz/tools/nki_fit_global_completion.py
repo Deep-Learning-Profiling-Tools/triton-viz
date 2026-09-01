@@ -172,7 +172,11 @@ def main(argv: list[str] | None = None) -> int:
         "--fit-partition-offset",
         action="store_true",
         help="Also fit a launch/drain term proportional to log2(activated SBUF "
-        "partitions), modelling tree-structured partition setup and drain.",
+        "partitions), modelling tree-structured partition setup and drain. "
+        "On the full 19-kind control set this fits to 0.0: it was only "
+        "supported while seven region-control kinds were missing, and was "
+        "absorbing that Level-A conditioning defect rather than modelling "
+        "partition setup.",
     )
     args = parser.parse_args(argv)
     if args.artifact_role != "control":

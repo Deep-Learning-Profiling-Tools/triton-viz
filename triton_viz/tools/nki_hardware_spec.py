@@ -83,6 +83,10 @@ TRANSFER_CLASS = {
     "global_completion.completion_offset_ns": "cycles",
     "global_completion.overlap_fraction": "dimensionless",
     "global_completion.overlap_imbalance_slope": "dimensionless",
+    # Fits to 0.0 on the full control set -- see the note on the field in
+    # nki_cost_model.py.  Classified for the case where a control mix does
+    # support it, but it is currently inert and must not be cited as evidence
+    # that the model already carries a spec-parameterised term.
     "global_completion.completion_offset_ns_per_log2_partition": "cycles",
     "global_completion.partition_term": "spec_term",
     "dma_elapsed.ns_per_descriptor": "cycles",
