@@ -130,6 +130,17 @@ without executing them. `evaluate` asserts the formal FP32 holdout produces
 exactly 35 rows and each FP32/BF16 full split produces exactly 120 rows before
 writing `report.json`.
 
+The region-control kinds `collect` requests are the 19 listed in
+`nki_cost_model_pipeline.py` (`control_kinds`, around line 179), swept over
+partitions {1,16,128} and free dims {128,512,1024,2048} in both dtypes, which
+yields 156 `controls_p1` points. Seven of them --
+`elementwise_mixed{,_masked}`, `reduce_broadcast`, `rsqrt_newton`,
+`two_reductions`, `two_reductions_rsqrt`, `two_reductions_rsqrt_masked` -- were
+absent from this list for a period even though the frozen experiment root
+contains their data. Dropping them does not remove any Level-A rule, but it
+leaves `reduction.two_or_more` with 5 calibration points instead of 16, and
+layernorm's holdout error rises from 2.57% to 4.31%. They are required.
+
 The main artifacts under the selected root are:
 
 - `calibration/microbench.csv`, `dma_read_bf16_surface.csv`, `dma_write_fp32.csv`,

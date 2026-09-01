@@ -176,6 +176,15 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
             dry_run,
         )
 
+    # Region-control kinds.  The last seven were collected for the frozen root
+    # by an invocation that predates this stage and were never requested here,
+    # which left three Level-A rules badly under-determined: a collect without
+    # them yields only 5 points for ``reduction.two_or_more``, 8 for
+    # ``reduction.broadcast`` and 20 for ``elementwise.mixed`` (against 16, 16
+    # and 32 in the frozen root).  Those are exactly the shapes layernorm and
+    # rmsnorm lower into, and layernorm regresses 2.57% -> 4.31% without them.
+    # Every rule still *appears* without these kinds, so this is a conditioning
+    # problem rather than a coverage hole -- but it is a real one.
     control_kinds = [
         "elementwise_maximum",
         "elementwise_maximum_masked",
@@ -189,6 +198,13 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
         "two_pass_reduce_affine",
         "two_pass_reduce_multiply",
         "softmax_reduction",
+        "elementwise_mixed",
+        "elementwise_mixed_masked",
+        "reduce_broadcast",
+        "rsqrt_newton",
+        "two_reductions",
+        "two_reductions_rsqrt",
+        "two_reductions_rsqrt_masked",
     ]
     for partition_count in (1, 16, 128):
         _run(
