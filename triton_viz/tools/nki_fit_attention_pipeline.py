@@ -3,6 +3,18 @@
 This fitter no longer emits an NC completion column: per-structure
 completion floors were removed from the cost model in favour of a single
 global completion term, so only the TensorE occupancy surface survives.
+
+Each control width is compiled several times and the **median** TensorE active
+time is taken.  Compilation is not deterministic: for an identical instruction
+stream (43 TensorE instructions in every case) about 21% of compilations land
+in an allocation that runs ~2.4x slower end to end -- measured as 5 slow
+results in 24 recompilations of one suite, with the same width flipping between
+modes across trials.  A single compilation is therefore not a reliable estimate
+of a width's cost, and with only 8 widths per suite and two CV folds this
+calibration has no averaging to absorb such an outlier: the probability that
+all 16 control points land in the fast mode is 0.79**16 = 2.3%.  The median
+over trials estimates the typical compilation, which is the quantity the cost
+model predicts.
 """
 
 from __future__ import annotations
@@ -10,22 +22,45 @@ from __future__ import annotations
 import argparse
 import csv
 import json
+import statistics
 from pathlib import Path
 
 
 def _load(path: Path) -> list[tuple[int, float]]:
-    rows = []
+    """Median TensorE active time per control width, across compilations."""
+    trials: dict[int, list[float]] = {}
     with path.open(encoding="utf-8", newline="") as file:
         for row in csv.DictReader(file):
             if row.get("status") != "ok" or row.get("spec.kind") != "tensor_attention_pipeline":
                 continue
-            rows.append(
-                (
-                    int(row["spec.dv"]),
-                    float(row["profile.tensor_engine_active_time"]) * 1e9,
-                )
+            trials.setdefault(int(row["spec.dv"]), []).append(
+                float(row["profile.tensor_engine_active_time"]) * 1e9
             )
-    return sorted(rows)
+    return sorted(
+        (width, statistics.median(values)) for width, values in trials.items()
+    )
+
+
+def trial_spread(path: Path) -> dict[int, dict[str, float]]:
+    """Per-width compilation spread, so bimodality stays visible in the report."""
+    trials: dict[int, list[float]] = {}
+    with path.open(encoding="utf-8", newline="") as file:
+        for row in csv.DictReader(file):
+            if row.get("status") != "ok" or row.get("spec.kind") != "tensor_attention_pipeline":
+                continue
+            trials.setdefault(int(row["spec.dv"]), []).append(
+                float(row["profile.tensor_engine_active_time"]) * 1e9
+            )
+    return {
+        width: {
+            "trials": len(values),
+            "median_ns": statistics.median(values),
+            "min_ns": min(values),
+            "max_ns": max(values),
+            "spread_ratio": (max(values) / min(values)) if min(values) else 0.0,
+        }
+        for width, values in sorted(trials.items())
+    }
 
 
 def _predict(rows: list[tuple[int, float]], width: int, column: int) -> float:
@@ -71,12 +106,18 @@ def main(argv: list[str] | None = None) -> int:
     passed = mean_tensor < args.max_tensor_wape
     report = {
         "schema": "triton-viz.attention-pipeline-control-cv-v1",
-        "protocol": "leave-one-independent-width-grid-out linear interpolation",
+        "protocol": "leave-one-independent-width-grid-out linear interpolation; "
+        "median TensorE active time over independent compilations per width",
         "engine_metric": "TensorE WAPE",
         "folds": folds,
         "mean_tensor_wape_pct": mean_tensor,
         "tensor_gate_pct": args.max_tensor_wape,
         "passed": passed,
+        # Kept in the report so the bimodal compilation behaviour stays visible
+        # instead of being hidden by the median.
+        "compilation_spread": {
+            path.name: trial_spread(path) for path in args.inputs
+        },
         "target_postcompile_prediction_reads": False,
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)

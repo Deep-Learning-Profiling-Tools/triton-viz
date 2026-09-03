@@ -1,17 +1,35 @@
 {
-  "suite": "inf2_tensor_attention_pipeline_disjoint_b_v1",
-  "description": "Second independent QK-normalize-PV grid for whole-suite CV; no holdout width is included.",
-  "warmup": 10,
-  "iters": 100,
   "benchmarks": [
     {
-      "name": "tensor_attention_pipeline_b",
       "kind": "tensor_attention_pipeline",
       "matrix": {
-        "dv": [56, 72, 96, 144, 192, 288, 384, 480],
-        "repeat": [1],
-        "dtype": ["float32"]
-      }
+        "dtype": [
+          "float32"
+        ],
+        "dv": [
+          56,
+          72,
+          96,
+          144,
+          192,
+          288,
+          384,
+          480
+        ],
+        "repeat": [
+          1
+        ],
+        "trial": [
+          1,
+          2,
+          3
+        ]
+      },
+      "name": "tensor_attention_pipeline_b"
     }
-  ]
+  ],
+  "description": "Second independent QK-normalize-PV grid for whole-suite CV; no holdout width is included. Each width is compiled three times; the fitter takes the median, because compilation is bimodal (~21% of compilations land in a ~2.4x slower allocation for an identical instruction stream).",
+  "iters": 100,
+  "suite": "inf2_tensor_attention_pipeline_disjoint_b_v1",
+  "warmup": 10
 }

@@ -1,17 +1,35 @@
 {
-  "suite": "inf2_tensor_attention_pipeline_disjoint_a_v1",
-  "description": "Independent QK-normalize-PV controls, widths disjoint from attention holdout and suite B.",
-  "warmup": 10,
-  "iters": 100,
   "benchmarks": [
     {
-      "name": "tensor_attention_pipeline_a",
       "kind": "tensor_attention_pipeline",
       "matrix": {
-        "dv": [48, 80, 112, 160, 224, 320, 448, 496],
-        "repeat": [1],
-        "dtype": ["float32"]
-      }
+        "dtype": [
+          "float32"
+        ],
+        "dv": [
+          48,
+          80,
+          112,
+          160,
+          224,
+          320,
+          448,
+          496
+        ],
+        "repeat": [
+          1
+        ],
+        "trial": [
+          1,
+          2,
+          3
+        ]
+      },
+      "name": "tensor_attention_pipeline_a"
     }
-  ]
+  ],
+  "description": "Independent QK-normalize-PV controls, widths disjoint from attention holdout and suite B. Each width is compiled three times; the fitter takes the median, because compilation is bimodal (~21% of compilations land in a ~2.4x slower allocation for an identical instruction stream).",
+  "iters": 100,
+  "suite": "inf2_tensor_attention_pipeline_disjoint_a_v1",
+  "warmup": 10
 }

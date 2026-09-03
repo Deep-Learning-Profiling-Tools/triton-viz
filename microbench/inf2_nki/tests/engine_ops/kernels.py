@@ -346,7 +346,7 @@ def tensor_matmul_transpose_pipeline_work_units(
 
 def tensor_attention_pipeline_factory(
     *, dv: int, repeat: int = 1, mode: str = "dependent",
-    dtype_name: str = "float32",
+    dtype_name: str = "float32", trial: int = 1,
 ):
     """Independent QK-normalize-PV control for attention resource behavior.
 
@@ -387,7 +387,7 @@ def tensor_attention_pipeline_factory(
 
 def tensor_attention_pipeline_work_units(
     *, dv: int, repeat: int = 1, mode: str = "dependent",
-    dtype_name: str = "float32",
+    dtype_name: str = "float32", trial: int = 1,
 ) -> dict[str, int]:
     return {
         "matmul_flops": 2 * 128 * 128 * (128 + dv),

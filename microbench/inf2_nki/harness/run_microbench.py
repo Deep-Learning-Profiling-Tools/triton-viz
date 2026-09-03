@@ -413,6 +413,11 @@ def _bench_id(spec: dict[str, Any]) -> str:
         "ring_length",
         "stride",
         "repeat",
+        # Independent repeats of the *same* spec. Compilation is not
+        # deterministic: the same attention control compiles into a ~2.4x
+        # slower allocation about 21% of the time, so a single compilation is
+        # not a reliable estimate of the shape's cost.
+        "trial",
         "programs",
         "placement",
         "dge_mode",

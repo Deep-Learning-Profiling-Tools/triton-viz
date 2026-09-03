@@ -70,3 +70,62 @@ def test_attention_pipeline_fit_refuses_target(tmp_path):
                 str(tmp_path / "cv.json"),
             ]
         )
+
+
+# --- median over independent compilations -------------------------------------
+
+HEADER = (
+    "row_type,status,spec.kind,spec.dtype,spec.dv,spec.trial,"
+    "profile.tensor_engine_active_time\n"
+)
+
+
+def _control_csv(path, points):
+    """points: {dv: [tensor_ns per trial]}"""
+    lines = [HEADER]
+    for width, values in sorted(points.items()):
+        for index, value in enumerate(values, start=1):
+            lines.append(
+                f"benchmark,ok,tensor_attention_pipeline,float32,{width},"
+                f"{index},{value / 1e9!r}\n"
+            )
+    path.write_text("".join(lines))
+    return path
+
+
+def test_median_over_trials_rejects_a_single_slow_compilation(tmp_path):
+    """One bimodal outlier per width must not move the frozen surface."""
+    from triton_viz.tools.nki_fit_attention_pipeline import _load
+
+    clean = {48: [2600.0, 2610.0, 2605.0], 96: [2700.0, 2705.0, 2702.0]}
+    # dv=48 trial 2 lands in the ~2.4x slow allocation.
+    dirty = {48: [2600.0, 6240.0, 2605.0], 96: [2700.0, 2705.0, 2702.0]}
+    assert _load(_control_csv(tmp_path / "a.csv", clean)) == [
+        (48, 2605.0),
+        (96, 2702.0),
+    ]
+    assert _load(_control_csv(tmp_path / "b.csv", dirty)) == [
+        (48, 2605.0),
+        (96, 2702.0),
+    ]
+
+
+def test_a_single_trial_still_works(tmp_path):
+    """Backward compatible with a control set collected before trials existed."""
+    from triton_viz.tools.nki_fit_attention_pipeline import _load
+
+    path = _control_csv(tmp_path / "one.csv", {48: [2600.0], 96: [2700.0]})
+    assert _load(path) == [(48, 2600.0), (96, 2700.0)]
+
+
+def test_trial_spread_keeps_the_bimodality_visible(tmp_path):
+    """The median must not hide that a width compiled bimodally."""
+    from triton_viz.tools.nki_fit_attention_pipeline import trial_spread
+
+    path = _control_csv(tmp_path / "s.csv", {48: [2600.0, 6240.0, 2605.0]})
+    spread = trial_spread(path)[48]
+    assert spread["trials"] == 3
+    assert spread["median_ns"] == pytest.approx(2605.0)
+    assert spread["min_ns"] == pytest.approx(2600.0)
+    assert spread["max_ns"] == pytest.approx(6240.0)
+    assert spread["spread_ratio"] == pytest.approx(2.4, abs=0.05)
