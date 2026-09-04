@@ -245,13 +245,12 @@ def run_corpus(
     # One dataset per level: the L0 files keep their names (the paper's
     # numbers), deeper levels get a suffix so a rerun can never overwrite
     # the other level's rows unnoticed.
-    # ``out_suffix`` names a subset run (a change-surface slice) so it can
-    # never overwrite a recorded dataset of the same level.
-    suffix = (
-        out_suffix
-        if out_suffix is not None
-        else ("" if ladder_level == LadderLevel.L0 else f"_{ladder_level.name}")
-    )
+    # ``out_suffix`` names a subset run (a change-surface slice); it is
+    # APPENDED to the level suffix, so no subset run can overwrite a recorded
+    # dataset of another level, and no run at all can overwrite the paper's
+    # L0 file unless it is a full L0 run.
+    level_suffix = "" if ladder_level == LadderLevel.L0 else f"_{ladder_level.name}"
+    suffix = level_suffix + (out_suffix or "")
     out_path = RESULTS_DIR / f"{corpus_name}{suffix}.jsonl"
 
     header = results_header(corpus_name, seed, corpus.provenance, ladder_level)
@@ -292,9 +291,9 @@ def main() -> None:
     )
     ap.add_argument(
         "--out-suffix",
-        help="output name suffix before .jsonl (default: '' at L0, '.L<n>' "
-        "above; a subset run should name itself so no recorded dataset is "
-        "overwritten)",
+        help="extra output-name suffix, appended after the level suffix "
+        "(<corpus>[_L<n>]<suffix>.jsonl): a subset run names itself so no "
+        "recorded dataset is overwritten",
     )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--timeout", type=int, default=PER_SPEC_TIMEOUT_S)

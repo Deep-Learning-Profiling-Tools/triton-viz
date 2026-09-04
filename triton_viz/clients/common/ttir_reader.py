@@ -1051,7 +1051,14 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
             # The first loop keeps the historical "%loop" name; further
             # loops (multipath only) need distinct names for their
             # LoopVar / LoopInfo identity.
-            loop_ssa = res or ("%loop" if loops_opened == 0 else f"%loop@{line_no}")
+            if loops_opened == 0:
+                loop_ssa = res or "%loop"  # the single-path identity, unchanged
+            else:
+                # MLIR restarts value numbering per region, so two loops WITH
+                # results in sibling regions (then/else arms) print the same
+                # name; the line number keeps every later loop distinct
+                # (multipath only: single-path refuses a second loop).
+                loop_ssa = f"{res or '%loop'}@{line_no}"
             frame = _ForFrame(
                 ssa=loop_ssa,
                 ind=ind,

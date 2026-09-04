@@ -336,12 +336,13 @@ def test_nested_loop_iter_args_belong_to_their_loop():
         "}",
     )
     g = parse_ttir(text, multipath=True)
-    assert [lp.loop_ssa for lp in g.loops] == ["%po", "%pi"]
+    outer, inner = g.loops
+    assert outer.loop_ssa == "%po" and inner.loop_ssa.startswith("%pi@")
     outer_arg, inner_arg = g.iter_args[0], g.iter_args[1]
-    assert outer_arg.loop_ssa == "%po" and outer_arg.delta == Const(8)
-    assert inner_arg.loop_ssa == "%pi" and inner_arg.delta == Const(1)
+    assert outer_arg.loop_ssa == outer.loop_ssa and outer_arg.delta == Const(8)
+    assert inner_arg.loop_ssa == inner.loop_ssa and inner_arg.delta == Const(1)
     (store,) = g.accesses
-    assert store.loops == ("%po", "%pi")
+    assert store.loops == (outer.loop_ssa, inner.loop_ssa)
 
 
 def test_reduce_combine_blocks_are_not_the_cf_graph():
@@ -507,3 +508,71 @@ def test_kept_conjunct_follows_expand_dims():
     assert store.mask_dropped
     assert store.mask == Cmp("slt", Arange("%offs", 0, 8, 0), Param("C"))
     assert store.offset == Bin("+", Const(0), Arange("%offs", 0, 8, 0))
+
+
+def _sibling_result_loops():
+    """Two loops WITH results in the two arms of one scf.if. MLIR restarts
+    value numbering per region, so both print as ``%acc``."""
+    return _module(
+        "%out_ptr: !tt.ptr<i32>, %n: i32, %m: i32",
+        "%c0 = arith.constant 0 : i32",
+        "%c1 = arith.constant 1 : i32",
+        "%c4 = arith.constant 4 : i32",
+        "%pid = tt.get_program_id x : i32",
+        "%g = arith.cmpi eq, %pid, %c0 : i32",
+        "scf.if %g {",
+        "%acc = scf.for %i = %c0 to %n step %c1 iter_args(%a = %c0) -> (i32)  : i32 {",
+        "%p = tt.addptr %out_ptr, %i : !tt.ptr<i32>, i32",
+        "tt.store %p, %c1 : !tt.ptr<i32>",
+        "scf.yield %a : i32",
+        "}",
+        "} else {",
+        "%acc = scf.for %i = %c0 to %m step %c1 iter_args(%a = %c0) -> (i32)  : i32 {",
+        "%o = arith.addi %i, %c4 : i32",
+        "%o2 = arith.addi %o, %pid : i32",
+        "%q = tt.addptr %out_ptr, %o2 : !tt.ptr<i32>, i32",
+        "tt.store %q, %c1 : !tt.ptr<i32>",
+        "scf.yield %a : i32",
+        "}",
+        "}",
+    )
+
+
+def test_result_loops_in_sibling_regions_stay_distinct():
+    g = parse_ttir(_sibling_result_loops(), multipath=True)
+    a, b = g.loops
+    assert a.loop_ssa == "%acc" and b.loop_ssa.startswith("%acc@")
+    assert a.upper == Param("n") and b.upper == Param("m")
+    then_store, else_store = g.accesses
+    assert then_store.loops == (a.loop_ssa,)
+    assert else_store.loops == (b.loop_ssa,)
+
+
+def test_mixed_pid_and_loaded_guard_widens_both_arms():
+    """``if pid >= T and y == -1: return``: the false edge (not (a and d))
+    does not imply (not a), so the kept conjunct of the mixed ``and`` must
+    NOT become an edge condition; both targets stay reachable and
+    widened."""
+    text = _module(
+        "%out_ptr: !tt.ptr<i32>, %idx_ptr: !tt.ptr<i32>, %T: i32",
+        "%c1 = arith.constant 1 : i32",
+        "%cm1 = arith.constant -1 : i32",
+        "%pid = tt.get_program_id x : i32",
+        "%a = arith.cmpi sge, %pid, %T : i32",
+        "%ip = tt.addptr %idx_ptr, %pid : !tt.ptr<i32>, i32",
+        "%y = tt.load %ip : !tt.ptr<i32>",
+        "%d = arith.cmpi eq, %y, %cm1 : i32",
+        "%c = arith.andi %a, %d : i1",
+        "cf.cond_br %c, ^bb1, ^bb2",
+        "^bb1:  // pred: ^bb0",
+        "tt.store %out_ptr, %c1 : !tt.ptr<i32>",
+        "tt.return",
+        "^bb2:  // pred: ^bb0",
+        "%op = tt.addptr %out_ptr, %pid : !tt.ptr<i32>, i32",
+        "tt.store %op, %c1 : !tt.ptr<i32>",
+        "tt.return",
+    )
+    g = parse_ttir(text, multipath=True)
+    _load, s1, s2 = g.accesses
+    assert s1.guarded and s1.path is None
+    assert s2.guarded and s2.path is None

@@ -1220,7 +1220,9 @@ class CompiledRaceDetector(Client):
         from z3 import set_param
 
         try:
-            t0_groups = encode_graph_t0(graph)
+            t0_groups = encode_graph_t0(
+                graph, multipath=self.ladder_level >= 2 and graph.multipath
+            )
         except Exception:  # noqa: BLE001
             return False
         set_param("timeout", self.T0_TIMEOUT_MS)

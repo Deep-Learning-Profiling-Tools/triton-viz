@@ -62,7 +62,7 @@ def _t1(graph, params, tensors, grid=(4, 1, 1)):
 
 def _t0(graph):
     reports = []
-    for _name, enc in encode_graph_t0(graph):
+    for _name, enc in encode_graph_t0(graph, multipath=True):
         solver = TwoCopySymbolicHBSolver(
             enc.records,
             grid=symbolic_grid(enc, None, t0=True),
@@ -553,3 +553,58 @@ def test_disjoint_pid_loops_prove_instead_of_vacuous():
     # differ only in length, so pid 1 and pid 2 both write out[96]
     reports = solver.find_races()
     assert reports and all(min(_pids(r)) >= 1 for r in reports)
+
+
+def test_sibling_result_loops_report_the_real_overlap():
+    """The reader keys loops by name; two result loops in sibling arms print
+    the same name, and a shared key bound both stores to the else loop's
+    range (a false proof: pid 0's then-loop shrank to one iteration)."""
+    from .test_ttir_reader_multipath import _sibling_result_loops
+
+    g = _mp(_sibling_result_loops())
+    tensors = {"out_ptr": _t(0x200000, numel=64)}
+    _, reports = _t1(g, {"n": 8, "m": 1}, tensors)
+    # pid 0 writes out[0..8); pid k >= 1 writes out[4 + k]: a WAW on 5..7
+    assert reports and all(0 in _pids(r) for r in reports)
+    _, reports = _t1(g, {"n": 4, "m": 1}, tensors)
+    assert reports == []
+
+
+def test_zero_trip_inner_loop_keeps_the_outer_body_access():
+    """An access in the outer body after an inner loop whose trip count is
+    zero for this launch: only the inner access is skipped."""
+    text = _module(
+        "%out_ptr: !tt.ptr<i32>, %n: i32, %m: i32",
+        "%c0 = arith.constant 0 : i32",
+        "%c1 = arith.constant 1 : i32",
+        "%c8 = arith.constant 8 : i32",
+        "%pid = tt.get_program_id x : i32",
+        "scf.for %i = %c0 to %n step %c1  : i32 {",
+        "scf.for %j = %c0 to %m step %c1  : i32 {",
+        "%p = tt.addptr %out_ptr, %j : !tt.ptr<i32>, i32",
+        "tt.store %p, %c1 : !tt.ptr<i32>",
+        "}",
+        "%o = arith.muli %pid, %c8 : i32",
+        "%o2 = arith.addi %o, %i : i32",
+        "%q = tt.addptr %out_ptr, %o2 : !tt.ptr<i32>, i32",
+        "tt.store %q, %c1 : !tt.ptr<i32>",
+        "}",
+    )
+    g = _mp(text)
+    enc = encode_graph(
+        g, {"n": 2, "m": 0}, {"out_ptr": _t(0x200000, numel=64)}, multipath=True
+    )
+    assert [r.debug_name.split(":")[-2] for r in enc.records] == ["ttir15"]
+    enc2 = encode_graph(
+        g, {"n": 2, "m": 1}, {"out_ptr": _t(0x200000, numel=64)}, multipath=True
+    )
+    assert len(enc2.records) == 2
+
+
+def test_t0_encoding_of_two_loops_binds_both_iterators():
+    g = _mp(_read("nested_loops"))
+    groups = encode_graph_t0(g, multipath=True)
+    ((name, enc),) = [(n, e) for n, e in groups if n == "out_ptr"]
+    (rec,) = enc.records
+    assert len(rec.copy_local_vars) == 2
+    assert rec.premises == () and len(rec.local_constraints) == 2

@@ -978,7 +978,9 @@ def t0_linearity_gate(graph: AccessGraph) -> bool:
     return all(_linear_at_t0(t, graph) for t in terms)
 
 
-def encode_graph_t0(graph: AccessGraph) -> list[tuple[str, GlobalEncoding]]:
+def encode_graph_t0(
+    graph: AccessGraph, *, multipath: bool = False
+) -> list[tuple[str, GlobalEncoding]]:
     """The T0 encoding: scalar params symbolic, one encoding PER TENSOR.
 
     T0 has no launch, hence no base addresses or extents. The non-aliasing
@@ -1001,7 +1003,7 @@ def encode_graph_t0(graph: AccessGraph) -> list[tuple[str, GlobalEncoding]]:
                 kind="cas-synchronization",
             )
 
-    env = _RaceEnv(graph, {}, symbolic_params=True)
+    env = _RaceEnv(graph, {}, symbolic_params=True, multipath=multipath)
     await_prems, await_obs = _await_premises(graph, env)
     # NO pre-exit representative at T0 — sound for a verified reason: T0
     # has no launch, hence no initial values, so the closed-world escape
