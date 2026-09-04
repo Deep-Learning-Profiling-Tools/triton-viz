@@ -459,3 +459,43 @@ def test_client_differential_is_unavailable_for_multipath_graphs():
     det.finalize()
     assert det.last_global_status == "ok"
     assert det.last_differential is None
+
+
+def test_mixed_and_mask_row_proves_instead_of_phantom_overlap():
+    """The same idiom through the encoder: with the bounds conjunct kept,
+    rows of C elements per pid never overlap, so the widened access yields
+    no report at all (the phantom WAW that single-path widening produced
+    was confirmed only by the interpreter's `and`-truthiness artifact)."""
+    text = _module(
+        "%out_ptr: !tt.ptr<f32>, %tgt_ptr: !tt.ptr<i32>, %C: i32",
+        "%c1 = arith.constant 1.0 : f32",
+        "%cm1 = arith.constant -1 : i32",
+        "%pid = tt.get_program_id x : i32",
+        "%offs = tt.make_range {end = 256 : i32, start = 0 : i32} : tensor<256xi32>",
+        "%Cs = tt.splat %C : i32 -> tensor<256xi32>",
+        "%bounds = arith.cmpi slt, %offs, %Cs : tensor<256xi32>",
+        "%tp = tt.addptr %tgt_ptr, %pid : !tt.ptr<i32>, i32",
+        "%tgt = tt.load %tp : !tt.ptr<i32>",
+        "%g = arith.cmpi ne, %tgt, %cm1 : i32",
+        "%gs = tt.splat %g : i1 -> tensor<256xi1>",
+        "%m = arith.andi %bounds, %gs : tensor<256xi1>",
+        "%row = arith.muli %pid, %C : i32",
+        "%rs = tt.splat %row : i32 -> tensor<256xi32>",
+        "%o = arith.addi %rs, %offs : tensor<256xi32>",
+        "%ps = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>",
+        "%p = tt.addptr %ps, %o : tensor<256x!tt.ptr<f32>>, tensor<256xi32>",
+        "%vs = tt.splat %c1 : f32 -> tensor<256xf32>",
+        "tt.store %p, %vs, %m : tensor<256x!tt.ptr<f32>>",
+    )
+    tensors = {
+        "out_ptr": _t(0x200000, numel=1 << 14),
+        "tgt_ptr": _t(0x300000, numel=64),
+    }
+    enc0 = encode_graph(parse_ttir(text), {"C": 64}, tensors)
+    s0 = TwoCopySymbolicHBSolver(
+        enc0.records, grid=symbolic_grid(enc0, (4, 1, 1)), arange_dict=enc0.arange_dict
+    )
+    assert s0.find_races()  # single-path: the dropped mask fabricates the overlap
+    enc, reports = _t1(_mp(text), {"C": 64}, tensors)
+    assert 1 in enc.uncertain_event_ids  # still widened
+    assert reports == []

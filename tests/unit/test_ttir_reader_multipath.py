@@ -23,6 +23,7 @@ from pathlib import Path
 import pytest
 
 from triton_viz.clients.common.ttir_reader import (
+    Arange,
     Bin,
     BoolBin,
     Cmp,
@@ -411,3 +412,39 @@ def test_attribute_dict_region_close_pops_the_loop_frame():
             Cmp("eq", Pid(0), Const(0))
         )
         assert g.accesses[3].loops == () and g.accesses[3].path is None
+
+
+def test_mixed_and_mask_keeps_its_modelable_conjunct_at_l2():
+    """``tl.store(p, v, mask=bounds and loaded_guard)`` (the FlagGems
+    cross-entropy backward idiom): single-path drops the whole mask, so
+    lanes past the bounds looked active and two rows overlapped in a
+    phantom WAW. Multipath keeps ``bounds`` (a sound over-approximation of
+    ``bounds ∧ guard``) and the access stays widened."""
+    text = _module(
+        "%out_ptr: !tt.ptr<f32>, %tgt_ptr: !tt.ptr<i32>, %C: i32",
+        "%c1 = arith.constant 1.0 : f32",
+        "%cm1 = arith.constant -1 : i32",
+        "%pid = tt.get_program_id x : i32",
+        "%offs = tt.make_range {end = 256 : i32, start = 0 : i32} : tensor<256xi32>",
+        "%Cs = tt.splat %C : i32 -> tensor<256xi32>",
+        "%bounds = arith.cmpi slt, %offs, %Cs : tensor<256xi32>",
+        "%tp = tt.addptr %tgt_ptr, %pid : !tt.ptr<i32>, i32",
+        "%tgt = tt.load %tp : !tt.ptr<i32>",
+        "%g = arith.cmpi ne, %tgt, %cm1 : i32",
+        "%gs = tt.splat %g : i1 -> tensor<256xi1>",
+        "%m = arith.andi %bounds, %gs : tensor<256xi1>",
+        "%row = arith.muli %pid, %C : i32",
+        "%rs = tt.splat %row : i32 -> tensor<256xi32>",
+        "%o = arith.addi %rs, %offs : tensor<256xi32>",
+        "%ps = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<256x!tt.ptr<f32>>",
+        "%p = tt.addptr %ps, %o : tensor<256x!tt.ptr<f32>>, tensor<256xi32>",
+        "%vs = tt.splat %c1 : f32 -> tensor<256xf32>",
+        "tt.store %p, %vs, %m : tensor<256x!tt.ptr<f32>>",
+    )
+    single = parse_ttir(text)
+    (s0,) = [a for a in single.accesses if a.kind == "store"]
+    assert s0.mask_dropped and s0.mask is None
+    multi = parse_ttir(text, multipath=True)
+    (s2,) = [a for a in multi.accesses if a.kind == "store"]
+    assert s2.mask_dropped
+    assert s2.mask == Cmp("slt", Arange("%offs", 0, 256), Param("C"))

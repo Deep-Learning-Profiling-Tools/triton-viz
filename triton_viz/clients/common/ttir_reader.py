@@ -160,6 +160,11 @@ class Not:
 @dataclass(frozen=True)
 class DataDep:
     why: str = "value derived from loaded data"
+    # For a boolean ``and`` with one unmodelable operand: the modelable
+    # conjunct(s). The true value implies ``keep``, so a mask position may
+    # use ``keep`` as a sound over-approximation instead of dropping the
+    # whole mask (multipath only; the access still counts as widened).
+    keep: "Term | None" = None
 
 
 @dataclass(frozen=True)
@@ -1321,6 +1326,7 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                 path=path,
                 in_loop=in_loop,
                 loops=loops_,
+                keep_partial_mask=multipath,
                 base_elem_float=base_elem_float,
             )
             if res is not None:
@@ -1359,6 +1365,7 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                 path=path,
                 in_loop=in_loop,
                 loops=loops_,
+                keep_partial_mask=multipath,
             )
             continue
         am = _RE_ATOMIC_RMW.match(body)
@@ -1379,6 +1386,7 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                 path=path,
                 in_loop=in_loop,
                 loops=loops_,
+                keep_partial_mask=multipath,
                 atomic_val=operand_term(val(am.group(5))),
                 base_elem_float=base_elem_float,
             )
@@ -1403,6 +1411,7 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                 path=path,
                 in_loop=in_loop,
                 loops=loops_,
+                keep_partial_mask=multipath,
                 atomic_val=operand_term(val(am.group(5))),
                 atomic_cmp=operand_term(val(am.group(4))),
                 base_elem_float=base_elem_float,
@@ -1714,7 +1723,20 @@ def _parse_value_op(body, res, env, val, as_term, base_elem_bits, pid_axes) -> b
             return True
         a, b = val(m.group(2)), val(m.group(3))
         if isinstance(a, DataDep) or isinstance(b, DataDep):
-            env[res] = DataDep("bool op over loaded data")
+            keep: Term | None = None
+            if m.group(1) == "andi":
+                # ``modelable ∧ unmodelable`` implies ``modelable``: remember
+                # the modelable conjunct(s) so a mask can keep them.
+                parts = []
+                for x in (a, b):
+                    if isinstance(x, DataDep):
+                        if x.keep is not None:
+                            parts.append(x.keep)
+                    elif not isinstance(x, PtrValue):
+                        parts.append(x)
+                for part in parts:
+                    keep = part if keep is None else BoolBin("and", keep, part)
+            env[res] = DataDep("bool op over loaded data", keep=keep)
         else:
             env[res] = BoolBin(
                 "and" if m.group(1) == "andi" else "or",
@@ -1753,6 +1775,7 @@ def _record_access(
     atomic_cmp=None,
     base_elem_float=None,
     loops=(),
+    keep_partial_mask=False,
 ) -> None:
     ptr = val(ptr_ssa)
     if not isinstance(ptr, PtrValue):
@@ -1772,7 +1795,14 @@ def _record_access(
             # Mask derived from loaded data: over-approximate it as free
             # (any lane may be active) instead of failing the whole kernel.
             # See AccessEvent.mask_dropped for the soundness discipline.
+            # Multipath keeps the modelable conjuncts of a mixed ``and``
+            # (``bounds_mask and loaded_guard``): still an over-approximation
+            # (the access stays widened), but one that no longer activates
+            # lanes the bounds mask excludes, which is what turned such
+            # rows into phantom overlaps.
             mask_dropped = True
+            if keep_partial_mask and mv.keep is not None:
+                mask = mv.keep
         elif isinstance(mv, PtrValue):
             raise UnsupportedTTIR(f"line {line_no}: pointer as mask")
         else:
