@@ -350,9 +350,10 @@ def test_projection_excludes_the_first_instance():
     # the light ones only, so the projection stays under budget
     times = [4.0] + [0.01] * 100
     assert projected_cost_refusal(5.0, times, 500, 20.0) is None
-    # the same heavy time on a non-first instance counts
+    # the same heavy time on a non-first instance counts (projection
+    # 5 + 0.05 * 399 = 25 s > 2 x 10 s)
     times = [0.01] + [4.0] + [0.01] * 99
-    assert projected_cost_refusal(5.0, times, 500, 20.0) is not None
+    assert projected_cost_refusal(5.0, times, 500, 10.0) is not None
 
 
 def test_projection_needs_more_than_the_skipped_instances():
@@ -360,15 +361,21 @@ def test_projection_needs_more_than_the_skipped_instances():
     assert projected_cost_refusal(9.0, [], 100, 10.0) is None
 
 
-def test_projection_arithmetic_and_message():
-    # 10 done, 90 remaining at 0.5 s each = 45 s + 6 s elapsed > 20 s
+def test_projection_refuses_only_beyond_the_factor():
+    # 10 done, 90 remaining at 0.5 s each = 45 s + 6 s elapsed = 51 s:
+    # over a 20 s budget (2x = 40 s) refuses; over a 30 s budget
+    # (2x = 60 s) keeps running although the plain budget is exceeded
+    # (Hao: the 178 s-vs-150 s case must finish, not abstain)
     detail = projected_cost_refusal(6.0, [0.5] * 10, 100, 20.0)
     assert detail is not None
     assert "10 of 100 instances" in detail
     assert "500.0 ms per instance" in detail
-    assert "projected 51s exceeds the 20s budget" in detail
-    # exactly at the budget keeps running; no budget never refuses
-    assert projected_cost_refusal(6.0, [0.5] * 10, 38, 20.0) is None
+    assert "projected 51s exceeds 2x the 20s budget" in detail
+    assert projected_cost_refusal(6.0, [0.5] * 10, 100, 30.0) is None
+    # exactly at the factor keeps running; no budget never refuses
+    assert projected_cost_refusal(6.0, [0.5] * 10, 78, 20.0) is None
     assert projected_cost_refusal(6.0, [5.0] * 10, 10_000, None) is None
     # nothing remaining: the run is about to finish, never refuse
     assert projected_cost_refusal(60.0, [5.0] * 10, 10, 20.0) is None
+    # the factor is a parameter
+    assert projected_cost_refusal(6.0, [0.5] * 10, 100, 30.0, factor=1.0) is not None

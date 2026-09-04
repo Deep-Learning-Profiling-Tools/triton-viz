@@ -70,11 +70,13 @@ silently:
                     ``ENUM_PROJECTION_GRACE_S``, the running mean
                     per-instance time (first instance excluded) times
                     the remaining instances, plus the time already
-                    spent, exceeds the caller's budget. A heuristic that
-                    trades a possible proof for a fast abstention (a
-                    heavy first stretch mis-projects a light remainder);
-                    never a verdict, and the watchdog stays the bound
-                    when the projection under-estimates.
+                    spent, exceeds ``ENUM_PROJECTION_FACTOR`` times the
+                    caller's budget. A heuristic that trades a possible
+                    proof for a fast abstention (a heavy first stretch
+                    mis-projects a light remainder); the factor keeps
+                    modest over-estimates running; never a verdict, and
+                    the watchdog stays the bound when the projection
+                    under-estimates.
   instance-ceiling  the grid has more than ``ENUM_MAX_INSTANCES``
                     instances (refused before executing anything: per-
                     instance execution cannot be vectorized across
@@ -131,6 +133,13 @@ ENUM_MAX_REPORTS = 8
 # (warm-up: AST rewrite caching, first allocations).
 ENUM_PROJECTION_GRACE_S = 5.0
 ENUM_PROJECTION_SKIP_FIRST = 1
+# The projection refuses only when it exceeds this multiple of the
+# budget (Hao, 2026-09-04): a run projected between one and two budgets
+# keeps going and the watchdog stays the bound, so a modest
+# over-estimate (a heavy first stretch, a light remainder) cannot lose a
+# proof that would have finished; only a run projected far beyond the
+# budget abstains early.
+ENUM_PROJECTION_FACTOR = 2.0
 
 _ATOMIC = -1  # taint marker: derived from an atomic return value
 _TAINT_ATTR = "_tilerace_taint"
@@ -336,13 +345,17 @@ def projected_cost_refusal(
     *,
     grace_s: float = ENUM_PROJECTION_GRACE_S,
     skip_first: int = ENUM_PROJECTION_SKIP_FIRST,
+    factor: float = ENUM_PROJECTION_FACTOR,
 ) -> str | None:
     """The projected-cost decision, pure so it can be pinned without a
     kernel: None to keep running, else the refusal detail. The mean is
     over the instances completed so far EXCLUDING the first
     ``skip_first`` (warm-up); nothing is decided before ``grace_s`` of
     run time, so a heavy leader instance is diluted by the light ones
-    that follow it before the projection is trusted."""
+    that follow it before the projection is trusted; and the refusal
+    fires only when the projection exceeds ``factor`` times the budget
+    (a projection between one and ``factor`` budgets keeps running with
+    the watchdog as the bound)."""
     if budget_s is None:
         return None
     done = len(instance_times)
@@ -354,12 +367,12 @@ def projected_cost_refusal(
     sample = instance_times[skip_first:]
     mean = sum(sample) / len(sample)
     projected = elapsed_s + mean * remaining
-    if projected <= budget_s:
+    if projected <= factor * budget_s:
         return None
     return (
         f"{done} of {n_total} instances in {elapsed_s:.1f}s, mean "
         f"{mean * 1000:.1f} ms per instance after the first; projected "
-        f"{projected:.0f}s exceeds the {budget_s:.0f}s budget"
+        f"{projected:.0f}s exceeds {factor:g}x the {budget_s:.0f}s budget"
     )
 
 
@@ -1373,6 +1386,7 @@ def enumerate_launch(
 __all__ = [
     "ENUM_MAX_INSTANCES",
     "ENUM_MAX_REPORTS",
+    "ENUM_PROJECTION_FACTOR",
     "ENUM_PROJECTION_GRACE_S",
     "ENUM_PROJECTION_SKIP_FIRST",
     "ENUM_TIMEOUT_S",

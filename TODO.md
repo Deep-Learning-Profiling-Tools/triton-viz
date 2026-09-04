@@ -927,11 +927,13 @@ aiter_ops rows at L1, jobs=1: 36 proved@enum, 16 residual):
 - Projected-cost refusal (Hao): first instance excluded, 5 s grace,
   running mean x remaining instances + elapsed > budget refuses by
   name (`projected-cost`, `projected_cost_refusal` is pure and
-  pinned). The four chunked/paged-prefill rows (10240 instances at
-  100 to 114 ms) now refuse after 5.1 s instead of 150 s (projected
-  1021 to 1164 s); one row (chunk_delta_attn intra_token_parallel,
-  2048 instances at 87 ms, projected 178 s vs the 150 s budget) is
-  the documented loss class: it would finish in about three minutes.
+  pinned); the refusal fires only beyond TWICE the budget (Hao), so
+  a projection between one and two budgets keeps running with the
+  watchdog as the bound. The four chunked/paged-prefill rows (10240
+  instances at 100 to 114 ms) refuse after 5.1 s instead of 150 s
+  (projected 1021 to 1164 s); chunk_delta_attn intra_token_parallel
+  (2048 instances at 87 ms, projected 178 s vs the 150 s budget)
+  keeps running under the factor.
 - Precision bug fixed: the interpreter's synthesized all-True mask
   for unmasked loads/stores carried no taint tag and counted as
   unknown provenance, so every unmasked load after an atomic
