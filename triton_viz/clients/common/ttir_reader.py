@@ -1511,6 +1511,11 @@ def _set_arange_dim(v: object, dim: int) -> object:
         )
     if isinstance(v, Not):
         return Not(_set_arange_dim(v.a, dim))  # type: ignore[arg-type]
+    if isinstance(v, DataDep) and v.keep is not None:
+        # The kept conjunct of a mixed ``and`` must follow the tile's
+        # dimension like any other lane term, or its Arange would name a
+        # lane variable the address never uses (a vacuous mask).
+        return DataDep(v.why, keep=_set_arange_dim(v.keep, dim))  # type: ignore[arg-type]
     return v
 
 

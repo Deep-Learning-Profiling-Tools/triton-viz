@@ -588,7 +588,9 @@ _MUTANTS = (
 )
 
 
-def _mutation_track(spec: LaunchSpec, ttir: str, seed: int) -> dict[str, Any]:
+def _mutation_track(
+    spec: LaunchSpec, ttir: str, seed: int, ladder_level: LadderLevel = LadderLevel.L0
+) -> dict[str, Any]:
     """Static-solver-only verdicts on each applicable mutant (no C2/C3:
     the interpreter would run the UNMUTATED kernel)."""
     from types import SimpleNamespace
@@ -601,7 +603,12 @@ def _mutation_track(spec: LaunchSpec, ttir: str, seed: int) -> dict[str, Any]:
         if mutant is None:
             results[name] = "n/a"
             continue
-        det = CompiledRaceDetector(confirm_races=False, differential_check=False)
+        # The mutants must run at the row's own level: an L2-only proof
+        # mutated at L0 would just refuse (never "races") and read as a
+        # vacuity survivor.
+        det = CompiledRaceDetector(
+            confirm_races=False, differential_check=False, ladder_level=ladder_level
+        )
         args = spec.make_args(seed)
         det.pre_warmup_callback(
             spec.kernel_fn, grid=spec.grid, **_launch_binding(spec, args)
@@ -822,7 +829,7 @@ def run_one(
 
     if mutate and row["static"].get("status") == "ok":
         try:
-            row["mutation"] = _mutation_track(spec, ttir, seed)
+            row["mutation"] = _mutation_track(spec, ttir, seed, ladder_level)
         except Exception as e:  # noqa: BLE001
             row["mutation"] = {"error": f"{type(e).__name__}: {e}"}
     return row

@@ -1029,7 +1029,16 @@ class CompiledRaceDetector(Client):
 
         set_param("timeout", self.T1_TIMEOUT_MS)
         try:
-            enc = encode_graph(graph, params, tensors, multipath=self.ladder_level >= 2)
+            # The encoder's L2 rule (pid-linear symbolic T1 bounds) applies
+            # only to graphs the multipath reader produced: the cuTile
+            # reader has no multipath mode yet, and its graphs stay at
+            # their single-path encoding whatever the level.
+            enc = encode_graph(
+                graph,
+                params,
+                tensors,
+                multipath=self.ladder_level >= 2 and graph.multipath,
+            )
             lg3: tuple[int, int, int] | None = None
             if lg is not None:
                 padded = tuple(int(d) for d in lg) + (1, 1, 1)

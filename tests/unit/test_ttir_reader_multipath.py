@@ -448,3 +448,62 @@ def test_mixed_and_mask_keeps_its_modelable_conjunct_at_l2():
     (s2,) = [a for a in multi.accesses if a.kind == "store"]
     assert s2.mask_dropped
     assert s2.mask == Cmp("slt", Arange("%offs", 0, 256), Param("C"))
+
+
+def test_attribute_dict_close_in_single_path_ends_the_loop():
+    """Single-path side of the region-close fix: an access AFTER a loop
+    that closes with an attribute dict is no longer read as in-loop, and
+    the loop itself is recorded."""
+    text = _module(
+        "%x_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>, %n: i32",
+        "%c0 = arith.constant 0 : i32",
+        "%c1 = arith.constant 1 : i32",
+        "%pid = tt.get_program_id x : i32",
+        "scf.for %k = %c0 to %n step %c1  : i32 {",
+        "%xp = tt.addptr %x_ptr, %k : !tt.ptr<f32>, i32",
+        "%v = tt.load %xp : !tt.ptr<f32>",
+        "tt.store %out_ptr, %v : !tt.ptr<f32>",
+        "} {tt.num_stages = 2 : i32}",
+        "%op = tt.addptr %out_ptr, %pid : !tt.ptr<f32>, i32",
+        "%c3 = arith.constant 3.0 : f32",
+        "tt.store %op, %c3 : !tt.ptr<f32>",
+    )
+    for mp in (False, True):
+        g = parse_ttir(text, multipath=mp)
+        assert g.loop is not None and g.loop.induction_var == "%k"
+        load, store_in, store_after = g.accesses
+        assert load.in_loop and store_in.in_loop
+        assert not store_after.in_loop and store_after.loops == ()
+
+
+def test_kept_conjunct_follows_expand_dims():
+    """A mixed ``and`` computed on 1-D lanes and then expanded to a 2-D
+    tile: the kept conjunct's Arange must be retagged with the tile
+    dimension like the address's, or the partial mask would constrain a
+    lane variable the address never uses."""
+    text = _module(
+        "%out_ptr: !tt.ptr<f32>, %tgt_ptr: !tt.ptr<i32>, %C: i32",
+        "%c1 = arith.constant 1.0 : f32",
+        "%cm1 = arith.constant -1 : i32",
+        "%pid = tt.get_program_id x : i32",
+        "%offs = tt.make_range {end = 8 : i32, start = 0 : i32} : tensor<8xi32>",
+        "%Cs = tt.splat %C : i32 -> tensor<8xi32>",
+        "%bounds = arith.cmpi slt, %offs, %Cs : tensor<8xi32>",
+        "%tp = tt.addptr %tgt_ptr, %pid : !tt.ptr<i32>, i32",
+        "%tgt = tt.load %tp : !tt.ptr<i32>",
+        "%g = arith.cmpi ne, %tgt, %cm1 : i32",
+        "%gs = tt.splat %g : i1 -> tensor<8xi1>",
+        "%m1 = arith.andi %bounds, %gs : tensor<8xi1>",
+        "%m2 = tt.expand_dims %m1 {axis = 1 : i32} : tensor<8xi1> -> tensor<8x1xi1>",
+        "%o1 = tt.expand_dims %offs {axis = 1 : i32} : tensor<8xi32> -> tensor<8x1xi32>",
+        "%ps = tt.splat %out_ptr : !tt.ptr<f32> -> tensor<8x1x!tt.ptr<f32>>",
+        "%p = tt.addptr %ps, %o1 : tensor<8x1x!tt.ptr<f32>>, tensor<8x1xi32>",
+        "%vs = tt.splat %c1 : f32 -> tensor<8x1xf32>",
+        "tt.store %p, %vs, %m2 : tensor<8x1x!tt.ptr<f32>>",
+    )
+    (store,) = [
+        a for a in parse_ttir(text, multipath=True).accesses if a.kind == "store"
+    ]
+    assert store.mask_dropped
+    assert store.mask == Cmp("slt", Arange("%offs", 0, 8, 0), Param("C"))
+    assert store.offset == Bin("+", Const(0), Arange("%offs", 0, 8, 0))

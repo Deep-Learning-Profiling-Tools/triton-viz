@@ -296,15 +296,6 @@ def main() -> None:
         "above; a subset run should name itself so no recorded dataset is "
         "overwritten)",
     )
-    ap.add_argument(
-        "--ladder-level",
-        type=int,
-        default=0,
-        choices=(0, 1, 2),
-        help="detector ladder depth (design §4b): 0 = shipped single-path "
-        "behavior, 2 = + Route 3 multipath capture; stamped in the header "
-        "and the output name",
-    )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--timeout", type=int, default=PER_SPEC_TIMEOUT_S)
     ap.add_argument("--jobs", type=int, default=1)
@@ -333,6 +324,17 @@ def main() -> None:
             for ln in Path(ns.only_file).read_text().splitlines()
             if ln.strip() and not ln.startswith("#")
         }
+        from evaluation.kernels import load as _load
+
+        known = {s.name for s in _load(ns.corpus).specs}
+        missing = sorted(only_names - known)
+        if missing:
+            # A subset run must never silently shrink: a misspelled or
+            # renamed spec would otherwise vanish from the change surface.
+            raise SystemExit(
+                f"--only-file names {len(missing)} spec(s) not in {ns.corpus}: "
+                + ", ".join(missing[:5])
+            )
     out = run_corpus(
         ns.corpus,
         ns.only,
