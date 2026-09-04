@@ -88,6 +88,11 @@ _RMW_MODE = {
     "ADD_INT": "add", "ADD_FLOAT": "fadd", "MIN_INT": "min", "MAX_INT": "max",
     "MIN_FLOAT": "fmin", "MAX_FLOAT": "fmax", "AND": "and", "OR": "or",
     "XOR": "xor", "EXCHANGE": "exch",
+    # cuda-tile 1.5 spellings (signedness split out of the mode name);
+    # values stay in the TTIR reader's rmw_op vocabulary
+    "MIN_SIGNED_INT": "min", "MAX_SIGNED_INT": "max",
+    "MIN_UNSIGNED_INT": "umin", "MAX_UNSIGNED_INT": "umax",
+    "AND_INT": "and", "OR_INT": "or", "XOR_INT": "xor",
 }  # fmt: skip
 _SCOPE = {"DEVICE": "gpu", "BLOCK": "cta", "SYSTEM": "sys", "NONE": "gpu"}
 
@@ -811,7 +816,21 @@ def _handle_op(
             env[rname] = _TOKEN if rtyp.strip() == "Token" else DataDep("atomic result")
         return
 
+    if op == "tile_atomic_cas":
+        # A CAS is a MEMORY access: swallowing it as an unknown value op
+        # would drop an atomic write from the access graph and let the
+        # solver prove race freedom against an incomplete program. Until
+        # the reader models CAS (return value, success semantics), the
+        # row refuses with the construct named.
+        raise UnsupportedTTIR(
+            f"line {line_no}: tile_atomic_cas is not modeled by the CuTile "
+            "reader; refusing rather than dropping the atomic access",
+            kind="atomic-cas",
+        )
+
     # every other op: value-level over-approximation, never an exception
+    # (VALUE ops only -- ops with memory effects must be handled or
+    # refused above, like tile_atomic_cas)
     st.unknown_ops[op] = st.unknown_ops.get(op, 0) + 1
     for rname, rtyp in results:
         env[rname] = _TOKEN if rtyp.strip() == "Token" else DataDep(f"cutile op {op}")
