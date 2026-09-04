@@ -1,18 +1,35 @@
 {
-  "suite": "inf2_tensor_geometry_disjoint_v5",
-  "description": "BF16 tiled-Dot controls at m-tile=5, bracketing the independently declared m-tile=4 deployment geometry without using holdout labels.",
-  "warmup": 2,
-  "iters": 20,
   "benchmarks": [
     {
-      "name": "tensor_geometry_disjoint_v5",
       "kind": "tensor_matmul_tiled",
       "matrix": {
-        "dtype": ["bfloat16"],
-        "m": [640],
-        "n": [512],
-        "k": [640, 1280, 2560, 5120, 10240]
-      }
+        "dtype": [
+          "bfloat16"
+        ],
+        "k": [
+          640,
+          1280,
+          2560,
+          5120,
+          10240
+        ],
+        "m": [
+          640
+        ],
+        "n": [
+          512
+        ],
+        "trial": [
+          1,
+          2,
+          3
+        ]
+      },
+      "name": "tensor_geometry_disjoint_v5"
     }
-  ]
+  ],
+  "description": "BF16 tiled-Dot controls at m-tile=5, bracketing the independently declared m-tile=4 deployment geometry without using holdout labels. Each shape is compiled three times and consumers take the median: compilation is bimodal, with ~13-21% of compilations of a TensorE control landing in a ~3-4x slower allocation for an identical instruction stream.",
+  "iters": 20,
+  "suite": "inf2_tensor_geometry_disjoint_v5",
+  "warmup": 2
 }

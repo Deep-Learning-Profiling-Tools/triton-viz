@@ -1,18 +1,36 @@
 {
-  "suite": "inf2_tensor_geometry_disjoint_v3",
-  "description": "Tile-aligned operator-free TensorE controls, disjoint from m=n=512 matmul holdouts.",
-  "warmup": 2,
-  "iters": 20,
   "benchmarks": [
     {
-      "name": "tensor_geometry_disjoint_v3",
       "kind": "tensor_matmul_tiled",
       "matrix": {
-        "dtype": ["float32", "bfloat16"],
-        "m": [384, 640],
-        "n": [1536],
-        "k": [768, 1536, 3072, 6144]
-      }
+        "dtype": [
+          "float32",
+          "bfloat16"
+        ],
+        "k": [
+          768,
+          1536,
+          3072,
+          6144
+        ],
+        "m": [
+          384,
+          640
+        ],
+        "n": [
+          1536
+        ],
+        "trial": [
+          1,
+          2,
+          3
+        ]
+      },
+      "name": "tensor_geometry_disjoint_v3"
     }
-  ]
+  ],
+  "description": "Tile-aligned operator-free TensorE controls, disjoint from m=n=512 matmul holdouts. Each shape is compiled three times and consumers take the median: compilation is bimodal, with ~13-21% of compilations of a TensorE control landing in a ~3-4x slower allocation for an identical instruction stream.",
+  "iters": 20,
+  "suite": "inf2_tensor_geometry_disjoint_v3",
+  "warmup": 2
 }

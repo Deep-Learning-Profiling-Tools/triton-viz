@@ -1,18 +1,36 @@
 {
-  "suite": "inf2_tensor_dot_count_low_disjoint_v2",
-  "description": "Second tile-aligned low-Dot-count suite for independent low-domain CV.",
-  "warmup": 2,
-  "iters": 20,
   "benchmarks": [
     {
-      "name": "tensor_dot_count_low_disjoint_v2",
       "kind": "tensor_matmul_tiled",
       "matrix": {
-        "dtype": ["float32", "bfloat16"],
-        "m": [256],
-        "n": [512],
-        "k": [384, 768, 1536, 3072, 6144]
-      }
+        "dtype": [
+          "float32",
+          "bfloat16"
+        ],
+        "k": [
+          384,
+          768,
+          1536,
+          3072,
+          6144
+        ],
+        "m": [
+          256
+        ],
+        "n": [
+          512
+        ],
+        "trial": [
+          1,
+          2,
+          3
+        ]
+      },
+      "name": "tensor_dot_count_low_disjoint_v2"
     }
-  ]
+  ],
+  "description": "Second tile-aligned low-Dot-count suite for independent low-domain CV. Each shape is compiled three times and consumers take the median: compilation is bimodal, with ~13-21% of compilations of a TensorE control landing in a ~3-4x slower allocation for an identical instruction stream.",
+  "iters": 20,
+  "suite": "inf2_tensor_dot_count_low_disjoint_v2",
+  "warmup": 2
 }

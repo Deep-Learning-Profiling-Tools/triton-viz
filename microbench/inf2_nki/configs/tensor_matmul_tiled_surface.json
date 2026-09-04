@@ -1,29 +1,67 @@
 {
-  "suite": "inf2_nki_tensor_matmul_tiled_surface",
-  "description": "TensorE controls: tiled pipeline (128x128/128x512 geometry) plus shape-offset small single tiles. Calibration is dtype-keyed startup+throughput only; the small-tile grid (m=64,k=64,n={96,192,320,448}) is disjoint from the tiled-attention holdout (m=128,k=128,n={64,128,256,512}).",
-  "warmup": 2,
-  "iters": 10,
   "benchmarks": [
     {
-      "name": "tensor_matmul_tiled",
       "kind": "tensor_matmul_tiled",
       "matrix": {
-        "dtype": ["float32", "bfloat16"],
-        "m": [256, 512],
-        "n": [1024],
-        "k": [1024, 2048, 4096]
-      }
+        "dtype": [
+          "float32",
+          "bfloat16"
+        ],
+        "k": [
+          1024,
+          2048,
+          4096
+        ],
+        "m": [
+          256,
+          512
+        ],
+        "n": [
+          1024
+        ],
+        "trial": [
+          1,
+          2,
+          3
+        ]
+      },
+      "name": "tensor_matmul_tiled"
     },
     {
-      "name": "tensor_matmul_small",
       "kind": "tensor_matmul_small",
       "matrix": {
-        "dtype": ["float32", "bfloat16"],
-        "m": [64],
-        "k": [64],
-        "n": [96, 192, 320, 448],
-        "repeat": [1, 2, 4]
-      }
+        "dtype": [
+          "float32",
+          "bfloat16"
+        ],
+        "k": [
+          64
+        ],
+        "m": [
+          64
+        ],
+        "n": [
+          96,
+          192,
+          320,
+          448
+        ],
+        "repeat": [
+          1,
+          2,
+          4
+        ],
+        "trial": [
+          1,
+          2,
+          3
+        ]
+      },
+      "name": "tensor_matmul_small"
     }
-  ]
+  ],
+  "description": "TensorE controls: tiled pipeline (128x128/128x512 geometry) plus shape-offset small single tiles. Calibration is dtype-keyed startup+throughput only; the small-tile grid (m=64,k=64,n={96,192,320,448}) is disjoint from the tiled-attention holdout (m=128,k=128,n={64,128,256,512}). Each shape is compiled three times and consumers take the median: compilation is bimodal, with ~13-21% of compilations of a TensorE control landing in a ~3-4x slower allocation for an identical instruction stream.",
+  "iters": 10,
+  "suite": "inf2_nki_tensor_matmul_tiled_surface",
+  "warmup": 2
 }

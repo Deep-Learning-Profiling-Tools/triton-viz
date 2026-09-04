@@ -131,6 +131,7 @@ def tensor_matmul_tiled_factory(
     n: int,
     mode: str = "independent",
     dtype_name: str = "float32",
+    trial: int = 1,
 ):
     """Tilebench-shaped TensorE pipeline control.
 
@@ -221,6 +222,7 @@ def tensor_matmul_tiled_work_units(
     n: int,
     mode: str = "independent",
     dtype_name: str = "float32",
+    trial: int = 1,
 ) -> dict[str, int]:
     return {
         "matmul_flops": 2 * m * n * k,
