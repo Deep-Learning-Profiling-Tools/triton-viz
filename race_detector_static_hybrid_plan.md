@@ -121,6 +121,26 @@ is a policy that walks it; every benchmark kernel lands on a point (§III S5).
 
 ---
 
+## I.5 (2026-09-04) The ladder switch and the bottom rung
+
+Addendum, not a rewrite of I.1-I.4 (their tables predate it). The
+detector now exposes ONE ladder-depth configuration
+(`triton_viz/clients/race_detector/ladder.py`: L0 = the rungs above,
+default; L1 = + the concrete per-instance enumeration rung; L2 = +
+forked capture, future), a constructor parameter on both clients and
+a harness/runner flag, stamped into every header and row. The L1
+rung (`concrete_enum.py`) sits BELOW every point of the I.2 map:
+nothing stays symbolic — every program instance is executed
+concretely on the launch's contents and the per-operation byte
+footprints are intersected under the I.1 conflict predicate — so it
+runs only when every rung above refused, at the analyzed-launch
+extent (the interpreter point's claim, different provenance:
+`proved@enum` / `race@enum`). Its boundaries are named refusals
+(atomic returns at footprint positions, value-source loads over
+written bytes, the instance ceiling), never budgets. Details and the
+verification ledger: TODO.md §3o; design: the paper repo's
+`design-route1-concrete-enumeration.md`.
+
 # Part II — Track 1 (shipped): shared-memory races over TTGIR
 
 **Target**: shared-memory (and later tensor-memory) data races, detected statically from

@@ -13,6 +13,11 @@ Verdict mapping for DRB-style scoring (plan S5):
                           independent attribute, never a race count)
   static races         -> "race"       (terminal = race-confirmed | races-unclassified)
   static unsupported   -> "abstain"    (terminal = race-unconfirmed | unsupported)
+  abstain + L1 rung    -> "race-free" proved@enum | "race" race@enum
+                          (the concrete per-instance enumeration rung,
+                          reached only at ladder level L1+ and only when
+                          the composed verdict is an abstention; analyzed-
+                          launch extent, content-fragile)
 """
 
 from __future__ import annotations
@@ -28,6 +33,11 @@ from contextlib import contextmanager
 from typing import Any
 
 from evaluation.spec import LaunchSpec
+from triton_viz.clients.race_detector.ladder import (
+    LADDER_LEVEL_NAMES,
+    LadderLevel,
+    parse_ladder_level,
+)
 
 
 def _launch_binding(spec, args) -> dict:
@@ -70,12 +80,19 @@ def _host_compile_ttir(spec: LaunchSpec) -> str:
     return k.asm["ttir"]
 
 
-def _static_track(spec: LaunchSpec, ttir: str, seed: int) -> dict[str, Any]:
+def _static_track(
+    spec: LaunchSpec,
+    ttir: str,
+    seed: int,
+    ladder_level: LadderLevel = LadderLevel.L0,
+) -> dict[str, Any]:
     from types import SimpleNamespace
 
     from triton_viz.clients.race_detector.compiled.client import CompiledRaceDetector
 
-    det = CompiledRaceDetector(confirm_races=True, differential_check=True)
+    det = CompiledRaceDetector(
+        confirm_races=True, differential_check=True, ladder_level=ladder_level
+    )
     args = spec.make_args(seed)
     t0 = time.perf_counter()
     det.pre_warmup_callback(
@@ -227,7 +244,9 @@ def _cutile_bindings(args: list[dict]) -> tuple[dict, dict, bool]:
     return params, tensors, aliased
 
 
-def _static_track_cutile(spec: LaunchSpec, seed: int) -> dict[str, Any]:
+def _static_track_cutile(
+    spec: LaunchSpec, seed: int, ladder_level: LadderLevel = LadderLevel.L0
+) -> dict[str, Any]:
     """The compiled static track over the captured CuTile IR: the same
     tier selector (T0 gate → T1 → §3c launch-scoped rung) via
     ``_solve_one_graph``, with NO confirmation channel — cuda.tile has no
@@ -239,7 +258,9 @@ def _static_track_cutile(spec: LaunchSpec, seed: int) -> dict[str, Any]:
 
     info = spec.cutile or {}
     kname = info.get("kernel", spec.name)
-    det = CompiledRaceDetector(confirm_races=False, differential_check=False)
+    det = CompiledRaceDetector(
+        confirm_races=False, differential_check=False, ladder_level=ladder_level
+    )
     t0 = time.perf_counter()
     status, reason, prov = "ok", None, None
     reports: list[Any] = []
@@ -311,7 +332,9 @@ def _static_track_cutile(spec: LaunchSpec, seed: int) -> dict[str, Any]:
     }
 
 
-def _run_one_cutile(spec: LaunchSpec, seed: int) -> dict[str, Any]:
+def _run_one_cutile(
+    spec: LaunchSpec, seed: int, ladder_level: LadderLevel = LadderLevel.L0
+) -> dict[str, Any]:
     info = spec.cutile or {}
     row: dict[str, Any] = {
         "name": spec.name,
@@ -325,9 +348,12 @@ def _run_one_cutile(spec: LaunchSpec, seed: int) -> dict[str, Any]:
         "constexprs": dict(spec.constexprs),
         "aliased": spec.aliased,
         "frontend": "cutile",
+        # cuda.tile has no interpreter, so the L1 rung can never run on
+        # these rows; the level is still stamped (provenance discipline).
+        "ladder_level": ladder_level.name,
     }
     try:
-        row["static"] = _static_track_cutile(spec, seed)
+        row["static"] = _static_track_cutile(spec, seed, ladder_level)
     except Exception as e:  # noqa: BLE001
         row.update(
             verdict="error",
@@ -348,7 +374,9 @@ def _run_one_cutile(spec: LaunchSpec, seed: int) -> dict[str, Any]:
     return row
 
 
-def _dynamic_track(spec: LaunchSpec, seed: int) -> dict[str, Any]:
+def _dynamic_track(
+    spec: LaunchSpec, seed: int, ladder_level: LadderLevel = LadderLevel.L0
+) -> dict[str, Any]:
     import triton_viz
     from triton_viz.clients import RaceDetector
     from triton_viz.clients.race_detector.hb_common import (
@@ -361,7 +389,7 @@ def _dynamic_track(spec: LaunchSpec, seed: int) -> dict[str, Any]:
     # 40-60 s after their mark. Every mark site marks BEFORE raising, so
     # catching the abort and running finalize() classifies the launch
     # exactly as the mark-and-continue mode would have.
-    det = RaceDetector(abort_on_error=True)
+    det = RaceDetector(abort_on_error=True, ladder_level=ladder_level)
     args = spec.make_args(seed)  # fresh tensors; the interpreter mutates them
     t0 = time.perf_counter()
     error = None
@@ -395,6 +423,102 @@ def _dynamic_track(spec: LaunchSpec, seed: int) -> dict[str, Any]:
         "witnesses": witnesses,
         "error": error,
         "time_s": round(elapsed, 4),
+    }
+
+
+# ── the L1 rung: concrete per-instance enumeration (Route 1) ────────
+# The rung itself has no time budget (design-route1-concrete-enumeration.md
+# section 4): its watchdog here is evaluation protocol, the per-row
+# subprocess budget (runner.PER_SPEC_TIMEOUT_S) minus what the symbolic
+# tracks already spent, capped at ENUM_TIMEOUT_S and floored so a spin the
+# taint did not see still ends in a NAMED refusal rather than a row-level
+# crash. Measured: ~1.3-3 ms per instance for the destindex family (32768
+# instances in ~46 s), ~28 ms per instance for an attention kernel.
+ENUM_TIMEOUT_S = 150
+ENUM_MIN_TIMEOUT_S = 30
+ENUM_ROW_MARGIN_S = 10
+
+
+def _enum_budget_s(row_started: float) -> float:
+    from evaluation.runner import PER_SPEC_TIMEOUT_S
+
+    remaining = (
+        PER_SPEC_TIMEOUT_S - (time.perf_counter() - row_started) - ENUM_ROW_MARGIN_S
+    )
+    return float(max(ENUM_MIN_TIMEOUT_S, min(ENUM_TIMEOUT_S, remaining)))
+
+
+def _enum_track(
+    spec: LaunchSpec,
+    seed: int,
+    static: dict[str, Any],
+    timeout_s: float = ENUM_TIMEOUT_S,
+) -> dict[str, Any]:
+    """Route 1 on one launch: every instance evaluated concretely on fresh,
+    cloned tensors; verdict at the analyzed-launch extent. Refusals are
+    named (``"<kind>: detail"``). The spin pre-gate reuses the static
+    reader's structural await recognition (the sequential interpreter
+    cannot terminate a cross-instance spin); the rung's own taint catches
+    the spins the reader did not see."""
+    from triton_viz.clients.race_detector.concrete_enum import enumerate_launch
+
+    t0 = time.perf_counter()
+    spin_signals = [static.get("reason") or ""] + [
+        r or "" for r in (static.get("parse_unsupported") or [])
+    ]
+    if static.get("assumes_termination") or any(
+        sig.startswith("spin-shape") for sig in spin_signals
+    ):
+        return {
+            "status": "unsupported",
+            "reason": (
+                "spin-shape: await-bearing kernel (static reader); the "
+                "sequential interpreter cannot terminate a cross-instance spin"
+            ),
+            "n_reports": 0,
+            "witnesses": [],
+            "instances": 0,
+            "n_ops": 0,
+            "time_s": round(time.perf_counter() - t0, 4),
+        }
+    args = spec.make_args(seed)  # fresh contents; enumerate_launch clones them
+    outcome = enumerate_launch(
+        spec.kernel_fn,
+        (),
+        _launch_binding(spec, args),
+        spec.grid,
+        timeout_s=timeout_s,
+    )
+    witnesses = [
+        {
+            "first": rep.first_record.source_location,
+            "second": rep.second_record.source_location,
+            "race_type": rep.race_type.name,
+            "pids": [list(rep.witness_grid_a), list(rep.witness_grid_b)],
+            "bytes": list(rep.byte_range),
+        }
+        for rep in outcome.reports
+    ]
+    return {
+        "status": outcome.status,
+        "reason": outcome.reason,
+        "n_reports": len(outcome.reports),
+        "witnesses": witnesses,
+        "instances": outcome.n_instances,
+        "n_ops": outcome.n_ops,
+        "value_source_loads": outcome.n_value_source_loads,
+        "instance_s": (
+            round(outcome.instance_s, 6) if outcome.instance_s is not None else None
+        ),
+        "max_instance_s": (
+            round(outcome.max_instance_s, 6)
+            if outcome.max_instance_s is not None
+            else None
+        ),
+        "run_s": round(outcome.run_s, 4),
+        "analyze_s": round(outcome.analyze_s, 4),
+        "timeout_s": timeout_s,
+        "time_s": round(time.perf_counter() - t0, 4),
     }
 
 
@@ -494,7 +618,9 @@ def _mutation_track(spec: LaunchSpec, ttir: str, seed: int) -> dict[str, Any]:
 
 
 def _classify(
-    static: dict[str, Any], dynamic: dict[str, Any] | None = None
+    static: dict[str, Any],
+    dynamic: dict[str, Any] | None = None,
+    enum: dict[str, Any] | None = None,
 ) -> tuple[str, str]:
     """(verdict, terminal) from the composed dispatcher.
 
@@ -505,7 +631,25 @@ def _classify(
     terminals live on the interpreter point of the concretization map:
     ``race@interp`` / ``proved@interp``, scoped per-launch (+ the
     contents-snapshot premise when an event address lowered through a
-    load snapshot — carried in dynamic["premises"])."""
+    load snapshot — carried in dynamic["premises"]).
+
+    ``enum`` is the L1 rung's row (Route 1, run only when the composed
+    verdict is an abstention): a clean concrete enumeration decides
+    ``proved@enum``, concrete witnesses decide ``race@enum``; any
+    refusal keeps the abstention. Absent (L0) the composition is exactly
+    the pre-L1 one."""
+    verdict, terminal = _classify_symbolic(static, dynamic)
+    if verdict == "abstain" and enum:
+        if enum.get("status") == "races" and (enum.get("n_reports") or 0) > 0:
+            return ("race", "race@enum")
+        if enum.get("status") == "ok" and not enum.get("reason"):
+            return ("race-free", "proved@enum")
+    return (verdict, terminal)
+
+
+def _classify_symbolic(
+    static: dict[str, Any], dynamic: dict[str, Any] | None = None
+) -> tuple[str, str]:
     status = static["status"]
     if status == "ok":
         return ("race-free", static["provenance"] or "proved@T1")
@@ -563,9 +707,15 @@ def _resolve_race_pair_lines(spec: LaunchSpec) -> list[int | None] | None:
     return out
 
 
-def run_one(spec: LaunchSpec, seed: int, mutate: bool = False) -> dict[str, Any]:
+def run_one(
+    spec: LaunchSpec,
+    seed: int,
+    mutate: bool = False,
+    ladder_level: LadderLevel = LadderLevel.L0,
+) -> dict[str, Any]:
     if spec.frontend == "cutile":
-        return _run_one_cutile(spec, seed)
+        return _run_one_cutile(spec, seed, ladder_level)
+    row_started = time.perf_counter()
     kernel_fn = getattr(spec.kernel_fn, "fn", spec.kernel_fn)
     row: dict[str, Any] = {
         "name": spec.name,
@@ -576,6 +726,10 @@ def run_one(spec: LaunchSpec, seed: int, mutate: bool = False) -> dict[str, Any]
         "params_note": spec.params_note,
         "grid": list(spec.grid),
         "seed": seed,
+        # The ladder-depth stamp (provenance discipline: no dataset may
+        # mix levels unnoticed); also carried in verdict_attrs by the
+        # clients, which receive the same level.
+        "ladder_level": ladder_level.name,
         # Kernel identity: the ladder audit groups rows of one
         # SPECIALIZATION (kernel, constexprs) to derive the kernel-level
         # "∃ racy input" truth that proved@T0 claims are checked against.
@@ -602,7 +756,7 @@ def run_one(spec: LaunchSpec, seed: int, mutate: bool = False) -> dict[str, Any]
         return row
 
     try:
-        row["static"] = _static_track(spec, ttir, seed)
+        row["static"] = _static_track(spec, ttir, seed, ladder_level)
     except Exception as e:  # noqa: BLE001
         row.update(
             verdict="error",
@@ -612,7 +766,7 @@ def run_one(spec: LaunchSpec, seed: int, mutate: bool = False) -> dict[str, Any]
         return row
 
     try:
-        row["dynamic"] = _dynamic_track(spec, seed)
+        row["dynamic"] = _dynamic_track(spec, seed, ladder_level)
     except Exception as e:  # noqa: BLE001
         row["dynamic"] = {"error": f"{type(e).__name__}: {e}"}
 
@@ -627,6 +781,41 @@ def run_one(spec: LaunchSpec, seed: int, mutate: bool = False) -> dict[str, Any]
         va = dict(row["static"].get("verdict_attrs") or {})
         va["content_fragile"] = True
         row["static"]["verdict_attrs"] = va
+
+    # The ladder switch: ONE gate. At L0 the rung does not run and the row
+    # keeps today's abstention; at L1+ every symbolic rung has refused
+    # (the composed verdict is an abstention), so the bottom rung decides
+    # the launch by exhaustive per-instance concrete evaluation. Nothing
+    # else in the pipeline consults the level.
+    if ladder_level >= LadderLevel.L1 and row["verdict"] == "abstain":
+        try:
+            row["enum"] = _enum_track(
+                spec, seed, row["static"], timeout_s=_enum_budget_s(row_started)
+            )
+        except Exception as e:  # noqa: BLE001
+            row["enum"] = {
+                "status": "unsupported",
+                "reason": f"harness-error: {type(e).__name__}: {e}",
+                "n_reports": 0,
+                "witnesses": [],
+            }
+        row["verdict"], row["terminal"] = _classify(
+            row["static"], row.get("dynamic"), row["enum"]
+        )
+        if row["terminal"] in ("proved@enum", "race@enum"):
+            # analyzed-launch extent: these params, this grid, THESE
+            # contents — the content-fragile attribute states the last
+            # part, exactly as for proved@interp (same extent, different
+            # provenance)
+            va = dict(row["static"].get("verdict_attrs") or {})
+            va["verdict"] = row["verdict"]
+            va["proved_scope"] = (
+                "this-params-this-grid" if row["verdict"] == "race-free" else None
+            )
+            va["race_evidence"] = "concrete" if row["verdict"] == "race" else None
+            va["content_fragile"] = True
+            va["conservative"] = False
+            row["static"]["verdict_attrs"] = va
 
     if mutate and row["static"].get("status") == "ok":
         try:
@@ -643,13 +832,25 @@ def main() -> None:
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--out", required=True)
     ap.add_argument("--mutate", action="store_true")
+    ap.add_argument(
+        "--ladder-level",
+        choices=LADDER_LEVEL_NAMES,
+        default=LadderLevel.L0.name,
+        help="ladder depth: L0 = shipped rungs only (default), L1 = + the "
+        "concrete per-instance enumeration rung, L2 = + forked capture",
+    )
     ns = ap.parse_args()
 
     from evaluation.kernels import load
 
     corpus = load(ns.corpus)
     spec = next(s for s in corpus.specs if s.name == ns.spec)
-    row = run_one(spec, ns.seed, mutate=ns.mutate)
+    row = run_one(
+        spec,
+        ns.seed,
+        mutate=ns.mutate,
+        ladder_level=parse_ladder_level(ns.ladder_level),
+    )
     row["corpus"] = ns.corpus
     with open(ns.out, "w") as f:
         json.dump(row, f)

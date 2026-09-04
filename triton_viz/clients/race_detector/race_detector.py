@@ -49,6 +49,7 @@ from ..symbolic_engine import (
     scalar_truthiness_from_user_code,
 )
 from .data import AccessEventRecord, MemorySem
+from .ladder import LadderLevel, parse_ladder_level
 from .hb_common import (
     UnsupportedSymbolicRaceQuery,
     apply_sub,
@@ -268,6 +269,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         *,
         compile: bool = False,
         ablations: tuple[str, ...] = (),
+        ladder_level: LadderLevel = LadderLevel.L0,
     ):
         # ``compile`` is consumed by the RaceDetector factory (__new__) to pick
         # the backend; it only reaches this __init__ because Python re-invokes
@@ -276,6 +278,13 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # CompiledRaceDetector instead).
         del compile
         super().__init__(abort_on_error=abort_on_error)
+        # The ladder-depth switch (ladder.py; the ``ablations`` precedent,
+        # not an environment variable). Recorded for provenance; this
+        # frontend's own behavior is identical at every level today (the
+        # L1 rung runs in the harness after both frontends refuse; L2's
+        # forked capture will consult it at the per-instance control-flow
+        # refusal site).
+        self.ladder_level = parse_ladder_level(ladder_level)
         # RQ5 ablation switches: "hb"/"coherence" forward to the two-copy
         # solver; "load-values" replaces the snapshot Select with a single
         # concrete observation (evaluation/ablation.py). Default: none.

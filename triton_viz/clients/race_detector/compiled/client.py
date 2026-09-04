@@ -35,6 +35,7 @@ from ....core.client import Client
 from ....core.config import config as cfg
 from ....core.data import Op
 from ...common.ttir_reader import AccessGraph, UnsupportedTTIR, parse_ttir
+from ..ladder import LadderLevel, parse_ladder_level
 from ..hb_common import UnsupportedSymbolicRaceQuery
 from ..two_copy_symbolic_hb_solver import TwoCopySymbolicHBSolver
 from .global_records import (
@@ -87,12 +88,17 @@ class CompiledRaceDetector(Client):
         confirm_races: bool = True,
         differential_check: bool = False,
         ablations: tuple[str, ...] = (),
+        ladder_level: LadderLevel = LadderLevel.L0,
     ) -> None:
         super().__init__()
         self.collect_smtlib = collect_smtlib
         # RQ5 ablation switches, forwarded verbatim to the two-copy solver
         # ("hb" / "coherence"); production semantics are the empty tuple.
         self.ablations = tuple(ablations)
+        # The ladder-depth switch (ladder.py): provenance only on this
+        # frontend (its rungs are the same at every level); stamped into
+        # the verdict attributes so a row records the depth it was run at.
+        self.ladder_level = parse_ladder_level(ladder_level)
         # C2: replay SAT witnesses under the interpreter to classify them
         # confirmed/unconfirmed. Costs a pre-launch tensor snapshot (capped)
         # and, only when a SAT exists, an interpreter run of two blocks.
@@ -781,6 +787,9 @@ class CompiledRaceDetector(Client):
                 v["conservative"] = True
         else:  # no_ttir
             v["unsupported_kind"] = status
+        # the ladder-depth stamp (ladder.py): every verdict records the
+        # depth it was produced at, so datasets cannot mix levels unnoticed
+        v["ladder_level"] = self.ladder_level.name
         self.last_global_verdict = v
 
     def _run_differential(

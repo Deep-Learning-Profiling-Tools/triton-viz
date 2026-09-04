@@ -807,6 +807,128 @@ the demoted hazard as a `content_fragile` attribute.
       (dispatcher pins cover only _classify).
 
 
+## 3o. The ladder switch (L0/L1/L2) and the L1 rung: concrete per-instance enumeration (on branch `route1-concrete-enumeration`, 2026-09-04; default L0)
+
+Provenance: the paper repo's abstention analysis (2026-09-04) — the
+pinned run abstains on 492/1062 real-code rows, 217 of them in the
+`indirect-address x interpreter-unsupported` class (indirect
+addressing plus nested loops / pid-dependent control flow: the
+destindex, kv_cache_filling, fla varlen families). Both frontends
+refuse by construction (the reader has no contents, the one-shot
+symbolic capture has no per-instance control flow). Design:
+`design-route1-concrete-enumeration.md` (paper repo, Route 1) and the
+ladder-switch decision (Hao; `design-route3-multipath-capture.md`
+section 4b): ONE ladder-depth configuration, three levels, stamped
+everywhere, consulted at exactly one gate.
+
+Machinery (all landed on the branch, 986 tests pass incl. 82 new):
+
+- `triton_viz/clients/race_detector/ladder.py`: `LadderLevel`
+  (L0 shipped behavior, L1 = + the concrete rung, L2 = + forked
+  capture, future; L2 implies L1), `parse_ladder_level` (strict).
+  NOT an environment variable: a constructor parameter on
+  `SymbolicRaceDetector` and `CompiledRaceDetector` (the `ablations`
+  precedent), stamped into `verdict_attrs.ladder_level` by the
+  compiled client, into every harness row (`row["ladder_level"]`),
+  and into the results-JSONL header (`ladder_level`); the runner
+  writes deeper levels to `<corpus>_L1.jsonl` so the L0 datasets
+  (the paper's numbers) can never be overwritten unnoticed.
+- `triton_viz/clients/race_detector/concrete_enum.py`: the L1 rung.
+  `ConcreteFootprintRecorder` runs EVERY block sequentially under the
+  interpreter on per-STORAGE clones (aliased arguments keep aliasing;
+  trb009's in-place shift is the pin), records per-operation byte
+  intervals with lane multiplicity (duplicate lanes of one plain
+  store = the A1 shape; atomics stay one interval per lane so the
+  compatible-pair judgment is per exact address and width), carries
+  CONCRETE TAINT through every builder op (a generic wrapper over the
+  interpreter builder, the tl-level reduce/scan, block-pointer and
+  descriptor materialization; `tl.tensor.__bool__`/`__index__` hooked
+  through the interpreter's own language patcher so helper re-patches
+  keep the hook; loop bounds through the range-wrapper factory), and
+  refuses BY NAME: `atomic-return` (an atomic return reaches an
+  address, mask, host branch, or loop bound: ticket, last-block,
+  atomic-poll spins — the spin refuses at its FIRST poll, no hang),
+  `value-source` (a load whose value reaches a footprint position
+  overlaps ANY write footprint: the A2 premise, extended to branches
+  and bounds), `instance-ceiling` (`ENUM_MAX_INSTANCES = 65536`,
+  refused before executing), `no-grid`, `no-contents`, `scope`,
+  `timeout`, `interpreter-error`. `analyze` mirrors
+  `conflicting_access_modes` byte-for-byte: overlap + at least one
+  writer; atomic-atomic exempt iff same width, same start, no cta
+  scope across instances; plain-vs-atomic races; program order within
+  an instance; the premise violation refuses the whole launch before
+  any race is reported. Witnesses are translated back to the caller's
+  tensors and carry the byte range. Unknown-provenance values
+  (constructed outside the builder) taint conservatively.
+- Harness (`evaluation/harness.py`): `_enum_track` (spin pre-gate from
+  the static reader's `spin-shape`/`assumes_termination`, fresh
+  `make_args`, watchdog = the remaining row budget capped at 150 s),
+  the ONE gate in `run_one` (`ladder_level >= L1 and verdict ==
+  "abstain"`), `_classify(static, dynamic, enum)` (the L1 leg fires
+  only on an abstention: `proved@enum` / `race@enum`, analyzed-launch
+  extent, `content_fragile=True`, `proved_scope=this-params-this-grid`,
+  `race_evidence=concrete`), `--ladder-level` on harness and runner.
+  `report.py` reads enum witnesses and audits `race@enum` on
+  race-free labels as `enum_disagreements` (surfaced, like interp);
+  `concretization_map.py` gains the bottom y-row "nothing (every
+  instance enumerated)" with `proved@enum`/`race@enum` at (3, 0).
+- Tests: `tests/end_to_end/test_concrete_enum.py` (33: scatter pair,
+  A1 lanes, program order, plain-vs-atomic, compatible/cta/torn
+  atomics, mixed widths, plain RW reported, value-source through
+  address and mask, ticket/last-block/loop-bound/spin refusals,
+  pid-branch + nested loops decided, data-dependent trips, masks,
+  block pointers, single counting of unmasked accesses, ceiling,
+  callable grid, patch cleanup, aliasing), `tests/unit/
+  test_concrete_enum_analysis.py` (19 synthetic pins of the
+  predicate and the premise), `tests/unit/test_ladder_level.py` (30:
+  parsing, constructors, attrs stamp, header, `_classify` legs).
+
+Verification so far (2026-09-04, this machine):
+
+- TritonRaceBench at L0 vs L1 (`--jobs 4`): 61 rows, ZERO flips (no
+  benchmark row abstains at L0, so the gate never fires; the level
+  stamps verify).
+- Cross-validation (design section 7.2) on the 51 benchmark rows the
+  interpreter decides (tritonracebench, golden_smoke, rmw_sync,
+  await_sync): 35 AGREE, 16 DISQUALIFIED by name (`atomic-return`:
+  rows decided through the counting axiom / RMW-return modeling —
+  lbd, splitk, amax, acq/rel families — by design), 0 DISAGREE (the
+  one disagreement found, trb009's aliased in-place shift, was the
+  per-argument clone bug, fixed by per-storage cloning and pinned).
+- Real-code rows at L1 (tritonbench_g): tb_destindex_copy race@enum
+  (32768 instances, 45.7 s, 1.35 ms/instance, duplicate randint
+  destinations at lines 45/46 — the Leads-30 reading);
+  tb_destindex_copy_kv1 race@enum (65.9 s, 1.97 ms/instance; timed
+  out at the first 60 s watchdog, hence the row-budget watchdog);
+  tb_quantize_copy_kv proved@enum (8192 instances, 24.6 s);
+  tb_context_attn_mistral proved@enum (192 instances, 5.8 s, 28 ms/
+  instance); tb_kv_cache_filling race@enum (10 instances, 0.2 s; the
+  captured all-zero BlockOffsets make two instances fill one block);
+  kv_cache_copy / kcache_copy_triton stay proved@interp (the gate
+  does not fire on decided rows).
+
+Open (blocking any paper use of L1; default stays L0 until done):
+
+- [ ] Change-surface diff: every currently-abstaining real-code row
+      (the 492) at L1 vs the pinned L0 run, jobs=1; classify the
+      residual by refusal kind (the design's residual floor: 23
+      cuTile + 9 spin + 4 over the ceiling = 36 rows, plus the
+      classifier-pinned atomic-return / value-source classes).
+- [ ] Fresh pinned rerun at L1 (a separate stamped dataset next to
+      the L0 pin), then the selective-pricing check: every L0-decided
+      row verdict-identical and wall-time-stable.
+- [ ] Docs when the rerun lands: SWEEP_REPORT §2/§3/§7 (terminals,
+      counting by scope, the queued-lift ledger), the plan's §I.1
+      five-state table and §I.2 reachable-regions table (a "nothing
+      symbolic" row), address_position_lifting_spec §0/§5.3/§6, the
+      "interpreter CANNOT rescue these" sentence in §3e above, the
+      paper's §4.5/§6.3 and the race casebook (the destindex and
+      kv_cache_filling race@enum rows are capture-content readings,
+      Leads-30 discipline: none counted).
+- [ ] Route 3 (L2) lands its fork gate at the per-instance
+      control-flow refusal site and hands path-ceiling rows to
+      `_enum_track` (the same invocation).
+
 ## 4. M4 — sm90/Hopper (UNGATED 2026-07-10; tranche 1 landed)
 
 - [x] Tranche 1 — the wgmma agent: `ttng.warp_group_dot` smem operands

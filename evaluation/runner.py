@@ -16,6 +16,12 @@ import tempfile
 import time
 from pathlib import Path
 
+from triton_viz.clients.race_detector.ladder import (
+    LADDER_LEVEL_NAMES,
+    LadderLevel,
+    parse_ladder_level,
+)
+
 RESULTS_DIR = Path(__file__).parent / "results"
 PER_SPEC_TIMEOUT_S = 180
 
@@ -135,7 +141,14 @@ def _versions() -> dict:
     }
 
 
-def _run_one(spec, corpus_name: str, seed: int, timeout: int, mutate: bool) -> dict:
+def _run_one(
+    spec,
+    corpus_name: str,
+    seed: int,
+    timeout: int,
+    mutate: bool,
+    ladder_level: LadderLevel = LadderLevel.L0,
+) -> dict:
     t0 = time.perf_counter()
     with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
         tmp = tf.name
@@ -143,6 +156,7 @@ def _run_one(spec, corpus_name: str, seed: int, timeout: int, mutate: bool) -> d
         sys.executable, "-m", "evaluation.harness",
         "--corpus", corpus_name, "--spec", spec.name,
         "--seed", str(seed), "--out", tmp,
+        "--ladder-level", ladder_level.name,
     ]  # fmt: skip
     if mutate:
         cmd.append("--mutate")
@@ -182,9 +196,29 @@ def _run_one(spec, corpus_name: str, seed: int, timeout: int, mutate: bool) -> d
         }
     finally:
         os.unlink(tmp)
+    row.setdefault("ladder_level", ladder_level.name)
     row["wall_s"] = round(time.perf_counter() - t0, 2)
     print(f"  {spec.name:40s} {row.get('terminal', '?'):20s} {row['wall_s']}s")
     return row
+
+
+def results_header(
+    corpus_name: str,
+    seed: int,
+    provenance: dict,
+    ladder_level: LadderLevel = LadderLevel.L0,
+) -> dict:
+    """The JSONL header: detector commit, package versions, corpus
+    provenance, and the ladder-depth stamp (no dataset may mix levels
+    unnoticed: a paper or CI deployment quotes one level of one run)."""
+    return {
+        "header": True,
+        "corpus": corpus_name,
+        "seed": seed,
+        "ladder_level": ladder_level.name,
+        **_versions(),
+        **provenance,
+    }
 
 
 def run_corpus(
@@ -194,25 +228,30 @@ def run_corpus(
     timeout: int,
     mutate: bool = False,
     jobs: int = 1,
+    ladder_level: LadderLevel = LadderLevel.L0,
 ) -> Path:
     from evaluation.kernels import load
 
     corpus = load(corpus_name)
     specs = [s for s in corpus.specs if only is None or s.name == only]
     RESULTS_DIR.mkdir(exist_ok=True)
-    out_path = RESULTS_DIR / f"{corpus_name}.jsonl"
+    # One dataset per level: the L0 files keep their names (the paper's
+    # numbers), deeper levels get a suffix so a rerun can never overwrite
+    # the other level's rows unnoticed.
+    suffix = "" if ladder_level == LadderLevel.L0 else f"_{ladder_level.name}"
+    out_path = RESULTS_DIR / f"{corpus_name}{suffix}.jsonl"
 
-    header = {
-        "header": True,
-        "corpus": corpus_name,
-        "seed": seed,
-        **_versions(),
-        **corpus.provenance,
-    }
-    print(f"[runner] {corpus_name}: {len(specs)} specs -> {out_path} (jobs={jobs})")
+    header = results_header(corpus_name, seed, corpus.provenance, ladder_level)
+    print(
+        f"[runner] {corpus_name}: {len(specs)} specs -> {out_path} "
+        f"(jobs={jobs}, ladder {ladder_level.name})"
+    )
+
+    def _one(s):
+        return _run_one(s, corpus_name, seed, timeout, mutate, ladder_level)
 
     if jobs == 1:
-        rows = [_run_one(s, corpus_name, seed, timeout, mutate) for s in specs]
+        rows = [_one(s) for s in specs]
     else:
         # rows are subprocess-isolated, so concurrency only affects wall_s
         # (near-watchdog rows can flip to timeout under load — keep the
@@ -220,9 +259,7 @@ def run_corpus(
         from concurrent.futures import ThreadPoolExecutor
 
         with ThreadPoolExecutor(max_workers=jobs) as ex:
-            rows = list(
-                ex.map(lambda s: _run_one(s, corpus_name, seed, timeout, mutate), specs)
-            )
+            rows = list(ex.map(_one, specs))
 
     with open(out_path, "w") as f:
         f.write(json.dumps(header) + "\n")
@@ -245,10 +282,25 @@ def main() -> None:
         help="mutation-sensitivity mode: pid-pin / sem-relax / atomic-to-"
         "store mutants on every proved row (static solver only)",
     )
+    ap.add_argument(
+        "--ladder-level",
+        choices=LADDER_LEVEL_NAMES,
+        default=LadderLevel.L0.name,
+        help="ladder depth for every row of this run: L0 = shipped rungs "
+        "only (default; the paper's numbers), L1 = + the concrete "
+        "per-instance enumeration rung, L2 = + forked capture (future). "
+        "Stamped into the JSONL header and every row.",
+    )
     ns = ap.parse_args()
 
     out = run_corpus(
-        ns.corpus, ns.only, ns.seed, ns.timeout, mutate=ns.mutate, jobs=ns.jobs
+        ns.corpus,
+        ns.only,
+        ns.seed,
+        ns.timeout,
+        mutate=ns.mutate,
+        jobs=ns.jobs,
+        ladder_level=parse_ladder_level(ns.ladder_level),
     )
     if not ns.no_report:
         from evaluation.report import render

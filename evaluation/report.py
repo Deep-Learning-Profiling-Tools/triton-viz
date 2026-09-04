@@ -67,9 +67,13 @@ def _witness_match(r: dict) -> str | None:
     expected = {ln for ln in (r.get("race_pair_lines") or []) if ln is not None}
     if not expected or r.get("verdict") != "race":
         return None
-    # interpreter-decided rows carry their witnesses on the dynamic track
-    witnesses = (r.get("static") or {}).get("witnesses") or (
-        (r.get("dynamic") or {}).get("witnesses") or []
+    # interpreter-decided rows carry their witnesses on the dynamic track;
+    # L1-decided rows (race@enum) on the enum track
+    witnesses = (
+        (r.get("static") or {}).get("witnesses")
+        or (r.get("dynamic") or {}).get("witnesses")
+        or (r.get("enum") or {}).get("witnesses")
+        or []
     )
     for w in witnesses:
         first, second = w.get("first"), w.get("second")
@@ -96,6 +100,7 @@ def ladder_audit(rows: list[dict]) -> dict:
     ladder_unsound: list[str] = []
     replay_unsound: list[str] = []
     interp_disagreements: list[str] = []
+    enum_disagreements: list[str] = []
     for group in by_spec.values():
         # Premise-compatible derived truth: an ALIASED yes-launch violates
         # the T0 non-aliasing premise and cannot contradict a T0 proof;
@@ -126,10 +131,16 @@ def ladder_audit(rows: list[dict]) -> dict:
             # of the required-zero audit.
             if terminal == "race@interp" and g.get("expected") == "race-free":
                 interp_disagreements.append(g["name"])
+            # The L1 rung's verdicts have the same extent as the
+            # interpreter point's (analyzed launch, these contents) and
+            # are audited the same way: surfaced, not required-zero.
+            if terminal == "race@enum" and g.get("expected") == "race-free":
+                enum_disagreements.append(g["name"])
     return {
         "ladder_unsound": sorted(ladder_unsound),
         "replay_unsound": sorted(replay_unsound),
         "interp_disagreements": sorted(interp_disagreements),
+        "enum_disagreements": sorted(enum_disagreements),
     }
 
 
@@ -225,7 +236,8 @@ def render(paths: list[Path]) -> str:
             "",
             f"versions: triton {header.get('triton')}, z3 {header.get('z3')}, "
             f"torch {header.get('torch')}, numpy {header.get('numpy')}, "
-            f"commit {header.get('commit')}, seed {header.get('seed')}"
+            f"commit {header.get('commit')}, seed {header.get('seed')}, "
+            f"ladder {header.get('ladder_level', 'L0')}"
             + (
                 f", liger-kernel {header['liger_kernel']}"
                 f" (upstream {header.get('liger_kernel_commit') or 'unknown'})"

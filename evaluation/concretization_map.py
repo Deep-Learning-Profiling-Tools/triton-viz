@@ -31,6 +31,7 @@ RESULTS_DIR = Path(__file__).parent / "results"
 # x, y are ordinal cell indices into AXIS_X / AXIS_Y below.
 AXIS_X = ("nothing", "scalar params", "memory contents", "+ paths")
 AXIS_Y = (
+    "nothing (every instance enumerated)",
     "pid (interleaving)",
     "pid + trip (grid = launch)",
     "pid + grid≥launch + trip",
@@ -40,28 +41,35 @@ AXIS_Y = (
 # terminal state → (x, y, class). Conditional proofs share the proof
 # point; the marker records the premise.
 POINTS: dict[str, tuple[int, int, str]] = {
-    "proved@T0": (0, 3, "proof"),
-    "proved@T0+assumes-termination": (0, 3, "conditional proof"),
-    "proved@T1": (1, 2, "proof"),
-    "proved@T1+assumes-termination": (1, 2, "conditional proof"),
+    "proved@T0": (0, 4, "proof"),
+    "proved@T0+assumes-termination": (0, 4, "conditional proof"),
+    "proved@T1": (1, 3, "proof"),
+    "proved@T1+assumes-termination": (1, 3, "conditional proof"),
     # The §3c launch-scoped rung: params concretized AND the grid pinned
     # to the launch extent — one step more concrete than T1 on the y
     # axis, still on the IR front-end. Its grid-fragile attribute is
     # per-row metadata, not a separate point.
-    "proved@T1-launch": (1, 1, "launch-scoped proof"),
-    "proved@T1-launch+assumes-termination": (1, 1, "conditional proof"),
+    "proved@T1-launch": (1, 2, "launch-scoped proof"),
+    "proved@T1-launch+assumes-termination": (1, 2, "conditional proof"),
     # A static-track race verdict is decided on the IR front-end at T1.
-    "races-unclassified": (1, 2, "report"),
+    "races-unclassified": (1, 3, "report"),
     # Confirmation/refutation happen on the interpreter front-end, where
     # memory contents and paths are concretized together.
-    "race-confirmed": (3, 0, "confirmed race"),
-    "race-unconfirmed": (3, 0, "unconfirmed report"),
+    "race-confirmed": (3, 1, "confirmed race"),
+    "race-unconfirmed": (3, 1, "unconfirmed report"),
     # Composed-dispatcher decisions on static-abstained rows: the
     # interpreter front-end's own verdicts (per-launch scope, optionally
     # + contents-snapshot). A proof can now live on the interpreter
     # point too.
-    "race@interp": (3, 0, "report"),
-    "proved@interp": (3, 0, "proof"),
+    "race@interp": (3, 1, "report"),
+    "proved@interp": (3, 1, "proof"),
+    # The L1 rung (Route 1, concrete_enum.py): nothing stays symbolic —
+    # every program instance is evaluated concretely on the launch's
+    # contents — the bottom row of the map (the y-row precedent of §3c).
+    # Same extent as the interpreter point (analyzed launch), reached
+    # only after every symbolic rung refused, only at ladder level L1+.
+    "race@enum": (3, 0, "report"),
+    "proved@enum": (3, 0, "proof"),
 }
 RESIDUAL = ("unsupported", "compile-error", "crash", "timeout")
 
