@@ -95,9 +95,16 @@ class CompiledRaceDetector(Client):
         # RQ5 ablation switches, forwarded verbatim to the two-copy solver
         # ("hb" / "coherence"); production semantics are the empty tuple.
         self.ablations = tuple(ablations)
-        # The ladder-depth switch (ladder.py): provenance only on this
-        # frontend (its rungs are the same at every level); stamped into
-        # the verdict attributes so a row records the depth it was run at.
+        # The ladder-depth switch (ladder.py; design §4b of Route 3): L0 and
+        # L1 leave this frontend's rungs untouched (L1 is the interpreter's
+        # concrete-enumeration rung); L2 enables Route 3's multipath capture
+        # here: block path predicates for the cf.* graph, one iterator per
+        # scf.for, pid-linear symbolic T1 loop bounds. Every L2 code path
+        # starts at a single-path refusal site (the reader's cf.* and
+        # second-loop raises, the encoder's concrete-bound raise), so a
+        # launch that never reaches one is analyzed byte-identically at
+        # every level. Stamped into the verdict attributes so a row records
+        # the depth it was run at.
         self.ladder_level = parse_ladder_level(ladder_level)
         # C2: replay SAT witnesses under the interpreter to classify them
         # confirmed/unconfirmed. Costs a pre-launch tensor snapshot (capped)
@@ -407,7 +414,10 @@ class CompiledRaceDetector(Client):
             key = hashlib.sha256(text.encode("utf-8", errors="replace")).hexdigest()
             if key not in self._ttir_graph_cache:
                 try:
-                    self._ttir_graph_cache[key] = (parse_ttir(text), None)
+                    self._ttir_graph_cache[key] = (
+                        parse_ttir(text, multipath=self.ladder_level >= 2),
+                        None,
+                    )
                 except UnsupportedTTIR as e:
                     # "kind: message" — the stable kind prefix is what the
                     # hybrid tier selector will route on (indirect-address →
@@ -814,6 +824,11 @@ class CompiledRaceDetector(Client):
                 or not isinstance(launch_grid, (tuple, list))
             ):
                 return
+            if graphs[0].cf_blocks or len(graphs[0].loops) > 1:
+                # The concrete footprint enumerator models one loop and no
+                # block graph (differential.static_footprints): a multipath
+                # graph has no C3 channel yet — unavailable, not a mismatch.
+                return
             grid = tuple(int(d) for d in launch_grid)
             grid = grid + (1,) * (3 - len(grid))
             pids: list[tuple[int, int, int]] = [(0, 0, 0)]
@@ -1014,7 +1029,7 @@ class CompiledRaceDetector(Client):
 
         set_param("timeout", self.T1_TIMEOUT_MS)
         try:
-            enc = encode_graph(graph, params, tensors)
+            enc = encode_graph(graph, params, tensors, multipath=self.ladder_level >= 2)
             lg3: tuple[int, int, int] | None = None
             if lg is not None:
                 padded = tuple(int(d) for d in lg) + (1, 1, 1)

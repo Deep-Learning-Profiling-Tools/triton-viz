@@ -163,15 +163,42 @@ class GlobalEncoding:
     used_pid_axes: set[int] = field(default_factory=set)
 
 
+@dataclass
+class _LoopBinding:
+    """One scf.for's symbolic iteration: the index var k, its existence
+    premise, the zero-trip flag (concrete bounds only), and the induction
+    value's lower / step (induction = lower + k·step)."""
+
+    var: Any
+    premises: tuple[Any, ...]
+    zero_trip: bool
+    lower: Any
+    step: int
+
+
+def _graph_loops(graph: AccessGraph) -> list:
+    """Every loop of the graph, outer before inner. Graphs built before
+    multi-loop capture (hand-built fixtures) carry only ``loop``."""
+    if graph.loops:
+        return list(graph.loops)
+    return [graph.loop] if graph.loop is not None else []
+
+
 class _RaceEnv:
     """Term → Z3 in the solver's vocabulary (shared pid consts, interned
-    arange summary vars, one symbolic loop index).
+    arange summary vars, one symbolic loop index PER LOOP).
 
     ``symbolic_params=True`` is the T0 mode: scalar params become shared
     free Ints (NOT copy-local — both program copies live in one launch, so
     they see the same parameter values). Loop bounds that reference a param
     then fail to concretize and raise, which the tier selector catches to
-    fall back to T1."""
+    fall back to T1.
+
+    ``multipath=True`` (Route 3, L2) additionally keeps a T1 loop bound
+    SYMBOLIC when it is linear in the pid / iterator symbols after the
+    params are pinned (the persistent grid-stride shape
+    ``range(pid, M, NUM_PRGMS)``): the same iteration-existence premise T0
+    uses, instead of the "not concrete at launch" refusal."""
 
     def __init__(
         self,
@@ -179,6 +206,7 @@ class _RaceEnv:
         params: dict[str, int],
         *,
         symbolic_params: bool = False,
+        multipath: bool = False,
     ) -> None:
         from ...symbolic_engine import SymbolicExpr
 
@@ -195,14 +223,19 @@ class _RaceEnv:
         # are free symbols — proof-only, and rejected in address position.
         self._observed_vars: dict[int, Any] = {}
         self.modeled_obs: set[int] = set()
+        self.multipath = multipath
+        # The FIRST loop's binding under the historical names (the single-
+        # loop consumers and tests read these); every loop in ``_loops``.
         self.loop_var: Any = None  # the symbolic iteration INDEX k
         self.loop_premises: tuple[Any, ...] = ()
         self.zero_trip = False
         # Induction value = _loop_lower (Z3 expr) + k * _loop_step (int).
         self._loop_lower: Any = None
         self._loop_step: int = 1
-        if graph.loop is not None:
-            self._bind_loop()
+        self._loops: dict[str, _LoopBinding] = {}
+        self.loop_vars: tuple[Any, ...] = ()
+        for index, lp in enumerate(_graph_loops(graph)):
+            self._bind_loop(lp, index)
 
     # ── loop ─────────────────────────────────────────────────────────
     @staticmethod
@@ -212,10 +245,32 @@ class _RaceEnv:
         except Exception:
             return None
 
-    def _bind_loop(self) -> None:
+    def _binding(self, loop_ssa: str) -> _LoopBinding:
+        b = self._loops.get(loop_ssa)
+        if b is None:
+            if len(self._loops) == 1:
+                # Pre-multipath graphs name their single loop loosely.
+                return next(iter(self._loops.values()))
+            raise UnsupportedTTIR(f"unbound loop {loop_ssa!r}")
+        return b
+
+    def premises_for(self, access: AccessEvent) -> tuple[Any, ...]:
+        """The iteration-existence premises of the access's enclosing
+        loops (outer first); ``()`` outside every loop."""
+        if access.loops:
+            return tuple(p for ssa in access.loops for p in self._binding(ssa).premises)
+        return self.loop_premises if access.in_loop else ()
+
+    def zero_trip_for(self, access: AccessEvent) -> bool:
+        """True when some enclosing loop has a concrete trip count of zero:
+        the access never executes on this launch."""
+        if access.loops:
+            return any(self._binding(ssa).zero_trip for ssa in access.loops)
+        return self.zero_trip if access.in_loop else False
+
+    def _bind_loop(self, loop: Any, index: int) -> None:
         from z3 import Int
 
-        loop = self.graph.loop
         assert loop is not None
         lower_z3 = self.eval(loop.lower)
         upper_z3 = self.eval(loop.upper)
@@ -237,17 +292,28 @@ class _RaceEnv:
         if step_c <= 0:
             raise UnsupportedTTIR(f"loop step {step_c} <= 0 (descending unsupported)")
 
-        self.loop_var = Int("ttir_loop_k")
+        var = Int("ttir_loop_k" if index == 0 else f"ttir_loop_k{index}")
+        zero_trip = False
         if lower_c is not None and upper_c is not None:
             n_iters = max(0, (upper_c - lower_c + step_c - 1) // step_c)
             # A zero-trip loop has NO footprint: in-loop accesses are
             # skipped entirely (encode_graph). The premise must stay the
             # exact range — fabricating an iteration (max(1, n)) produced
             # definite race reports for launches that never run the body.
-            self.zero_trip = n_iters == 0
-            self.loop_premises = (And(self.loop_var >= 0, self.loop_var < n_iters),)
+            zero_trip = n_iters == 0
+            premises: tuple[Any, ...] = (And(var >= 0, var < n_iters),)
         else:
-            if not self.symbolic_params:
+            # Route 3 (multipath, L2): a T1 bound that stays symbolic after
+            # the params are pinned is a pid- or iterator-dependent bound
+            # (``range(pid, M, NUM_PRGMS)``, a triangular inner loop). When
+            # it is linear in those symbols it takes the T0 existence
+            # premise below instead of the refusal; nonlinear bounds keep
+            # refusing (the same Z3-unknown bait the linearity gate blocks).
+            pid_linear = self.multipath and all(
+                _linear_in(t, self.graph, _T1_SYMBOLIC_LEAVES)
+                for t in (loop.lower, loop.upper)
+            )
+            if not self.symbolic_params and not pid_linear:
                 what = "lower bound" if lower_c is None else "upper bound"
                 raise UnsupportedTTIR(
                     f"loop {what} is not concrete at launch (T1 needs "
@@ -260,15 +326,21 @@ class _RaceEnv:
             # Linear (step is a constant), and it subsumes the zero-trip
             # rule: upper <= lower makes the premise UNSAT, so in-loop
             # events are inactive — no phantom footprint to skip.
-            self.zero_trip = False
-            self.loop_premises = (
+            premises = (
                 And(
-                    self.loop_var >= 0,
-                    lower_z3 + self.loop_var * IntVal(step_c) < upper_z3,
+                    var >= 0,
+                    lower_z3 + var * IntVal(step_c) < upper_z3,
                 ),
             )
-        self._loop_lower = lower_z3
-        self._loop_step = step_c
+        binding = _LoopBinding(var, premises, zero_trip, lower_z3, step_c)
+        self._loops[loop.loop_ssa] = binding
+        self.loop_vars = self.loop_vars + (var,)
+        if index == 0:
+            self.loop_var = var
+            self.loop_premises = premises
+            self.zero_trip = zero_trip
+            self._loop_lower = lower_z3
+            self._loop_step = step_c
 
     # ── leaves ───────────────────────────────────────────────────────
     def observed(self, access_index: int) -> Any:
@@ -327,10 +399,12 @@ class _RaceEnv:
         if isinstance(term, Arange):
             return self._arange(term)
         if isinstance(term, LoopVar):
-            return self._loop_lower + self.loop_var * IntVal(self._loop_step)
+            b = self._binding(term.loop_ssa)
+            return b.lower + b.var * IntVal(b.step)
         if isinstance(term, IterArgOffset):
             info = self.graph.iter_args[term.arg_id]
-            return self.eval(info.offset0) + self.loop_var * self.eval(info.delta)
+            b = self._binding(info.loop_ssa) if info.loop_ssa else self._binding("")
+            return self.eval(info.offset0) + b.var * self.eval(info.delta)
         if isinstance(term, Bin):
             a, b = self.eval(term.a), self.eval(term.b)
             if term.op == "+":
@@ -566,7 +640,7 @@ def _record_for(
         reads, writes = None, None
         scope = None
 
-    copy_local: tuple[Any, ...] = (env.loop_var,) if env.loop_var is not None else ()
+    copy_local: tuple[Any, ...] = tuple(env.loop_vars)
     # Observations are per-program-instance nondeterminism: alpha-renamed
     # per copy exactly like the interpreter track's CAS/RMW return vars.
     # EVERY referenced observation is listed — not just this record's own —
@@ -605,7 +679,7 @@ def _record_for(
         addr_expr=addr,
         # The iteration range constrains only the accesses that iterate;
         # the spin-termination invariants constrain every record.
-        premises=(env.loop_premises if access.in_loop else ()) + await_premises,
+        premises=env.premises_for(access) + await_premises,
         local_constraints=bounds,
         source_location=source,
         program_seq=seq,
@@ -687,11 +761,14 @@ def encode_graph(
     graph: AccessGraph,
     params: dict[str, int],
     tensors: dict[str, GlobalTensor],
+    *,
+    multipath: bool = False,
 ) -> GlobalEncoding:
     """Lower every global access of ``graph`` into solver records under the
     concrete launch ``params``/``tensors`` (tier T1: pid, grid, arange lanes
     and loop iterations stay symbolic). Raises :class:`UnsupportedTTIR`
-    (classified) when the kernel cannot be encoded."""
+    (classified) when the kernel cannot be encoded. ``multipath`` enables
+    the L2 pid-linear symbolic T1 bounds (see _RaceEnv)."""
     for access in graph.accesses:
         if access.kind == "atomic_cas" and not access.awaited:
             # A free-standing CAS has no static value model (its cmp/new
@@ -706,7 +783,7 @@ def encode_graph(
                 kind="cas-synchronization",
             )
 
-    env = _RaceEnv(graph, params)
+    env = _RaceEnv(graph, params, multipath=multipath)
     await_prems, await_obs = _await_premises(graph, env)
     records = []
     uncertain: set[int] = set()
@@ -716,7 +793,7 @@ def encode_graph(
     # widened by it).
     next_rep_id = len(graph.accesses)
     for seq, access in enumerate(graph.accesses):
-        if access.in_loop and env.zero_trip:
+        if env.zero_trip_for(access):
             # The launch's trip count is zero: these accesses never execute.
             continue
         meta = tensors.get(access.base_param)
@@ -820,40 +897,52 @@ def symbolic_grid(
 # exists to keep out. NumPrograms is a symbolic grid dim for the same
 # reason.
 _SYMBOLIC_LEAVES = (Pid, Param, Arange, LoopVar, IterArgOffset, Observed, NumPrograms)
+# At T1 the params are concrete, so only these leaves stay symbolic.
+_T1_SYMBOLIC_LEAVES = (Pid, Arange, LoopVar, IterArgOffset, Observed, NumPrograms)
 
 
-def _has_t0_symbols(term: Term) -> bool:
-    if isinstance(term, _SYMBOLIC_LEAVES):
+def _has_symbols(term: Term, leaves: tuple = _SYMBOLIC_LEAVES) -> bool:
+    if isinstance(term, leaves):
         return True
     for attr in ("a", "b", "cond", "t", "f"):
         sub = getattr(term, attr, None)
-        if sub is not None and _has_t0_symbols(sub):
+        if sub is not None and _has_symbols(sub, leaves):
             return True
     return False
 
 
-def _linear_at_t0(term: Term, graph: AccessGraph) -> bool:
+def _has_t0_symbols(term: Term) -> bool:
+    return _has_symbols(term, _SYMBOLIC_LEAVES)
+
+
+def _linear_in(term: Term, graph: AccessGraph, leaves: tuple) -> bool:
+    """No symbolic×symbolic product and no symbolic divisor, ``leaves``
+    naming the symbolic leaf classes of the tier."""
     if isinstance(term, Bin):
         if term.op == "*":
-            if _has_t0_symbols(term.a) and _has_t0_symbols(term.b):
+            if _has_symbols(term.a, leaves) and _has_symbols(term.b, leaves):
                 return False
         elif term.op in ("//", "%"):
-            if _has_t0_symbols(term.b):
+            if _has_symbols(term.b, leaves):
                 return False
-        return _linear_at_t0(term.a, graph) and _linear_at_t0(term.b, graph)
+        return _linear_in(term.a, graph, leaves) and _linear_in(term.b, graph, leaves)
     if isinstance(term, IterArgOffset):
         info = graph.iter_args.get(term.arg_id)
         if info is None:
             return False
-        # Expands to offset0 + k·delta: linear only for a T0-constant delta.
-        if _has_t0_symbols(info.delta):
+        # Expands to offset0 + k·delta: linear only for a constant delta.
+        if _has_symbols(info.delta, leaves):
             return False
-        return _linear_at_t0(info.offset0, graph)
+        return _linear_in(info.offset0, graph, leaves)
     for attr in ("a", "b", "cond", "t", "f"):
         sub = getattr(term, attr, None)
-        if sub is not None and not _linear_at_t0(sub, graph):
+        if sub is not None and not _linear_in(sub, graph, leaves):
             return False
     return True
+
+
+def _linear_at_t0(term: Term, graph: AccessGraph) -> bool:
+    return _linear_in(term, graph, _SYMBOLIC_LEAVES)
 
 
 def t0_linearity_gate(graph: AccessGraph) -> bool:
@@ -908,7 +997,7 @@ def encode_graph_t0(graph: AccessGraph) -> list[tuple[str, GlobalEncoding]]:
     # encode_graph here.
     groups: dict[str, list[tuple[int, AccessEvent]]] = {}
     for seq, access in enumerate(graph.accesses):
-        if access.in_loop and env.zero_trip:
+        if env.zero_trip_for(access):
             continue
         groups.setdefault(access.base_param, []).append((seq, access))
 

@@ -340,6 +340,10 @@ class AccessEvent:
     # termination (surfaced as ``assumes_termination``).
     awaited: bool = False
     exit_pred: "Term | None" = None
+    # The enclosing scf.for loops (LoopInfo.loop_ssa), outermost first;
+    # ``in_loop == bool(loops)``. A multipath graph (see parse_ttir) may
+    # nest several; a single-path graph has at most one.
+    loops: tuple[str, ...] = ()
 
     @property
     def is_read(self) -> bool:
@@ -356,6 +360,10 @@ class IterArgInfo:
     base_param: str
     offset0: Term
     delta: Term  # per-iteration element advance
+    # The scf.for this iter_arg belongs to (its LoopInfo.loop_ssa). Empty
+    # for graphs built before multi-loop capture existed: consumers then
+    # resolve it against the graph's single loop.
+    loop_ssa: str = ""
 
 
 @dataclass(frozen=True)
@@ -380,6 +388,17 @@ class AccessGraph:
     # address/mask terms: a pid read into a stored value, a dropped mask, or
     # an unmodeled branch condition still distinguishes the blocks' behavior.
     pid_axes: set[int] = field(default_factory=set)
+    # Every scf.for of the kernel in textual (opening) order, outer before
+    # inner. ``loop`` above stays the single loop when there is exactly one
+    # (the pre-multipath consumers read it) and is None otherwise.
+    loops: list[LoopInfo] = field(default_factory=list)
+    # True when parsed with ``multipath=True`` (Route 3): block path
+    # predicates for the cf.* graph and multiple loops are modeled; the
+    # single-loop consumers (sanitizer OOB, differential) must not be fed
+    # such a graph.
+    multipath: bool = False
+    # Number of cf.* blocks modeled (0 for a structured kernel).
+    cf_blocks: int = 0
 
     def arg(self, name: str) -> FuncArg | None:
         for a in self.func_args:
@@ -472,6 +491,16 @@ _RE_SCF_IF = re.compile(rf"^scf\.if ({_SSA})")
 # accepted; anything carrying values is refused as "spin-shape".
 _RE_SCF_WHILE_SPIN = re.compile(r"^scf\.while\s*:\s*\(\)\s*->\s*\(\)\s*\{")
 _RE_SCF_CONDITION = re.compile(rf"^scf\.condition\(({_SSA})\)")
+# Unstructured control flow (Route 3, multipath): Triton lowers an ``if``
+# that contains a ``return`` through basic blocks instead of scf.if
+# (code_generator.visit_if_top_level). Block labels carry optional
+# parameters (``^bb5(%3: i32 loc(unknown)):``), branch targets optional
+# operands (``^bb5(%c0_i32 : i32)``).
+_RE_BLOCK_LABEL = re.compile(r"^\^(bb\d+)(?:\((.*)\))?:")
+_RE_COND_BR = re.compile(
+    rf"^cf\.cond_br ({_SSA}), \^(bb\d+)(?:\((.*?)\))?, \^(bb\d+)(?:\((.*?)\))?"
+)
+_RE_BR = re.compile(r"^cf\.br \^(bb\d+)(?:\((.*?)\))?")
 
 
 @dataclass
@@ -489,6 +518,52 @@ class _IfFrame:
 
 
 @dataclass
+class _ForFrame:
+    """Walker state for one open scf.for region: its bounds, the iter_args
+    in declaration order, the arg ids of the pointer-typed ones, and the
+    body's yield operands (resolved at the loop's own scf.yield)."""
+
+    ssa: str
+    ind: str
+    lower: "Term"
+    upper: "Term"
+    step: "Term"
+    order: int = 0  # opening order (outer loops open first)
+    iter_arg_ssa: list = field(default_factory=list)  # (arg_ssa, init_ssa)
+    ptr_arg_ids: list = field(default_factory=list)
+    body_yields: list = field(default_factory=list)
+
+
+@dataclass
+class _Block:
+    """Walker state for one basic block of the unstructured cf.* graph
+    (multipath only). ``edges`` accumulates the incoming edges recorded at
+    the predecessors' branch lines as (path, exact, operand values): the
+    path is the predecessor's block predicate conjoined with the branch
+    condition (negated for the false target), ``exact`` is False when that
+    condition could not be modeled (loaded data) and the path is then only
+    the predecessor's predicate, an over-approximation. At the label the
+    block predicate is the disjunction of the incoming paths; a block with
+    an inexact edge is ``guarded`` (its accesses are widened) and binds its
+    parameters to DataDep (a Select over inexact paths would pick a wrong
+    VALUE, not a wider footprint)."""
+
+    name: str
+    n_preds: int
+    edges: list = field(default_factory=list)
+    pred: "Term | None" = None
+    guarded: bool = False
+    # False when the label was reached before every predecessor's branch
+    # (a block placed before one of its predecessors): its predicate is
+    # unknown, so any access or branch inside refuses by name. Triton's
+    # lowering only does this for the shared return-only block.
+    resolved: bool = True
+    # True once the block's terminator (cf.br / cf.cond_br / tt.return)
+    # was seen: nothing after it is reachable.
+    terminated: bool = False
+
+
+@dataclass
 class _WhileFrame:
     """Walker state for one open scf.while spin candidate (C1.1).
 
@@ -503,17 +578,18 @@ class _WhileFrame:
     cond_val: object | None = None  # resolved AT the scf.condition line
 
 
-def _branch_state(frames: list) -> "tuple[bool, Term | None, bool]":
-    """(guarded, path, in_loop) for an access under the open frames:
+def _branch_state(frames: list) -> "tuple[bool, Term | None, bool, tuple[str, ...]]":
+    """(guarded, path, in_loop, loops) for an access under the open frames:
     ``guarded`` if any enclosing condition is unmodeled; ``path`` is the
     conjunction of the modeled ones (else-regions negated); ``in_loop`` when
-    an scf.for body encloses the access."""
+    an scf.for body encloses the access; ``loops`` the enclosing scf.for
+    loops' ssa names, outermost first."""
     guarded = False
     path: Term | None = None
-    in_loop = False
+    loops: list[str] = []
     for f in frames:
-        if f == "for":
-            in_loop = True
+        if isinstance(f, _ForFrame):
+            loops.append(f.ssa)
             continue
         if not isinstance(f, _IfFrame):
             continue
@@ -522,7 +598,126 @@ def _branch_state(frames: list) -> "tuple[bool, Term | None, bool]":
             continue
         c: Term = f.cond if f.branch == "then" else Not(f.cond)
         path = c if path is None else BoolBin("and", path, c)
-    return guarded, path, in_loop
+    return guarded, path, bool(loops), tuple(loops)
+
+
+def _conj(a: "Term | None", b: "Term | None") -> "Term | None":
+    """None-aware conjunction (None = true)."""
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return BoolBin("and", a, b)
+
+
+def _disj(a: "Term | None", b: "Term | None") -> "Term | None":
+    """None-aware disjunction (None = true)."""
+    if a is None or b is None:
+        return None
+    return BoolBin("or", a, b)
+
+
+def _arg_ssas(inner: "str | None") -> list[str]:
+    """SSA names of a block-operand list (``%a : i32, %b : i32``) or a
+    label parameter list (``%3: i32 loc(unknown), ...``)."""
+    if not inner:
+        return []
+    out: list[str] = []
+    for part in inner.split(","):
+        part = part.strip()
+        if part.startswith("%"):
+            out.append(part.split(":")[0].strip())
+    return out
+
+
+def _merge_block_param(edges: list, index: int) -> object:
+    """The value of block parameter ``index`` as a Select over the incoming
+    edges (every edge exact): the last edge is the fallback, each earlier
+    edge selects its value under its own path. Pointers merge when they
+    share a base (a Select over offsets); anything else stays DataDep, so
+    an address use fails closed."""
+    vals = [e[2][index] if index < len(e[2]) else None for e in edges]
+    if not vals or any(v is None for v in vals):
+        return DataDep("block argument")
+    paths = [e[0] for e in edges]
+    if all(isinstance(v, PtrValue) for v in vals):
+        bases = {v.base_param for v in vals}  # type: ignore[union-attr]
+        if len(bases) != 1:
+            return DataDep("block argument merging different bases")
+        sel: Term = vals[-1].offset  # type: ignore[union-attr]
+        for epath, v in reversed(list(zip(paths, vals))[:-1]):
+            off: Term = v.offset  # type: ignore[union-attr]
+            sel = off if epath is None else Select(epath, off, sel)
+        return PtrValue(vals[0].base_param, sel)  # type: ignore[union-attr]
+    if any(isinstance(v, (DataDep, PtrValue)) for v in vals):
+        return DataDep("block argument")
+    term: Term = vals[-1]  # type: ignore[assignment]
+    for epath, v in reversed(list(zip(paths, vals))[:-1]):
+        term = v if epath is None else Select(epath, v, term)  # type: ignore[assignment,arg-type]
+    return term
+
+
+def _prescan_blocks(lines: list[str]) -> dict[str, int]:
+    """Predecessor counts of every block of the function's cf.* graph, and
+    the acyclicity check. Block labels and cf.* terminators live only in
+    the function's own region (Triton never places them inside scf
+    regions: a ``return`` inside a loop is a compile error), so a flat
+    scan tracking the current label is exact. Raises (kind control-flow)
+    on a cycle: Triton never emits one, and a cyclic graph has no block
+    predicates."""
+    cur = "bb0"
+    edges: dict[str, list[str]] = {}
+    seen_func = False
+    depth = 0  # anonymous op regions (tt.reduce combine blocks) are skipped
+    for raw in lines:
+        line = raw.strip()
+        if not seen_func:
+            seen_func = _RE_FUNC.search(line) is not None
+            continue
+        if line.endswith("({"):
+            depth += 1
+            continue
+        if line.startswith("})") and depth:
+            depth -= 1
+            continue
+        if depth:
+            continue
+        lm = _RE_BLOCK_LABEL.match(line)
+        if lm:
+            cur = lm.group(1)
+            edges.setdefault(cur, [])
+            continue
+        cm = _RE_COND_BR.match(line)
+        if cm:
+            edges.setdefault(cur, []).extend([cm.group(2), cm.group(4)])
+            continue
+        bm = _RE_BR.match(line)
+        if bm:
+            edges.setdefault(cur, []).append(bm.group(1))
+    n_preds: dict[str, int] = {}
+    for src, dsts in edges.items():
+        for d in dsts:
+            n_preds[d] = n_preds.get(d, 0) + 1
+    # DFS cycle check from the entry block
+    state: dict[str, int] = {}
+
+    def visit(b: str, depth: int) -> None:
+        if depth > 10_000:
+            raise UnsupportedTTIR("cf graph too deep", kind="control-flow")
+        state[b] = 1
+        for d in edges.get(b, []):
+            st = state.get(d, 0)
+            if st == 1:
+                raise UnsupportedTTIR(
+                    f"cyclic cf.* control flow through ^{d} is unsupported",
+                    kind="control-flow",
+                )
+            if st == 0:
+                visit(d, depth + 1)
+        state[b] = 2
+
+    visit("bb0", 0)
+    return n_preds
 
 
 def _elem_bits(type_str: str) -> int:
@@ -570,12 +765,26 @@ class _LocTable:
         return None
 
 
-def parse_ttir(text: str) -> AccessGraph:
+def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
     """Parse one TTIR module into an AccessGraph.
 
     Raises :class:`UnsupportedTTIR` for indirect addressing, block pointers,
     nested/while loops, or any op outside the v1 address vocabulary that
     feeds a pointer.
+
+    ``multipath=True`` (Route 3, the ladder's L2) lifts two structural
+    boundaries of the single-path model and is otherwise byte-identical:
+      * the unstructured ``cf.*`` graph Triton emits for an ``if`` that
+        contains a ``return`` (early-exit guards) gets block path
+        predicates: every access conjoins its block's predicate into
+        ``path`` exactly as it conjoins an enclosing scf.if condition, and
+        block parameters bind to a Select over the incoming edges' values;
+      * several ``scf.for`` loops (nested, sequential, under an scf.if or
+        a block predicate) each get their own induction variable
+        (``AccessGraph.loops``, ``AccessEvent.loops``).
+    Every new code path starts at a refusal site of the single-path model
+    (the ``cf.*`` raise, the second-loop raise), so a kernel without those
+    constructs is parsed identically in both modes.
     """
     locs = _LocTable()
     kernel_name = ""
@@ -584,7 +793,16 @@ def parse_ttir(text: str) -> AccessGraph:
     env: dict[str, object] = {}
     accesses: list[AccessEvent] = []
     loop: LoopInfo | None = None
+    loops: list[tuple[int, LoopInfo]] = []  # (opening order, loop)
+    loops_opened = 0
     iter_args: dict[int, IterArgInfo] = {}
+    next_arg_id = 0
+    # Block walk (multipath): the implicit entry block, the block table
+    # filled from the pre-scan on the first cf.* line, the current block.
+    entry = _Block("bb0", n_preds=0)
+    blocks: dict[str, _Block] = {}
+    n_preds: dict[str, int] | None = None
+    cur = entry
 
     lines = text.splitlines()
     # Pre-scan loc table (aliases live at the bottom).
@@ -648,15 +866,59 @@ def parse_ttir(text: str) -> AccessGraph:
     # inside (``path``), and marks accesses under an UNMODELED condition as
     # ``guarded``.
     frames: list = []
-    loop_body_yields: list[str] = []
-    loop_iter_arg_ssa: list[tuple[str, str]] = []  # (arg_ssa, init_ssa)
-    loop_meta: dict[str, object] = {}
     pid_axes: set[int] = set()
+
+    def access_state() -> "tuple[bool, Term | None, bool, tuple[str, ...]]":
+        """_branch_state plus the current block's predicate (multipath):
+        the block predicate is the outermost conjunct of ``path`` and an
+        inexact block widens the access. Identical to _branch_state while
+        the walk is in the entry block."""
+        guarded, path, in_loop, loops_ = _branch_state(frames)
+        if cur is entry:
+            return guarded, path, in_loop, loops_
+        if not cur.resolved:
+            raise UnsupportedTTIR(
+                f"block ^{cur.name} is entered from a later block "
+                "(non-Triton block order)",
+                kind="control-flow",
+            )
+        if cur.terminated:
+            raise UnsupportedTTIR(
+                f"access after the terminator of ^{cur.name}",
+                kind="control-flow",
+            )
+        return guarded or cur.guarded, _conj(cur.pred, path), in_loop, loops_
+
+    def block_for(name: str) -> _Block:
+        assert n_preds is not None
+        blk = blocks.get(name)
+        if blk is None:
+            blk = _Block(name, n_preds=n_preds.get(name, 0))
+            blocks[name] = blk
+        return blk
+
+    def record_edge(
+        target: str, path: "Term | None", exact: bool, inner: "str | None"
+    ) -> None:
+        # Operand values resolve NOW: they are SSA names of the branching
+        # block, which the target's parameter binding must not re-read.
+        block_for(target).edges.append(
+            (path, exact, [val(s) for s in _arg_ssas(inner)])
+        )
+
+    # Depth of anonymous OP regions (``"tt.reduce"(...) ({`` ... ``})``):
+    # their ``^bb0(...)`` combine-block labels belong to the op, not to the
+    # function's cf.* graph, and stay ignored exactly as in single-path.
+    op_region_depth = 0
 
     for line_no, raw in enumerate(lines, start=1):
         line = raw.strip()
         if not line or line.startswith("#"):
             continue
+        if line.endswith("({"):
+            op_region_depth += 1
+        elif line.startswith("})") and op_region_depth:
+            op_region_depth -= 1
         m = _RE_FUNC.search(line)
         if m and not kernel_name:
             kernel_name = m.group(1)
@@ -741,7 +1003,13 @@ def parse_ttir(text: str) -> AccessGraph:
             # variables the single-loop model cannot represent, and a loop
             # under an scf.if runs a condition-dependent iteration count;
             # reject rather than silently mis-bound the induction var.
-            if loop is not None or frames:
+            # Multipath (Route 3) lifts exactly this refusal: every loop gets
+            # its own induction variable and a loop under a condition
+            # carries that condition in its records' path. A loop inside a
+            # spin loop stays refused (the await shape has no body ops).
+            second_loop = loop is not None or bool(frames)
+            in_spin = any(isinstance(f, _WhileFrame) for f in frames)
+            if second_loop and (not multipath or in_spin):
                 raise UnsupportedTTIR(
                     f"line {line_no}: multiple/nested loops",
                     # A loop under an scf.if runs a branch-dependent
@@ -775,33 +1043,41 @@ def parse_ttir(text: str) -> AccessGraph:
                         kind="data-dependent-bound",
                     )
                 bound_terms[label] = as_term(bv, f"loop {label}")
-            loop_meta = {
-                "ssa": res or "%loop",
-                "ind": ind,
-                "lower": bound_terms["lower"],
-                "upper": bound_terms["upper"],
-                "step": bound_terms["step"],
-            }
+            # The first loop keeps the historical "%loop" name; further
+            # loops (multipath only) need distinct names for their
+            # LoopVar / LoopInfo identity.
+            loop_ssa = res or ("%loop" if loops_opened == 0 else f"%loop@{line_no}")
+            frame = _ForFrame(
+                ssa=loop_ssa,
+                ind=ind,
+                lower=bound_terms["lower"],
+                upper=bound_terms["upper"],
+                step=bound_terms["step"],
+                order=loops_opened,
+            )
+            loops_opened += 1
             # Bind induction var as a loop free variable.
-            env[ind] = LoopVar(res or "%loop")
+            env[ind] = LoopVar(loop_ssa)
             # Bind ptr iter_args to IterArgOffset; ignore non-ptr (accumulators).
-            arg_id = 0
             for arg_ssa, init_ssa in pairs:
                 iv = val(init_ssa)
                 if isinstance(iv, PtrValue):
+                    arg_id = next_arg_id
+                    next_arg_id += 1
                     iter_args[arg_id] = IterArgInfo(
                         arg_id=arg_id,
                         base_param=iv.base_param,
                         offset0=iv.offset,
                         delta=Const(0),  # filled at yield
+                        loop_ssa=loop_ssa,
                     )
                     env[arg_ssa] = PtrValue(iv.base_param, IterArgOffset(arg_id))
-                    loop_iter_arg_ssa.append((arg_ssa, init_ssa))
-                    arg_id += 1
+                    frame.iter_arg_ssa.append((arg_ssa, init_ssa))
+                    frame.ptr_arg_ids.append(arg_id)
                 else:
                     env[arg_ssa] = DataDep("loop accumulator")
-                    loop_iter_arg_ssa.append((arg_ssa, init_ssa))
-            frames.append("for")
+                    frame.iter_arg_ssa.append((arg_ssa, init_ssa))
+            frames.append(frame)
             continue
 
         # ---- scf.if: track the region and model its condition ----
@@ -859,41 +1135,46 @@ def parse_ttir(text: str) -> AccessGraph:
                         )
                 continue
             # A "for" frame closed: resolve deltas from the yields, positionally.
+            assert isinstance(popped, _ForFrame)
             ptr_idx = 0
-            for pos, (arg_ssa, _init) in enumerate(loop_iter_arg_ssa):
+            for pos, (arg_ssa, _init) in enumerate(popped.iter_arg_ssa):
                 if not isinstance(env.get(arg_ssa), PtrValue):
                     continue
-                if pos >= len(loop_body_yields):
+                if pos >= len(popped.body_yields):
                     raise UnsupportedTTIR("loop yield/iter_arg count mismatch")
-                yssa = loop_body_yields[pos]
+                yssa = popped.body_yields[pos]
                 yv = env.get(yssa)
                 if not isinstance(yv, PtrValue):
                     raise UnsupportedTTIR("loop yields a non-pointer for a ptr arg")
-                delta = _extract_loop_delta(yv.offset, ptr_idx)
+                aid = popped.ptr_arg_ids[ptr_idx]
+                delta = _extract_loop_delta(yv.offset, aid)
                 if delta is None:
                     raise UnsupportedTTIR(
-                        f"loop pointer advance for arg {ptr_idx} is not a "
+                        f"loop pointer advance for arg {aid} is not a "
                         "simple monotonic addptr"
                     )
-                info = iter_args[ptr_idx]
-                iter_args[ptr_idx] = IterArgInfo(
-                    info.arg_id, info.base_param, info.offset0, delta
+                info = iter_args[aid]
+                iter_args[aid] = IterArgInfo(
+                    info.arg_id, info.base_param, info.offset0, delta, popped.ssa
                 )
                 ptr_idx += 1
-            loop = LoopInfo(
-                loop_ssa=str(loop_meta["ssa"]),
-                induction_var=str(loop_meta["ind"]),
-                lower=loop_meta["lower"],  # type: ignore[arg-type]
-                upper=loop_meta["upper"],  # type: ignore[arg-type]
-                step=loop_meta["step"],  # type: ignore[arg-type]
+            closed = LoopInfo(
+                loop_ssa=popped.ssa,
+                induction_var=popped.ind,
+                lower=popped.lower,
+                upper=popped.upper,
+                step=popped.step,
             )
+            loops.append((popped.order, closed))
+            if loop is None:
+                loop = closed
             continue
 
         ym = _RE_SCF_YIELD.match(body)
-        if ym and frames and frames[-1] == "for":
+        if ym and frames and isinstance(frames[-1], _ForFrame):
             # Only the loop's own yield resolves iter-arg deltas; an scf.if's
             # yield inside the loop body must not clobber it.
-            loop_body_yields = _split_ssa(ym.group(1))
+            frames[-1].body_yields = _split_ssa(ym.group(1))
             continue
         if ym and frames and isinstance(frames[-1], _IfFrame):
             # Resolve yield VALUES here, not at the closing brace: then/else
@@ -906,6 +1187,93 @@ def parse_ttir(text: str) -> AccessGraph:
             else:
                 fr.else_vals = vals
             continue
+
+        # ---- the unstructured cf.* graph (multipath, Route 3) ----
+        # Block predicates are computed in the walk order: Triton creates
+        # the blocks of an if-with-return in topological order (then, else,
+        # nested blocks, merge), so a label normally sees every incoming
+        # edge; the exception (a shared return-only block placed before a
+        # later predecessor) is tolerated only while nothing inside needs
+        # the predicate (access_state refuses otherwise).
+        if (
+            multipath
+            and op_region_depth == 0
+            and (body.startswith("cf.") or line.startswith("^bb"))
+        ):
+            if n_preds is None:
+                n_preds = _prescan_blocks(lines)
+            if frames:
+                raise UnsupportedTTIR(
+                    f"line {line_no}: cf.* control flow inside an scf region",
+                    kind="control-flow",
+                )
+            lbm = _RE_BLOCK_LABEL.match(line)
+            if lbm:
+                blk = block_for(lbm.group(1))
+                params = _arg_ssas(lbm.group(2))
+                if len(blk.edges) < blk.n_preds:
+                    blk.resolved = False
+                    for prm in params:
+                        env[prm] = DataDep("block argument of an unresolved block")
+                    cur = blk
+                    continue
+                pred: Term | None = None
+                exact_all = True
+                for i, (epath, exact, _vals) in enumerate(blk.edges):
+                    pred = epath if i == 0 else _disj(pred, epath)
+                    exact_all = exact_all and exact
+                if not blk.edges:
+                    # Unreachable block (no predecessor): no execution
+                    # enters it. Keep it inert rather than fabricating
+                    # accesses; Triton does not emit such blocks.
+                    pred, exact_all = Cmp("ne", Const(0), Const(0)), True
+                blk.pred = pred
+                blk.guarded = not exact_all
+                for pi, prm in enumerate(params):
+                    env[prm] = (
+                        _merge_block_param(blk.edges, pi)
+                        if exact_all
+                        else DataDep("block argument")
+                    )
+                cur = blk
+                continue
+            if cur.terminated or not cur.resolved:
+                raise UnsupportedTTIR(
+                    f"line {line_no}: branch in an unresolved or terminated "
+                    f"block ^{cur.name}",
+                    kind="control-flow",
+                )
+            cbm = _RE_COND_BR.match(body)
+            if cbm:
+                cv = val(cbm.group(1))
+                base_exact = not cur.guarded
+                if not isinstance(cv, (DataDep, PtrValue)):
+                    cond: Term = cv  # type: ignore[assignment]
+                    record_edge(
+                        cbm.group(2), _conj(cur.pred, cond), base_exact, cbm.group(3)
+                    )
+                    record_edge(
+                        cbm.group(4),
+                        _conj(cur.pred, Not(cond)),
+                        base_exact,
+                        cbm.group(5),
+                    )
+                else:
+                    # Loaded-data condition: both targets stay reachable
+                    # under the predecessor's predicate alone (widening).
+                    record_edge(cbm.group(2), cur.pred, False, cbm.group(3))
+                    record_edge(cbm.group(4), cur.pred, False, cbm.group(5))
+                cur.terminated = True
+                continue
+            brm = _RE_BR.match(body)
+            if brm:
+                record_edge(brm.group(1), cur.pred, not cur.guarded, brm.group(2))
+                cur.terminated = True
+                continue
+            raise UnsupportedTTIR(
+                f"line {line_no}: control flow {body.split(' ', 1)[0]} is unsupported",
+                kind="control-flow",
+            )
 
         # ---- other control flow: fail closed ----
         # scf.for, scf.if and the scf.while await shape are region-tracked
@@ -930,7 +1298,7 @@ def parse_ttir(text: str) -> AccessGraph:
         # ---- accesses ----
         lm = _RE_LOAD.match(body)
         if lm:
-            guarded, path, in_loop = _branch_state(frames)
+            guarded, path, in_loop, loops_ = access_state()
             _record_access(
                 "load",
                 lm.group(1),
@@ -944,6 +1312,7 @@ def parse_ttir(text: str) -> AccessGraph:
                 line_no,
                 path=path,
                 in_loop=in_loop,
+                loops=loops_,
                 base_elem_float=base_elem_float,
             )
             if res is not None:
@@ -967,7 +1336,7 @@ def parse_ttir(text: str) -> AccessGraph:
                     "await shape",
                     kind="spin-shape",
                 )
-            guarded, path, in_loop = _branch_state(frames)
+            guarded, path, in_loop, loops_ = access_state()
             _record_access(
                 "store",
                 sm.group(1),
@@ -981,11 +1350,12 @@ def parse_ttir(text: str) -> AccessGraph:
                 line_no,
                 path=path,
                 in_loop=in_loop,
+                loops=loops_,
             )
             continue
         am = _RE_ATOMIC_RMW.match(body)
         if am:
-            guarded, path, in_loop = _branch_state(frames)
+            guarded, path, in_loop, loops_ = access_state()
             _record_access(
                 "atomic_rmw",
                 am.group(4),
@@ -1000,6 +1370,7 @@ def parse_ttir(text: str) -> AccessGraph:
                 atomic=AtomicInfo(am.group(1), am.group(2), am.group(3)),
                 path=path,
                 in_loop=in_loop,
+                loops=loops_,
                 atomic_val=operand_term(val(am.group(5))),
                 base_elem_float=base_elem_float,
             )
@@ -1008,7 +1379,7 @@ def parse_ttir(text: str) -> AccessGraph:
             continue
         am = _RE_ATOMIC_CAS.match(body)
         if am:
-            guarded, path, in_loop = _branch_state(frames)
+            guarded, path, in_loop, loops_ = access_state()
             _record_access(
                 "atomic_cas",
                 am.group(3),
@@ -1023,6 +1394,7 @@ def parse_ttir(text: str) -> AccessGraph:
                 atomic=AtomicInfo(None, am.group(1), am.group(2)),
                 path=path,
                 in_loop=in_loop,
+                loops=loops_,
                 atomic_val=operand_term(val(am.group(5))),
                 atomic_cmp=operand_term(val(am.group(4))),
                 base_elem_float=base_elem_float,
@@ -1074,6 +1446,8 @@ def parse_ttir(text: str) -> AccessGraph:
             env[res] = DataDep("float/reduction value")
             continue
         if body.startswith(("tt.return", "tt.reduce.return")):
+            if multipath and body.startswith("tt.return") and not frames:
+                cur.terminated = True
             continue
         if body.startswith("tt.make_block_ptr") or body.startswith("tt.advance"):
             raise UnsupportedTTIR(
@@ -1087,13 +1461,17 @@ def parse_ttir(text: str) -> AccessGraph:
     if not kernel_name:
         raise UnsupportedTTIR("no tt.func found (not TTIR?)")
 
+    ordered = [lp for _o, lp in sorted(loops, key=lambda t: t[0])]
     return AccessGraph(
         kernel_name=kernel_name,
         func_args=func_args,
         accesses=accesses,
-        loop=loop,
+        loop=loop if len(ordered) == 1 else None,
         iter_args=iter_args,
         pid_axes=pid_axes,
+        loops=ordered,
+        multipath=multipath,
+        cf_blocks=len(blocks),
     )
 
 
@@ -1366,6 +1744,7 @@ def _record_access(
     atomic_val=None,
     atomic_cmp=None,
     base_elem_float=None,
+    loops=(),
 ) -> None:
     ptr = val(ptr_ssa)
     if not isinstance(ptr, PtrValue):
@@ -1407,5 +1786,6 @@ def _record_access(
             atomic_val=atomic_val,
             atomic_cmp=atomic_cmp,
             elem_float=(base_elem_float(ptr.base_param) if base_elem_float else False),
+            loops=tuple(loops),
         )
     )

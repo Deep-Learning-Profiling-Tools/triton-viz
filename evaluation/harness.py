@@ -120,7 +120,7 @@ def _static_track(
             t0_linearity_gate,
         )
 
-        t0_gate = bool(t0_linearity_gate(parse_ttir(ttir)))
+        t0_gate = bool(t0_linearity_gate(parse_ttir(ttir, multipath=ladder_level >= 2)))
     except Exception:  # noqa: BLE001
         pass
 
@@ -713,6 +713,9 @@ def run_one(
     mutate: bool = False,
     ladder_level: LadderLevel = LadderLevel.L0,
 ) -> dict[str, Any]:
+    # ladder_level: the detector's L0/L1/L2 switch (design §4b), stamped
+    # into the results header by the runner. The cuTile track has no
+    # multipath reader yet and ignores it.
     if spec.frontend == "cutile":
         return _run_one_cutile(spec, seed, ladder_level)
     row_started = time.perf_counter()

@@ -229,16 +229,29 @@ def run_corpus(
     mutate: bool = False,
     jobs: int = 1,
     ladder_level: LadderLevel = LadderLevel.L0,
+    only_names: "set[str] | None" = None,
+    out_suffix: "str | None" = None,
 ) -> Path:
     from evaluation.kernels import load
 
     corpus = load(corpus_name)
-    specs = [s for s in corpus.specs if only is None or s.name == only]
+    specs = [
+        s
+        for s in corpus.specs
+        if (only is None or s.name == only)
+        and (only_names is None or s.name in only_names)
+    ]
     RESULTS_DIR.mkdir(exist_ok=True)
     # One dataset per level: the L0 files keep their names (the paper's
     # numbers), deeper levels get a suffix so a rerun can never overwrite
     # the other level's rows unnoticed.
-    suffix = "" if ladder_level == LadderLevel.L0 else f"_{ladder_level.name}"
+    # ``out_suffix`` names a subset run (a change-surface slice) so it can
+    # never overwrite a recorded dataset of the same level.
+    suffix = (
+        out_suffix
+        if out_suffix is not None
+        else ("" if ladder_level == LadderLevel.L0 else f"_{ladder_level.name}")
+    )
     out_path = RESULTS_DIR / f"{corpus_name}{suffix}.jsonl"
 
     header = results_header(corpus_name, seed, corpus.provenance, ladder_level)
@@ -272,6 +285,26 @@ def main() -> None:
     ap = argparse.ArgumentParser()
     ap.add_argument("--corpus", required=True)
     ap.add_argument("--only")
+    ap.add_argument(
+        "--only-file",
+        help="run only the specs whose names are listed in this file (one "
+        "per line; a change-surface subset)",
+    )
+    ap.add_argument(
+        "--out-suffix",
+        help="output name suffix before .jsonl (default: '' at L0, '.L<n>' "
+        "above; a subset run should name itself so no recorded dataset is "
+        "overwritten)",
+    )
+    ap.add_argument(
+        "--ladder-level",
+        type=int,
+        default=0,
+        choices=(0, 1, 2),
+        help="detector ladder depth (design §4b): 0 = shipped single-path "
+        "behavior, 2 = + Route 3 multipath capture; stamped in the header "
+        "and the output name",
+    )
     ap.add_argument("--seed", type=int, default=0)
     ap.add_argument("--timeout", type=int, default=PER_SPEC_TIMEOUT_S)
     ap.add_argument("--jobs", type=int, default=1)
@@ -293,6 +326,13 @@ def main() -> None:
     )
     ns = ap.parse_args()
 
+    only_names = None
+    if ns.only_file:
+        only_names = {
+            ln.strip()
+            for ln in Path(ns.only_file).read_text().splitlines()
+            if ln.strip() and not ln.startswith("#")
+        }
     out = run_corpus(
         ns.corpus,
         ns.only,
@@ -301,6 +341,8 @@ def main() -> None:
         mutate=ns.mutate,
         jobs=ns.jobs,
         ladder_level=parse_ladder_level(ns.ladder_level),
+        only_names=only_names,
+        out_suffix=ns.out_suffix,
     )
     if not ns.no_report:
         from evaluation.report import render

@@ -320,6 +320,138 @@ ADD_CONST = {"BLOCK_SIZE": 1024}
 ADD_ATTRS = {(i,): [["tt.divisibility", 16]] for i in range(4)}
 
 
+# ----------------------------------------------------------------------------
+# Route 3 (multipath) shapes: early-return guards lower to cf.cond_br basic
+# blocks (an `if` containing a `return`), several scf.for loops, a loop
+# under an scf.if, a persistent grid-stride loop with a pid-dependent bound.
+# Regenerate with `python generate_golden.py multipath` (sm80 only).
+# ----------------------------------------------------------------------------
+@triton.jit
+def early_return_pid_kernel(x_ptr, out_ptr, n, T, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    if pid * BLOCK >= T:
+        return
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    m = offs < n
+    v = tl.load(x_ptr + offs, mask=m)
+    tl.store(out_ptr + offs, v, mask=m)
+
+
+@triton.jit
+def early_return_loaded_kernel(x_ptr, idx_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    y = tl.load(idx_ptr + pid)
+    if y == -1:
+        return
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    m = offs < n
+    v = tl.load(x_ptr + offs, mask=m)
+    tl.store(out_ptr + offs, v, mask=m)
+
+
+@triton.jit
+def nested_guard_merge_kernel(x_ptr, out_ptr, n, T, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    base = pid * BLOCK
+    if pid >= T:
+        return
+    if pid == 0:
+        base = 0
+        if n < 0:
+            return
+    else:
+        base = base + n
+    offs = base + tl.arange(0, BLOCK)
+    v = tl.load(x_ptr + offs)
+    tl.store(out_ptr + offs, v)
+
+
+@triton.jit
+def guard_then_loop_kernel(x_ptr, out_ptr, n, T, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    if pid * BLOCK >= T:
+        return
+    for k in range(0, n):
+        offs = pid * BLOCK + k * T + tl.arange(0, BLOCK)
+        v = tl.load(x_ptr + offs)
+        tl.store(out_ptr + offs, v)
+
+
+@triton.jit
+def nested_loops_kernel(x_ptr, out_ptr, n, m, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    for i in range(0, n):
+        for j in range(0, m):
+            offs = (pid * n + i) * m + j
+            v = tl.load(x_ptr + offs)
+            tl.store(out_ptr + offs, v)
+
+
+@triton.jit
+def sequential_loops_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    acc = tl.zeros([BLOCK], dtype=tl.float32)
+    for i in range(0, n):
+        acc += tl.load(x_ptr + offs + i * BLOCK)
+    for j in range(0, n):
+        tl.store(out_ptr + offs + j * BLOCK, acc)
+
+
+@triton.jit
+def grid_stride_kernel(
+    x_ptr, out_ptr, n_rows, stride, NUM_PRGMS: tl.constexpr, BLOCK: tl.constexpr
+):
+    pid = tl.program_id(0)
+    cols = tl.arange(0, BLOCK)
+    for row in range(pid, n_rows, NUM_PRGMS):
+        v = tl.load(x_ptr + row * stride + cols)
+        tl.store(out_ptr + row * stride + cols, v)
+
+
+@triton.jit
+def loop_under_if_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    if pid == 0:
+        for i in range(0, n):
+            tl.store(out_ptr + offs + i * BLOCK, tl.load(x_ptr + offs + i * BLOCK))
+
+
+MULTIPATH_KERNELS = (
+    ("early_return_pid", early_return_pid_kernel,
+     {"x_ptr": "*fp32", "out_ptr": "*fp32", "n": "i32", "T": "i32", "BLOCK": "constexpr"},
+     {"BLOCK": 64}),
+    ("early_return_loaded", early_return_loaded_kernel,
+     {"x_ptr": "*fp32", "idx_ptr": "*i32", "out_ptr": "*fp32", "n": "i32", "BLOCK": "constexpr"},
+     {"BLOCK": 64}),
+    ("nested_guard_merge", nested_guard_merge_kernel,
+     {"x_ptr": "*fp32", "out_ptr": "*fp32", "n": "i32", "T": "i32", "BLOCK": "constexpr"},
+     {"BLOCK": 64}),
+    ("guard_then_loop", guard_then_loop_kernel,
+     {"x_ptr": "*fp32", "out_ptr": "*fp32", "n": "i32", "T": "i32", "BLOCK": "constexpr"},
+     {"BLOCK": 64}),
+    ("nested_loops", nested_loops_kernel,
+     {"x_ptr": "*fp32", "out_ptr": "*fp32", "n": "i32", "m": "i32", "BLOCK": "constexpr"},
+     {"BLOCK": 64}),
+    ("sequential_loops", sequential_loops_kernel,
+     {"x_ptr": "*fp32", "out_ptr": "*fp32", "n": "i32", "BLOCK": "constexpr"},
+     {"BLOCK": 64}),
+    ("grid_stride", grid_stride_kernel,
+     {"x_ptr": "*fp32", "out_ptr": "*fp32", "n_rows": "i32", "stride": "i32",
+      "NUM_PRGMS": "constexpr", "BLOCK": "constexpr"},
+     {"NUM_PRGMS": 4, "BLOCK": 64}),
+    ("loop_under_if", loop_under_if_kernel,
+     {"x_ptr": "*fp32", "out_ptr": "*fp32", "n": "i32", "BLOCK": "constexpr"},
+     {"BLOCK": 64}),
+)  # fmt: skip
+
+
+def dump_multipath():
+    for tag, fn, sig, consts in MULTIPATH_KERNELS:
+        dump(tag, fn, sig, consts, {}, num_stages=1, num_warps=4, caps=(80,))
+
+
 def dump(tag, fn, sig, consts, attrs, num_stages, num_warps, caps=(90, 80)):
     last_err = None
     for cap in caps:
@@ -347,6 +479,9 @@ def dump(tag, fn, sig, consts, attrs, num_stages, num_warps, caps=(90, 80)):
 
 
 if __name__ == "__main__":
+    if sys.argv[1:] == ["multipath"]:
+        dump_multipath()
+        sys.exit(0)
     dump(
         "matmul_s3",
         matmul_kernel,
