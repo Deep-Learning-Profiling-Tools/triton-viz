@@ -598,3 +598,131 @@ def test_views_of_one_storage_keep_their_offsets_on_the_clone():
     o = _run(_shift_kernel, (4,), hi, hi, 16, BLOCK=4)
     assert o.status == "races"
     assert hi.data_ptr() <= o.reports[0].witness_addr < hi.data_ptr() + 16 * 4
+
+
+# ── taint through memory within an instance ─────────────────────────
+
+
+@triton.jit
+def _state_update_kernel(state_ptr, x_ptr, BLOCK: tl.constexpr):
+    # the causal-conv shape: read the state, use it, write it back in place
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    s = tl.load(state_ptr + offs)
+    v = tl.load(x_ptr + offs + s, mask=offs + s < 64, other=0.0)
+    tl.store(state_ptr + offs, s + 1)
+    tl.store(x_ptr + offs, v)
+
+
+def test_same_instance_in_place_state_update_is_decided():
+    state = torch.zeros(16, dtype=torch.int32)
+    o = _run(_state_update_kernel, (4,), state, torch.zeros(64), BLOCK=4)
+    assert o.status == "ok"
+    assert o.n_value_source_loads == 4
+
+
+@triton.jit
+def _relay_index_kernel(idx_ptr, scratch_ptr, out_ptr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    i = tl.load(idx_ptr + offs)
+    tl.store(scratch_ptr + offs, i)  # relay through this instance's scratch
+    j = tl.load(scratch_ptr + offs)
+    tl.store(out_ptr + j, 1.0)
+
+
+def test_relayed_index_makes_the_original_load_a_value_source():
+    idx = torch.arange(8, dtype=torch.int32)
+    o = _run(
+        _relay_index_kernel,
+        (2,),
+        idx,
+        torch.zeros(8, dtype=torch.int32),
+        torch.zeros(8),
+        BLOCK=4,
+    )
+    assert o.status == "ok"
+    assert o.n_value_source_loads == 4  # both the scratch loads and the idx loads
+
+
+@triton.jit
+def _relay_written_index_kernel(idx_ptr, scratch_ptr, out_ptr, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    if pid == 1:
+        tl.store(idx_ptr + offs - BLOCK, 0)  # instance 1 writes instance 0's indices
+    i = tl.load(idx_ptr + offs)
+    tl.store(scratch_ptr + offs, i)
+    j = tl.load(scratch_ptr + offs)
+    tl.store(out_ptr + j, 1.0)
+
+
+def test_relayed_index_from_a_foreign_written_region_refuses():
+    idx = torch.arange(8, dtype=torch.int32)
+    o = _run(
+        _relay_written_index_kernel,
+        (2,),
+        idx,
+        torch.zeros(8, dtype=torch.int32),
+        torch.zeros(8),
+        BLOCK=4,
+    )
+    assert o.status == "unsupported"
+    assert o.reason.startswith("value-source:")
+
+
+@triton.jit
+def _relay_ticket_kernel(head_ptr, scratch_ptr, buf_ptr):
+    pid = tl.program_id(0)
+    t = tl.atomic_add(head_ptr, 1)
+    tl.store(scratch_ptr + pid, t)  # the ticket goes through memory...
+    idx = tl.load(scratch_ptr + pid)
+    tl.store(buf_ptr + idx, pid)  # ...and still reaches an address
+
+
+def test_atomic_return_relayed_through_memory_refuses():
+    o = _run(
+        _relay_ticket_kernel,
+        (4,),
+        torch.zeros(1, dtype=torch.int32),
+        torch.zeros(4, dtype=torch.int32),
+        torch.zeros(64, dtype=torch.int32),
+    )
+    assert o.status == "unsupported"
+    assert o.reason.startswith("atomic-return:")
+    assert "through memory" in o.reason
+
+
+# ── the projected-cost refusal ─────────────────────────────────────
+
+
+@triton.jit
+def _slow_kernel(out_ptr, n_iter, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    for i in range(n_iter):
+        tl.store(out_ptr + offs, i * 1.0)
+
+
+def test_projected_cost_refuses_early_by_name():
+    """Instances that cost tens of milliseconds each on a grid that
+    cannot finish in the budget: the refusal comes soon after the 5 s
+    grace period, not at the watchdog."""
+    t0 = time.perf_counter()
+    o = enumerate_launch(
+        _slow_kernel, (torch.zeros(4 * 4000), 400), {"BLOCK": 4}, (4000,), timeout_s=30
+    )
+    elapsed = time.perf_counter() - t0
+    assert o.status == "unsupported"
+    assert o.reason.startswith("projected-cost:")
+    assert "per instance after the first" in o.reason
+    assert 5.0 <= elapsed < 20.0
+    assert o.n_instances > 1
+
+
+def test_projection_leaves_a_launch_that_fits_alone():
+    o = enumerate_launch(
+        _slow_kernel, (torch.zeros(4 * 8), 50), {"BLOCK": 4}, (8,), timeout_s=30
+    )
+    assert o.status == "ok"
+    assert o.n_instances == 8

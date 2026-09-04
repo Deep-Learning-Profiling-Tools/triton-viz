@@ -456,24 +456,24 @@ def _enum_track(
 ) -> dict[str, Any]:
     """Route 1 on one launch: every instance evaluated concretely on fresh,
     cloned tensors; verdict at the analyzed-launch extent. Refusals are
-    named (``"<kind>: detail"``). The spin pre-gate reuses the static
-    reader's structural await recognition (the sequential interpreter
-    cannot terminate a cross-instance spin); the rung's own taint catches
-    the spins the reader did not see."""
+    named (``"<kind>: detail"``). The spin pre-gate fires only when the
+    static reader RECOGNIZED an await (``assumes_termination``): the
+    sequential interpreter cannot terminate a cross-instance spin. The
+    reader's ``spin-shape`` refusal kind is NOT a gate: it also covers
+    carried-value ``scf.while`` loops that are plain data-dependent
+    iteration (SWEEP_REPORT section 7), which the rung evaluates; a
+    genuine spin the reader did not recognize refuses through the rung's
+    own taint at its first poll."""
     from triton_viz.clients.race_detector.concrete_enum import enumerate_launch
 
     t0 = time.perf_counter()
-    spin_signals = [static.get("reason") or ""] + [
-        r or "" for r in (static.get("parse_unsupported") or [])
-    ]
-    if static.get("assumes_termination") or any(
-        sig.startswith("spin-shape") for sig in spin_signals
-    ):
+    if static.get("assumes_termination"):
         return {
             "status": "unsupported",
             "reason": (
-                "spin-shape: await-bearing kernel (static reader); the "
-                "sequential interpreter cannot terminate a cross-instance spin"
+                "spin-shape: await-bearing kernel (static reader recognized an "
+                "await); the sequential interpreter cannot terminate a "
+                "cross-instance spin"
             ),
             "n_reports": 0,
             "witnesses": [],

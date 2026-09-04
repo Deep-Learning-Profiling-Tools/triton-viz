@@ -40,15 +40,21 @@ scalar arguments, this grid, these tensor contents), the same strength as
 the interpreter frontend's ``proved@interp`` / ``race@interp``, under the
 value-source premise (A2, extended): every load whose value reaches a
 footprint-determining position (an address, a mask, a host-side branch, a
-loop bound) must read bytes the kernel never writes. The premise is
+loop bound) must read bytes no OTHER instance writes. The premise is
 enforced by CONCRETE TAINT: every interpreter value carries the set of
-load operations it derives from (plus an ``atomic-return`` marker); a
-value-source load whose interval overlaps any write footprint refuses by
-name after the run. Instances execute sequentially on one cloned copy of
-the tensors, which is exact under that premise: a footprint can only
-depend on memory through a value-source load, and no value-source load
-observes a modified byte. Plain-data loads are unrestricted, and their
-cross-instance overlaps with writes are reported as races.
+load operations it derives from (plus an ``atomic-return`` marker), and
+taint also flows THROUGH MEMORY within an instance: a store records the
+taint of the value it writes, and a later same-instance load of those
+bytes inherits it (an atomic return relayed through scratch memory still
+refuses; a relayed loaded value makes the original load a value source
+too). A value-source load whose interval overlaps another instance's
+write footprint refuses by name after the run. Instances execute
+sequentially on one cloned copy of the tensors, which is exact under
+that premise: a footprint can only depend on memory through a
+value-source load, and such a load reads either the initial contents or
+its own instance's program-ordered earlier writes, in the sequential run
+exactly as in every real execution. Plain-data loads are unrestricted,
+and their cross-instance overlaps with writes are reported as races.
 
 Disqualifiers, each refusing BY NAME (``"<kind>: detail"``), never
 silently:
@@ -57,8 +63,18 @@ silently:
                     host-side branch, or a loop bound (ticket and
                     last-block idioms, spins on atomic polls): footprints
                     are not per-instance determined.
-  value-source      a value-source load overlaps a write footprint (the
-                    A2 premise), including a spin on a plain-loaded flag.
+  value-source      a value-source load overlaps another instance's
+                    write footprint (the A2 premise), including a spin
+                    on a plain-loaded flag.
+  projected-cost    after the first instance and a grace period of
+                    ``ENUM_PROJECTION_GRACE_S``, the running mean
+                    per-instance time (first instance excluded) times
+                    the remaining instances, plus the time already
+                    spent, exceeds the caller's budget. A heuristic that
+                    trades a possible proof for a fast abstention (a
+                    heavy first stretch mis-projects a light remainder);
+                    never a verdict, and the watchdog stays the bound
+                    when the projection under-estimates.
   instance-ceiling  the grid has more than ``ENUM_MAX_INSTANCES``
                     instances (refused before executing anything: per-
                     instance execution cannot be vectorized across
@@ -90,7 +106,7 @@ import numpy as np
 from ...core.callbacks import ForLoopCallbacks, OpCallbacks
 from ...core.client import Client
 from ...core.config import config as cfg
-from ...core.data import AtomicCas, AtomicRMW, Load, RawLoad, RawStore, Store
+from ...core.data import AtomicCas, AtomicRMW, Load, Store
 from ...core.patch import PatchOp
 from ...utils.traceback_utils import (
     _is_framework_frame,
@@ -110,6 +126,11 @@ ENUM_TIMEOUT_S = 60
 # Distinct (site, site, race type) witnesses reported before the sweep
 # stops early; mirrors REPLAY_MAX_REPORTS.
 ENUM_MAX_REPORTS = 8
+# Projected-cost refusal (Hao, 2026-09-04): no refusal before this much
+# of the run has elapsed, and the first instance never enters the mean
+# (warm-up: AST rewrite caching, first allocations).
+ENUM_PROJECTION_GRACE_S = 5.0
+ENUM_PROJECTION_SKIP_FIRST = 1
 
 _ATOMIC = -1  # taint marker: derived from an atomic return value
 _TAINT_ATTR = "_tilerace_taint"
@@ -304,6 +325,44 @@ def _collect_taint(objs) -> tuple[frozenset[int], bool]:
     return taint, unknown
 
 
+# ─────────────────────────── projected cost ───────────────────────────
+
+
+def projected_cost_refusal(
+    elapsed_s: float,
+    instance_times: list[float],
+    n_total: int,
+    budget_s: float | None,
+    *,
+    grace_s: float = ENUM_PROJECTION_GRACE_S,
+    skip_first: int = ENUM_PROJECTION_SKIP_FIRST,
+) -> str | None:
+    """The projected-cost decision, pure so it can be pinned without a
+    kernel: None to keep running, else the refusal detail. The mean is
+    over the instances completed so far EXCLUDING the first
+    ``skip_first`` (warm-up); nothing is decided before ``grace_s`` of
+    run time, so a heavy leader instance is diluted by the light ones
+    that follow it before the projection is trusted."""
+    if budget_s is None:
+        return None
+    done = len(instance_times)
+    if elapsed_s < grace_s or done <= skip_first:
+        return None
+    remaining = max(0, n_total - done)
+    if remaining == 0:
+        return None  # the run is complete; there is nothing to project
+    sample = instance_times[skip_first:]
+    mean = sum(sample) / len(sample)
+    projected = elapsed_s + mean * remaining
+    if projected <= budget_s:
+        return None
+    return (
+        f"{done} of {n_total} instances in {elapsed_s:.1f}s, mean "
+        f"{mean * 1000:.1f} ms per instance after the first; projected "
+        f"{projected:.0f}s exceeds the {budget_s:.0f}s budget"
+    )
+
+
 # ─────────────────────────── the recorder ───────────────────────────
 
 
@@ -345,8 +404,11 @@ class ConcreteFootprintRecorder(Client):
 
     NAME = "concrete_footprint_recorder"
 
-    def __init__(self) -> None:
+    def __init__(self, budget_s: float | None = None) -> None:
         super().__init__()
+        # the caller's wall-clock budget for the run (the watchdog's
+        # value); drives the projected-cost refusal, None disables it
+        self.budget_s = budget_s
         # per-op metadata, parallel lists indexed by op id
         self.op_pid_index: list[int] = []
         self.op_seq: list[int] = []
@@ -356,6 +418,9 @@ class ConcreteFootprintRecorder(Client):
         self.op_site: list[int] = []  # interned site id
         self.op_lanes: list[int] = []
         self.op_value_source: list[bool] = []
+        # taint of the value a store wrote (atomics: the atomic marker;
+        # loads: None): taint through memory within an instance
+        self.op_store_taint: list[frozenset[int] | None] = []
         self.intervals = _IntervalBuffer()
         self.sites: list[tuple[str, int, str] | None] = []
         self._site_ids: dict[Any, int] = {}
@@ -372,7 +437,9 @@ class ConcreteFootprintRecorder(Client):
         self._atomic_seen = False
         self._last_load_op_id: int | None = None
         self._synthesized_mask_pending = False
+        self._pending_store_taint: frozenset[int] | None = None
         self._instance_t0 = 0.0
+        self._run_t0 = 0.0
         # patch bookkeeping
         self._lang_patch_installed = False
         self._saved_attrs: list[tuple[Any, str, Any, bool]] = []
@@ -388,6 +455,7 @@ class ConcreteFootprintRecorder(Client):
     def grid_callback(self, grid: tuple[int, ...]) -> None:
         g = tuple(int(d) for d in grid) + (1,) * (3 - len(grid))
         self.grid = (g[0], g[1], g[2])
+        self._run_t0 = time.perf_counter()
         self._install_builder_patch()
 
     def grid_idx_callback(self, grid_idx: tuple[int, ...]) -> None:
@@ -404,7 +472,17 @@ class ConcreteFootprintRecorder(Client):
         return True
 
     def post_run_callback(self, fn: Callable) -> bool:
-        self.instance_times.append(time.perf_counter() - self._instance_t0)
+        now = time.perf_counter()
+        self.instance_times.append(now - self._instance_t0)
+        if self.budget_s is not None and self.grid is not None:
+            detail = projected_cost_refusal(
+                now - self._run_t0,
+                self.instance_times,
+                self.grid[0] * self.grid[1] * self.grid[2],
+                self.budget_s,
+            )
+            if detail is not None:
+                raise ConcreteEnumRefusal("projected-cost", detail)
         return True
 
     def pre_warmup_callback(self, jit_fn: Callable, *args: Any, **kwargs: Any) -> bool:
@@ -431,14 +509,12 @@ class ConcreteFootprintRecorder(Client):
             Store: self._pre_store,
             AtomicRMW: self._pre_atomic_rmw,
             AtomicCas: self._pre_atomic_cas,
-            # The interpreter's create_load/create_store synthesize an
-            # all-True mask handle and delegate to the masked variants
-            # (which fire Load/Store, so recording here would double-count
-            # every unmasked access). The raw hooks only flag that the
-            # next masked access carries a synthesized, taint-free mask.
-            RawLoad: self._pre_raw_access,
-            RawStore: self._pre_raw_access,
         }
+        # RawLoad/RawStore deliberately absent: the interpreter's
+        # create_load/create_store synthesize an all-True mask and
+        # delegate to the masked variants (which fire Load/Store), so
+        # recording the raw hooks would double-count every unmasked
+        # access; the builder wrapper tags the synthesized mask instead.
         cb = table.get(op_type)
         if cb is None:
             return OpCallbacks()
@@ -451,6 +527,25 @@ class ConcreteFootprintRecorder(Client):
         recorder = self
 
         def wrapper(*args: Any, **kwargs: Any) -> Any:
+            if name in ("create_load", "create_store"):
+                # the interpreter synthesizes an all-True mask handle and
+                # delegates to the masked variant: that mask is a
+                # constant, not an unknown-provenance value
+                recorder._synthesized_mask_pending = True
+            elif name in ("create_masked_load", "create_masked_store"):
+                mask_pos = 1 if name == "create_masked_load" else 2
+                if recorder._synthesized_mask_pending and len(args) > mask_pos:
+                    h = _handle_of(args[mask_pos])
+                    if h is not None and _taint_of(h) is None:
+                        _tag(h, frozenset())
+                recorder._synthesized_mask_pending = False
+            if kind == "store" and len(args) > 1:
+                # the value about to be written: the Store callback
+                # (fired inside fn) records it as the op's memory taint
+                vt, vunknown = _collect_taint([args[1]])
+                if vunknown:
+                    vt = vt | recorder._unknown_taint()
+                recorder._pending_store_taint = vt
             ret = fn(*args, **kwargs)
             taint, unknown = _collect_taint(list(args) + list(kwargs.values()))
             if unknown:
@@ -477,6 +572,14 @@ class ConcreteFootprintRecorder(Client):
         )
     )
     _ATOMIC_METHODS = frozenset(("create_atomic_rmw", "create_atomic_cas"))
+    _STORE_METHODS = frozenset(
+        (
+            "create_masked_store",
+            "create_store",
+            "create_tensor_pointer_store",
+            "create_descriptor_store",
+        )
+    )
 
     def _install_builder_patch(self) -> None:
         """Wrap every public callable of the interpreter builder (bound
@@ -503,6 +606,8 @@ class ConcreteFootprintRecorder(Client):
                 kind = "load"
             elif name in self._ATOMIC_METHODS:
                 kind = "atomic"
+            elif name in self._STORE_METHODS:
+                kind = "store"
             self._wrap_attr(interpreter_builder, name, kind)
         for cls in _composite_handle_classes():
             if callable(getattr(cls, "materialize_pointers", None)):
@@ -666,9 +771,8 @@ class ConcreteFootprintRecorder(Client):
         if self._pid_index < 0:
             return
         sink_handles = [ptr]
-        if _handle_of(mask) is not None and not self._synthesized_mask_pending:
+        if _handle_of(mask) is not None:
             sink_handles.append(mask)
-        self._synthesized_mask_pending = False
         position = "a memory address" if kind != _KIND_LOAD else "a load address"
         self._sink(sink_handles, position if mask is None else "an address or mask")
         data = np.asarray(ptr.data).reshape(-1)
@@ -694,6 +798,16 @@ class ConcreteFootprintRecorder(Client):
         self.op_site.append(self._site_id(capture_current_source_location()))
         self.op_lanes.append(int(data.size))
         self.op_value_source.append(False)
+        if kind == _KIND_STORE:
+            pending = self._pending_store_taint
+            self._pending_store_taint = None
+            self.op_store_taint.append(
+                pending if pending is not None else self._unknown_taint()
+            )
+        elif kind in (_KIND_RMW, _KIND_CAS):
+            self.op_store_taint.append(frozenset((_ATOMIC,)))
+        else:
+            self.op_store_taint.append(None)
         if kind == _KIND_LOAD:
             self._loads_in_instance.append(op_id)
             self._last_load_op_id = op_id
@@ -720,9 +834,6 @@ class ConcreteFootprintRecorder(Client):
                 starts = uniq[np.concatenate(([0], brk + 1))]
                 ends = uniq[np.concatenate((brk, [uniq.size - 1]))] + elem
             self.intervals.append(starts, ends, op_id)
-
-    def _pre_raw_access(self, ptr: Any, *a: Any, **k: Any) -> None:
-        self._synthesized_mask_pending = True
 
     def _pre_load(
         self, ptr: Any, mask: Any, keys: Any = None, *a: Any, **k: Any
@@ -846,9 +957,15 @@ class _Analyzer:
 
     # ── the value-source premise (A2) ──
     def value_source_violation(self) -> str | None:
+        """The A2 premise, cross-instance: a value-source load must not
+        overlap bytes another instance writes. Same-instance writes are
+        program-ordered and deterministic; an EARLIER same-instance
+        write relays its value's taint into the load (an atomic return
+        refuses, a relayed loaded value makes the original load a value
+        source, checked in turn); a LATER one cannot affect the value."""
         rec = self.rec
-        vs = [op for op, flag in enumerate(rec.op_value_source) if flag]
-        if not vs:
+        worklist = [op for op, flag in enumerate(rec.op_value_source) if flag]
+        if not worklist:
             return None
         write_mask = self.kind[self.ops] != _KIND_LOAD
         ws, we, wo = (
@@ -861,25 +978,45 @@ class _Analyzer:
         order = np.argsort(ws, kind="stable")
         ws, we, wo = ws[order], we[order], wo[order]
         prefix_max_end = np.maximum.accumulate(we)
-        vs_set = set(vs)
-        load_mask = np.isin(self.ops, list(vs_set))
-        for s, e, op in zip(
-            self.starts[load_mask], self.ends[load_mask], self.ops[load_mask]
-        ):
-            hi = int(np.searchsorted(ws, e, side="left"))  # writes with start < e
-            j = hi - 1
-            while j >= 0 and prefix_max_end[j] > s:
-                if we[j] > s:
-                    other = int(wo[j])
-                    return (
-                        f"value-source: the load at {_fmt_site(rec.sites[rec.op_site[int(op)]])} "
-                        f"(instance {rec.pids[rec.op_pid_index[int(op)]]}) feeds an address, mask, "
-                        f"branch, or loop bound and overlaps bytes written by the "
-                        f"{_KIND_NAMES[rec.op_kind[other]]} at "
-                        f"{_fmt_site(rec.sites[rec.op_site[other]])} (instance "
-                        f"{rec.pids[rec.op_pid_index[other]]}): the read-only-inputs premise fails"
-                    )
-                j -= 1
+        processed: set[int] = set()
+        while worklist:
+            load = worklist.pop()
+            if load in processed:
+                continue
+            processed.add(load)
+            rec.op_value_source[load] = True
+            load_mask = self.ops == load
+            lpid, lseq = rec.op_pid_index[load], rec.op_seq[load]
+            for s, e in zip(self.starts[load_mask], self.ends[load_mask]):
+                hi = int(np.searchsorted(ws, e, side="left"))  # writes with start < e
+                j = hi - 1
+                while j >= 0 and prefix_max_end[j] > s:
+                    if we[j] > s:
+                        other = int(wo[j])
+                        if rec.op_pid_index[other] != lpid:
+                            return (
+                                f"value-source: the load at {_fmt_site(rec.sites[rec.op_site[load]])} "
+                                f"(instance {rec.pids[lpid]}) feeds an address, mask, "
+                                f"branch, or loop bound and overlaps bytes written by the "
+                                f"{_KIND_NAMES[rec.op_kind[other]]} at "
+                                f"{_fmt_site(rec.sites[rec.op_site[other]])} (instance "
+                                f"{rec.pids[rec.op_pid_index[other]]}): the read-only-inputs premise fails"
+                            )
+                        if rec.op_seq[other] < lseq:
+                            relayed = rec.op_store_taint[other] or frozenset()
+                            if _ATOMIC in relayed:
+                                return (
+                                    f"atomic-return: an atomic return value reaches a footprint "
+                                    f"position through memory: stored by the "
+                                    f"{_KIND_NAMES[rec.op_kind[other]]} at "
+                                    f"{_fmt_site(rec.sites[rec.op_site[other]])}, loaded at "
+                                    f"{_fmt_site(rec.sites[rec.op_site[load]])} (instance "
+                                    f"{rec.pids[lpid]}): the footprint is not per-instance determined"
+                                )
+                            for src in relayed:
+                                if src >= 0 and src not in processed:
+                                    worklist.append(src)
+                    j -= 1
         return None
 
     # ── intra-operation duplicate positions (the A1 shape) ──
@@ -1185,7 +1322,7 @@ def enumerate_launch(
     cloned_args = tuple(_clone(a) for a in args)
     cloned_kwargs = {k: _clone(v) for k, v in kwargs.items()}
 
-    recorder = ConcreteFootprintRecorder()
+    recorder = ConcreteFootprintRecorder(budget_s=timeout_s)
     saved_num_sms = cfg.num_sms
     cfg.num_sms = 1
     n_before = len(trace_mod.launches)
@@ -1236,6 +1373,8 @@ def enumerate_launch(
 __all__ = [
     "ENUM_MAX_INSTANCES",
     "ENUM_MAX_REPORTS",
+    "ENUM_PROJECTION_GRACE_S",
+    "ENUM_PROJECTION_SKIP_FIRST",
     "ENUM_TIMEOUT_S",
     "ConcreteAccess",
     "ConcreteEnumRefusal",
@@ -1244,4 +1383,5 @@ __all__ = [
     "EnumOutcome",
     "analyze",
     "enumerate_launch",
+    "projected_cost_refusal",
 ]

@@ -907,6 +907,44 @@ Verification so far (2026-09-04, this machine):
   kv_cache_copy / kcache_copy_triton stay proved@interp (the gate
   does not fire on decided rows).
 
+Addendum (2026-09-04, after the first change-surface stretch, 52
+aiter_ops rows at L1, jobs=1: 36 proved@enum, 16 residual):
+
+- Spin pre-gate narrowed: the harness refuses before executing only
+  on `assumes_termination` (a reader-recognized await); the reader's
+  `spin-shape` kind also covers carried-value `scf.while` iteration
+  (SWEEP_REPORT §7) and had cost three rows (two now proved@enum,
+  one refused by the rung's own taint: an atomic poll in a host
+  branch, the correct reading).
+- The A2 premise is cross-instance for this rung, with taint through
+  memory: a store records the taint of its value, a later
+  same-instance load of those bytes inherits it (a relayed atomic
+  return refuses `atomic-return ... through memory`; a relayed loaded
+  value makes the original load a value source, checked in turn);
+  same-instance in-place updates are admitted (four rows: the
+  causal-conv state updates and the fused KV-cache fusions, now
+  proved@enum). Soundness argument in the design doc section 2.4.
+- Projected-cost refusal (Hao): first instance excluded, 5 s grace,
+  running mean x remaining instances + elapsed > budget refuses by
+  name (`projected-cost`, `projected_cost_refusal` is pure and
+  pinned). The four chunked/paged-prefill rows (10240 instances at
+  100 to 114 ms) now refuse after 5.1 s instead of 150 s (projected
+  1021 to 1164 s); one row (chunk_delta_attn intra_token_parallel,
+  2048 instances at 87 ms, projected 178 s vs the 150 s budget) is
+  the documented loss class: it would finish in about three minutes.
+- Precision bug fixed: the interpreter's synthesized all-True mask
+  for unmasked loads/stores carried no taint tag and counted as
+  unknown provenance, so every unmasked load after an atomic
+  inherited the atomic marker (spurious `atomic-return` refusals);
+  the builder wrapper now tags it empty before the masked op runs.
+- Re-verified: 972 tests pass (94 in the Route 1 files);
+  cross-validation unchanged (35 agree, 16 disqualified, 0
+  disagree). Residual of the 52-row stretch after the fixes: 10
+  rows = 5 projected-cost, 1 atomic-return, 4 interpreter-error (the
+  interpreter itself cannot run those kernels: `_semantic` helper
+  calls, an `Assume failed` on rebuilt inputs, a `to_tensor` on None;
+  all reproduced with the plain C2 replay recorder).
+
 Open (blocking any paper use of L1; default stays L0 until done):
 
 - [ ] Change-surface diff: every currently-abstaining real-code row

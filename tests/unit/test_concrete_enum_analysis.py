@@ -8,6 +8,7 @@ import numpy as np
 
 from triton_viz.clients import RaceType
 from triton_viz.clients.race_detector.concrete_enum import (
+    _ATOMIC,
     _KIND_CAS,
     _KIND_LOAD,
     _KIND_RMW,
@@ -42,10 +43,19 @@ def _op(
     site: int = 1,
     value_source: bool = False,
     coalesce: bool = True,
+    store_taint=None,
 ) -> int:
     """Append one operation with the given lane addresses (element
-    starts); mirrors the recorder's interval construction."""
+    starts); mirrors the recorder's interval construction. ``store_taint``
+    is the taint of the value a store writes (loads: None; atomics: the
+    atomic marker)."""
     op_id = len(rec.op_kind)
+    if kind in (_KIND_RMW, _KIND_CAS):
+        rec.op_store_taint.append(frozenset((_ATOMIC,)))
+    elif kind == _KIND_STORE:
+        rec.op_store_taint.append(frozenset(store_taint or ()))
+    else:
+        rec.op_store_taint.append(None)
     rec.op_pid_index.append(pid_index)
     rec.op_seq.append(sum(1 for p in rec.op_pid_index if p == pid_index) - 1)
     rec.op_kind.append(kind)
@@ -219,15 +229,65 @@ def test_value_source_load_overlapping_any_write_refuses_by_name():
     assert out.reports == []
 
 
-def test_value_source_load_overlapping_its_own_instances_write_refuses_too():
-    # A2 says the value-source tensors are UNWRITTEN by the kernel, in any
-    # instance; a same-instance write before the load is program-ordered
-    # but still outside the premise (the symbolic frontends refuse it too)
+def test_same_instance_earlier_store_of_plain_data_is_program_ordered():
+    # A2 is cross-instance for this rung: the load reads its own
+    # instance's program-ordered write, in the sequential run exactly as
+    # in every real execution (the value it relays is untainted)
     rec = _rec()
     p = _pid(rec, 0)
     _op(rec, p, _KIND_STORE, [BASE])
     _op(rec, p, _KIND_LOAD, [BASE], value_source=True)
-    assert analyze(rec).status == "unsupported"
+    assert analyze(rec).status == "ok"
+
+
+def test_same_instance_later_store_cannot_affect_the_loaded_value():
+    rec = _rec()
+    p = _pid(rec, 0)
+    _op(rec, p, _KIND_LOAD, [BASE], value_source=True)
+    _op(rec, p, _KIND_STORE, [BASE], store_taint={_ATOMIC})  # after the load
+    assert analyze(rec).status == "ok"
+
+
+def test_atomic_return_relayed_through_memory_refuses():
+    rec = _rec()
+    p = _pid(rec, 0)
+    _op(rec, p, _KIND_STORE, [BASE], store_taint={_ATOMIC}, site=3)
+    _op(rec, p, _KIND_LOAD, [BASE], value_source=True, site=4)
+    out = analyze(rec)
+    assert out.status == "unsupported"
+    assert out.reason.startswith("atomic-return:")
+    assert "through memory" in out.reason
+    # an earlier atomic on the bytes themselves relays the marker too
+    rec = _rec()
+    p = _pid(rec, 0)
+    _op(rec, p, _KIND_RMW, [BASE])
+    _op(rec, p, _KIND_LOAD, [BASE], value_source=True)
+    assert analyze(rec).reason.startswith("atomic-return:")
+
+
+def test_relayed_loaded_value_makes_the_original_load_a_value_source():
+    # load A (plain data) -> store scratch -> load scratch -> address:
+    # A becomes a value source transitively, and its own premise is
+    # checked: clean when A's bytes are unwritten, refused when another
+    # instance writes them
+    rec = _rec()
+    p = _pid(rec, 0)
+    a = _op(rec, p, _KIND_LOAD, [BASE + 256])
+    _op(rec, p, _KIND_STORE, [BASE], store_taint={a})
+    _op(rec, p, _KIND_LOAD, [BASE], value_source=True)
+    out = analyze(rec)
+    assert out.status == "ok"
+    assert rec.op_value_source[a] is True
+    assert out.n_value_source_loads == 2
+    rec = _rec()
+    p = _pid(rec, 0)
+    a = _op(rec, p, _KIND_LOAD, [BASE + 256])
+    _op(rec, p, _KIND_STORE, [BASE], store_taint={a})
+    _op(rec, p, _KIND_LOAD, [BASE], value_source=True)
+    _op(rec, _pid(rec, 1), _KIND_STORE, [BASE + 256])  # a foreign write to A's bytes
+    out = analyze(rec)
+    assert out.status == "unsupported"
+    assert out.reason.startswith("value-source:")
 
 
 def test_value_source_load_of_unwritten_bytes_is_fine_even_next_to_writes():
@@ -271,3 +331,44 @@ def test_empty_launch_proves_clean():
     out = analyze(rec)
     assert out.status == "ok"
     assert out.n_ops == 0
+
+
+# ── the projected-cost decision (pure) ─────────────────────────────
+
+from triton_viz.clients.race_detector.concrete_enum import (  # noqa: E402
+    projected_cost_refusal,
+)
+
+
+def test_projection_waits_for_the_grace_period():
+    assert projected_cost_refusal(4.9, [1.0, 1.0, 1.0], 1000, 10.0) is None
+    assert projected_cost_refusal(5.0, [1.0, 1.0, 1.0], 1000, 10.0) is not None
+
+
+def test_projection_excludes_the_first_instance():
+    # a heavy warm-up instance followed by light ones: the mean is over
+    # the light ones only, so the projection stays under budget
+    times = [4.0] + [0.01] * 100
+    assert projected_cost_refusal(5.0, times, 500, 20.0) is None
+    # the same heavy time on a non-first instance counts
+    times = [0.01] + [4.0] + [0.01] * 99
+    assert projected_cost_refusal(5.0, times, 500, 20.0) is not None
+
+
+def test_projection_needs_more_than_the_skipped_instances():
+    assert projected_cost_refusal(9.0, [9.0], 100, 10.0) is None
+    assert projected_cost_refusal(9.0, [], 100, 10.0) is None
+
+
+def test_projection_arithmetic_and_message():
+    # 10 done, 90 remaining at 0.5 s each = 45 s + 6 s elapsed > 20 s
+    detail = projected_cost_refusal(6.0, [0.5] * 10, 100, 20.0)
+    assert detail is not None
+    assert "10 of 100 instances" in detail
+    assert "500.0 ms per instance" in detail
+    assert "projected 51s exceeds the 20s budget" in detail
+    # exactly at the budget keeps running; no budget never refuses
+    assert projected_cost_refusal(6.0, [0.5] * 10, 38, 20.0) is None
+    assert projected_cost_refusal(6.0, [5.0] * 10, 10_000, None) is None
+    # nothing remaining: the run is about to finish, never refuse
+    assert projected_cost_refusal(60.0, [5.0] * 10, 10, 20.0) is None
