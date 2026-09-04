@@ -239,6 +239,7 @@ def tensor_matmul_small_factory(
     repeat: int,
     mode: str = "independent",
     dtype_name: str = "float32",
+    trial: int = 1,
 ):
     """Small single-tile TensorE calibration control.
 
@@ -290,6 +291,7 @@ def tensor_matmul_small_work_units(
     repeat: int,
     mode: str = "independent",
     dtype_name: str = "float32",
+    trial: int = 1,
 ) -> dict[str, int]:
     return {
         "matmul_flops": 2 * m * n * k * repeat,
