@@ -333,6 +333,7 @@ CSV_COLUMNS = [
     "predicted_scalar_busy_us",
     "predicted_tensor_busy_us",
     "hardware_nc_p50_us",
+    "hardware_trials",
     "hardware_total_active_us",
     "hardware_dma_active_us",
     "hardware_vector_active_us",
@@ -581,6 +582,45 @@ def _run_hardware_framework(
     return nc_p50_us, summary
 
 
+def _median_hardware_trial(
+    runner,
+    op: str,
+    inputs: list[np.ndarray],
+    art: Path,
+    warmup: int,
+    iters: int,
+    trials: int,
+) -> tuple[float | None, dict[str, Any]]:
+    """Measure a case over ``trials`` compilations and keep the median run.
+
+    The median *run* is selected whole rather than each counter being medianed
+    independently, so the retained NC-p50 and its engine active times come from
+    one execution and stay mutually consistent.  ``hardware/`` is then made to
+    point at that trial, so every downstream reader sees the median run without
+    knowing trials happened.
+    """
+    measured: list[tuple[float, dict[str, Any], Path]] = []
+    for index in range(1, trials + 1):
+        trial_dir = art / f"hardware_trial{index}"
+        nc_p50, profile = runner(op, inputs, trial_dir, warmup, iters)
+        if nc_p50 is None:
+            continue
+        measured.append((float(nc_p50), profile, trial_dir))
+    if not measured:
+        # Fall back to a single ordinary measurement rather than silently
+        # reporting nothing.
+        return runner(op, inputs, art / "hardware", warmup, iters)
+    measured.sort(key=lambda item: item[0])
+    nc_p50, profile, chosen = measured[len(measured) // 2]
+    canonical = art / "hardware"
+    if canonical.is_symlink() or canonical.is_file():
+        canonical.unlink()
+    elif canonical.is_dir():
+        shutil.rmtree(canonical)
+    canonical.symlink_to(chosen.name)
+    return nc_p50, profile
+
+
 def run_case(
     op: str,
     rows: int,
@@ -594,6 +634,7 @@ def run_case(
     source_mapping: bool = False,
     compiler_load_cse: bool = False,
     seed: int = 0,
+    hardware_trials: int = 1,
 ) -> dict[str, Any]:
     global _ACTIVE_RNG
     case_id = f"{op}__r{rows}__c{cols}__{dtype}"
@@ -654,15 +695,25 @@ def run_case(
             json.dumps(sim.as_dict(), indent=2, sort_keys=True) + "\n", encoding="utf-8"
         )
         if hardware:
-            if OPERATORS[op].get("hardware") == "nki_framework":
-                nc_p50, prof = _run_hardware_framework(
-                    op, inputs, art / "hardware", warmup, iters
-                )
+            runner = (
+                _run_hardware_framework
+                if OPERATORS[op].get("hardware") == "nki_framework"
+                else _run_hardware
+            )
+            if hardware_trials <= 1:
+                nc_p50, prof = runner(op, inputs, art / "hardware", warmup, iters)
             else:
-                nc_p50, prof = _run_hardware(
-                    op, inputs, art / "hardware", warmup, iters
+                # Compilation is not deterministic: for an identical instruction
+                # stream a minority of compilations land in a much slower
+                # allocation.  The controls are measured as a median over
+                # compilations, so the targets must be too, or the model is
+                # scored against a lottery draw rather than the quantity it
+                # predicts.  The same rule is applied to every case.
+                nc_p50, prof = _median_hardware_trial(
+                    runner, op, inputs, art, warmup, iters, hardware_trials
                 )
             row["hardware_nc_p50_us"] = nc_p50
+            row["hardware_trials"] = hardware_trials
             row["hardware_total_active_us"] = (
                 float(prof.get("total_active_time", 0)) * 1e6
             )
@@ -795,6 +846,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     parser.add_argument("--no-hardware", action="store_true")
     parser.add_argument("--resume", action="store_true")
+    parser.add_argument(
+        "--hardware-trials",
+        type=int,
+        default=1,
+        help="Compile and measure each case this many times and keep the median "
+        "run. Compilation is bimodal, so a single measurement is a lottery "
+        "draw; the controls are medianed the same way.",
+    )
     parser.add_argument(
         "--source-mapping",
         action="store_true",
@@ -956,6 +1015,7 @@ def main(argv: list[str] | None = None) -> int:
                     args.source_mapping,
                     args.compiler_load_cse,
                     args.seed,
+                    args.hardware_trials,
                 )
                 tail = ""
                 if row.get("error_vs_nc_pct") not in (None, ""):

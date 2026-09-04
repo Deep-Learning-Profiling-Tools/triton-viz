@@ -128,6 +128,12 @@ def _collect_split_commands(root: Path, tilebench: Path, name: str, split: dict)
                 10,
                 "--iters",
                 100,
+                # Targets are measured the same way the controls are: the median
+                # of three compilations. Compilation is bimodal, so scoring a
+                # median-calibrated model against a single compilation compares
+                # the typical case to a lottery draw.
+                "--hardware-trials",
+                3,
                 "--resume",
             ))
             index += 1
@@ -284,6 +290,11 @@ def collect(root: Path, tilebench: Path, dry_run: bool) -> None:
                 5,
                 "--iters",
                 20,
+                # Same median-of-three protocol as every other measurement:
+                # 16 of these 288 controls were caught in the slow compilation
+                # mode, all on TensorE in layernorm/rmsnorm programs.
+                "--hardware-trials",
+                3,
                 "--resume",
             ),
             dry_run,
