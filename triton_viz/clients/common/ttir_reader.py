@@ -1098,8 +1098,16 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                 env[res] = DataDep("scf.if result")
             continue
 
+        # A region close prints as ``}``, ``} loc(...)``, ``} else {`` or,
+        # with op attributes (``tl.range(num_stages=...)``), ``} {tt.num_stages
+        # = 2 : i32} loc(...)``; the last form used to leave its loop frame
+        # open until the function's own close (an access placed between the
+        # two would have been mis-attributed to the loop).
         if frames and (
-            line == "}" or line.startswith("} loc") or line.startswith("} else")
+            line == "}"
+            or line.startswith("} loc")
+            or line.startswith("} else")
+            or line.startswith("} {")
         ):
             if line.startswith("} else"):
                 # The then-region closes and the else-region opens: the same

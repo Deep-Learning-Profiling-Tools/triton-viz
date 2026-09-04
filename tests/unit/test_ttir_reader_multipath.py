@@ -371,3 +371,43 @@ def test_reduce_combine_blocks_are_not_the_cf_graph():
     b = parse_ttir(text, multipath=True)
     assert replace(a, multipath=True) == b
     assert b.cf_blocks == 0 and [x.kind for x in b.accesses] == ["load", "store"]
+
+
+def test_attribute_dict_region_close_pops_the_loop_frame():
+    """``} {tt.num_stages = 1 : i32} loc(...)`` closes a pipelined loop.
+    Before the fix the frame stayed open until the function's close, so a
+    loop inside an scf.if then tripped "unexpected `else`" (two aiter
+    attention rows) and an access after the loop would have been read as
+    in-loop."""
+    text = _module(
+        "%x_ptr: !tt.ptr<f32>, %out_ptr: !tt.ptr<f32>, %n: i32",
+        "%c0 = arith.constant 0 : i32",
+        "%c1 = arith.constant 1 : i32",
+        "%pid = tt.get_program_id x : i32",
+        "%g = arith.cmpi eq, %pid, %c0 : i32",
+        "scf.if %g {",
+        "scf.for %k = %c0 to %n step %c1  : i32 {",
+        "%xp = tt.addptr %x_ptr, %k : !tt.ptr<f32>, i32",
+        "%v = tt.load %xp : !tt.ptr<f32>",
+        "tt.store %out_ptr, %v : !tt.ptr<f32>",
+        "} {tt.num_stages = 2 : i32}",
+        "} else {",
+        "%c2 = arith.constant 2.0 : f32",
+        "tt.store %out_ptr, %c2 : !tt.ptr<f32>",
+        "}",
+        "%op = tt.addptr %out_ptr, %pid : !tt.ptr<f32>, i32",
+        "%c3 = arith.constant 3.0 : f32",
+        "tt.store %op, %c3 : !tt.ptr<f32>",
+    )
+    for mp in (False, True):
+        if not mp:
+            with pytest.raises(UnsupportedTTIR, match="multiple/nested loops"):
+                parse_ttir(text)
+            continue
+        g = parse_ttir(text, multipath=True)
+        assert [a.kind for a in g.accesses] == ["load", "store", "store", "store"]
+        assert g.accesses[1].loops == (g.loops[0].loop_ssa,)
+        assert g.accesses[2].loops == () and g.accesses[2].path == Not(
+            Cmp("eq", Pid(0), Const(0))
+        )
+        assert g.accesses[3].loops == () and g.accesses[3].path is None
