@@ -5,6 +5,7 @@ CORPORA = (
     "rmw_sync",
     "await_sync",
     "tritonracebench",
+    "tritonracebench_cutile",
     "tutorials",
     "liger",
     "tritonbench_g",
