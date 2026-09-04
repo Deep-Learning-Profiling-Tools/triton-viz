@@ -318,7 +318,11 @@ def test_rmw_inside_a_nested_loop_stays_footprint_only():
     )
     (rec,) = enc.records
     assert rec.old_value is None
-    assert len(rec.premises) == 2  # one existence premise per loop level
+    # one existence premise per loop level, riding as local constraints
+    # (beside the two in-bounds constraints) so the Feasible# base does
+    # not demand a model for every loop jointly
+    assert rec.premises == ()
+    assert len(rec.local_constraints) == 4
     solver = TwoCopySymbolicHBSolver(
         enc.records, grid=symbolic_grid(enc, (4, 1, 1)), arange_dict=enc.arange_dict
     )
@@ -499,3 +503,53 @@ def test_mixed_and_mask_row_proves_instead_of_phantom_overlap():
     enc, reports = _t1(_mp(text), {"C": 64}, tensors)
     assert 1 in enc.uncertain_event_ids  # still widened
     assert reports == []
+
+
+def test_disjoint_pid_loops_prove_instead_of_vacuous():
+    """Two sequential loops whose pid-dependent ranges are non-empty for
+    DIFFERENT pids (fla's parallel_simple_gla shape at T = 64, BT = 128:
+    the first loop runs for pid 0 only, the second for pid >= 1 only).
+    Asserting both existence premises jointly in the Feasible# base has
+    no model, which turned the proof vacuous; as local constraints they
+    gate activity only, and the launch proves."""
+    text = _module(
+        "%out_ptr: !tt.ptr<f32>, %T: i32",
+        "%c1 = arith.constant 1.0 : f32",
+        "%c32 = arith.constant 32 : i32",
+        "%c128 = arith.constant 128 : i32",
+        "%cm32 = arith.constant -32 : i32",
+        "%pid = tt.get_program_id x : i32",
+        "%lo = arith.muli %pid, %c128 : i32",
+        "%pid1 = arith.addi %pid, %c1i : i32",
+        "%hi0 = arith.muli %pid1, %c128 : i32",
+        "%hi = arith.minsi %hi0, %T : i32",
+        "scf.for %i = %lo to %hi step %c32  : i32 {",
+        "%p = tt.addptr %out_ptr, %i : !tt.ptr<f32>, i32",
+        "tt.store %p, %c1 : !tt.ptr<f32>",
+        "}",
+        "%hi2 = arith.subi %lo, %c32 : i32",
+        "scf.for %j = %cm32 to %hi2 step %c32  : i32 {",
+        "%q0 = arith.addi %j, %c128 : i32",
+        "%q = tt.addptr %out_ptr, %q0 : !tt.ptr<f32>, i32",
+        "tt.store %q, %c1 : !tt.ptr<f32>",
+        "}",
+    ).replace("%c1i", "%c1_i")
+    text = text.replace(
+        "%c1 = arith.constant 1.0 : f32",
+        "%c1 = arith.constant 1.0 : f32\n    %c1_i = arith.constant 1 : i32",
+    )
+    g = _mp(text)
+    assert [lp.induction_var for lp in g.loops] == ["%i", "%j"]
+    enc = encode_graph(
+        g, {"T": 64}, {"out_ptr": _t(0x200000, numel=1 << 14)}, multipath=True
+    )
+    solver = TwoCopySymbolicHBSolver(
+        enc.records, grid=symbolic_grid(enc, (4, 1, 1)), arange_dict=enc.arange_dict
+    )
+    assert solver.check_feasibility()
+    # the second loop's iterations j = -32 + 32k < 128·pid - 32 write
+    # out[96 + 32k] for pid >= 1 ... which pid 0's first loop (out[0..64))
+    # never touches, and distinct pids' second loops overlap: k ranges
+    # differ only in length, so pid 1 and pid 2 both write out[96]
+    reports = solver.find_races()
+    assert reports and all(min(_pids(r)) >= 1 for r in reports)

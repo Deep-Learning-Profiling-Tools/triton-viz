@@ -678,9 +678,25 @@ def _record_for(
         tensor_name=access.base_param,
         addr_expr=addr,
         # The iteration range constrains only the accesses that iterate;
-        # the spin-termination invariants constrain every record.
-        premises=env.premises_for(access) + await_premises,
-        local_constraints=bounds,
+        # the spin-termination invariants constrain every record. Under
+        # multipath the iteration ranges ride as LOCAL constraints: they
+        # gate the record's activity exactly the same way, but stay out of
+        # the solver's Feasible# base, which asserts every record's
+        # premises jointly. With one loop that only demanded "some pid
+        # runs an iteration"; with several loops whose pid-dependent
+        # ranges are disjoint (fla's parallel_simple_gla: one loop runs for
+        # pid 0 only, the next for pid >= 1 only) the joint assertion has
+        # no model and every proof came back vacuous. A loop that runs
+        # zero times for some instance is an execution, not vacuity; the
+        # await invariants keep their global role.
+        premises=(
+            await_premises
+            if env.multipath
+            else env.premises_for(access) + await_premises
+        ),
+        local_constraints=(
+            bounds + env.premises_for(access) if env.multipath else bounds
+        ),
         source_location=source,
         program_seq=seq,
         debug_name=f"{kernel_name}:ttir{access.line_no}:{access.kind}",
