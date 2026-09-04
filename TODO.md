@@ -932,8 +932,16 @@ aiter_ops rows at L1, jobs=1: 36 proved@enum, 16 residual):
   watchdog as the bound. The four chunked/paged-prefill rows (10240
   instances at 100 to 114 ms) refuse after 5.1 s instead of 150 s
   (projected 1021 to 1164 s); chunk_delta_attn intra_token_parallel
-  (2048 instances at 87 ms, projected 178 s vs the 150 s budget)
-  keeps running under the factor.
+  (2048 instances at 87 ms, projected 178 s, about 186 s needed)
+  keeps running under the factor but hit the watchdog at 150 s, so
+  the per-row budget became LEVEL-DEPENDENT (Hao): 180 s at L0 (the
+  paper's protocol, untouched), 200 s at L1+
+  (`runner.row_timeout_s`, stamped into the header as
+  `row_timeout_s`); the rung's watchdog is that budget minus the
+  symbolic tracks' time and a 10 s margin. Verified through the real
+  harness path: that row decides proved@enum (2048 instances, enum
+  188.9 s against a 189.6 s watchdog, row wall 191 s), a 0.7 s margin
+  that says the budget edge is a real class, not a one-off.
 - Precision bug fixed: the interpreter's synthesized all-True mask
   for unmasked loads/stores carried no taint tag and counted as
   unknown provenance, so every unmasked load after an atomic

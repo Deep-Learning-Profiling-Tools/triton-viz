@@ -23,7 +23,18 @@ from triton_viz.clients.race_detector.ladder import (
 )
 
 RESULTS_DIR = Path(__file__).parent / "results"
+# The per-row subprocess budget is part of the evaluation protocol and
+# therefore level-dependent (provenance: stamped into the header as
+# row_timeout_s). L0 keeps the paper's 180 s; L1 (Hao, 2026-09-04) runs
+# the concrete-enumeration rung after both symbolic tracks and gets 200 s.
 PER_SPEC_TIMEOUT_S = 180
+PER_SPEC_TIMEOUT_L1_S = 200
+
+
+def row_timeout_s(ladder_level: LadderLevel = LadderLevel.L0) -> int:
+    return (
+        PER_SPEC_TIMEOUT_L1_S if ladder_level >= LadderLevel.L1 else PER_SPEC_TIMEOUT_S
+    )
 
 
 # Upstream commits of the liger-kernel PyPI releases we evaluate against
@@ -207,15 +218,20 @@ def results_header(
     seed: int,
     provenance: dict,
     ladder_level: LadderLevel = LadderLevel.L0,
+    timeout: int | None = None,
 ) -> dict:
     """The JSONL header: detector commit, package versions, corpus
-    provenance, and the ladder-depth stamp (no dataset may mix levels
-    unnoticed: a paper or CI deployment quotes one level of one run)."""
+    provenance, the ladder-depth stamp and the per-row budget (no
+    dataset may mix levels or budgets unnoticed: a paper or CI
+    deployment quotes one level of one run)."""
     return {
         "header": True,
         "corpus": corpus_name,
         "seed": seed,
         "ladder_level": ladder_level.name,
+        "row_timeout_s": timeout
+        if timeout is not None
+        else row_timeout_s(ladder_level),
         **_versions(),
         **provenance,
     }
@@ -225,7 +241,7 @@ def run_corpus(
     corpus_name: str,
     only: str | None,
     seed: int,
-    timeout: int,
+    timeout: int | None = None,
     mutate: bool = False,
     jobs: int = 1,
     ladder_level: LadderLevel = LadderLevel.L0,
@@ -234,6 +250,8 @@ def run_corpus(
 ) -> Path:
     from evaluation.kernels import load
 
+    if timeout is None:
+        timeout = row_timeout_s(ladder_level)
     corpus = load(corpus_name)
     specs = [
         s
@@ -253,10 +271,10 @@ def run_corpus(
     suffix = level_suffix + (out_suffix or "")
     out_path = RESULTS_DIR / f"{corpus_name}{suffix}.jsonl"
 
-    header = results_header(corpus_name, seed, corpus.provenance, ladder_level)
+    header = results_header(corpus_name, seed, corpus.provenance, ladder_level, timeout)
     print(
         f"[runner] {corpus_name}: {len(specs)} specs -> {out_path} "
-        f"(jobs={jobs}, ladder {ladder_level.name})"
+        f"(jobs={jobs}, ladder {ladder_level.name}, {timeout}s per row)"
     )
 
     def _one(s):
@@ -296,7 +314,13 @@ def main() -> None:
         "recorded dataset is overwritten",
     )
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--timeout", type=int, default=PER_SPEC_TIMEOUT_S)
+    ap.add_argument(
+        "--timeout",
+        type=int,
+        default=None,
+        help="per-row subprocess budget in seconds (default: 180 at L0, "
+        "200 at L1+; stamped into the header)",
+    )
     ap.add_argument("--jobs", type=int, default=1)
     ap.add_argument("--no-report", action="store_true")
     ap.add_argument(

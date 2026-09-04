@@ -429,23 +429,31 @@ def _dynamic_track(
 # ── the L1 rung: concrete per-instance enumeration (Route 1) ────────
 # The rung itself has no time budget (design-route1-concrete-enumeration.md
 # section 4): its watchdog here is evaluation protocol, the per-row
-# subprocess budget (runner.PER_SPEC_TIMEOUT_S) minus what the symbolic
-# tracks already spent, capped at ENUM_TIMEOUT_S and floored so a spin the
-# taint did not see still ends in a NAMED refusal rather than a row-level
-# crash. Measured: ~1.3-3 ms per instance for the destindex family (32768
-# instances in ~46 s), ~28 ms per instance for an attention kernel.
-ENUM_TIMEOUT_S = 150
+# subprocess budget at this level (runner.row_timeout_s: 200 s at L1,
+# Hao 2026-09-04) minus what the symbolic tracks already spent and a
+# margin for the subprocess's own startup and teardown, floored so a
+# spin the taint did not see still ends in a NAMED refusal rather than
+# a row-level crash. Measured: ~1.3-3 ms per instance for the destindex
+# family (32768 instances in ~46 s), ~28 ms per instance for an
+# attention kernel, 100+ ms for the chunked-prefill kernels.
 ENUM_MIN_TIMEOUT_S = 30
 ENUM_ROW_MARGIN_S = 10
 
 
-def _enum_budget_s(row_started: float) -> float:
-    from evaluation.runner import PER_SPEC_TIMEOUT_S
+def _enum_budget_s(
+    row_started: float, ladder_level: LadderLevel = LadderLevel.L1
+) -> float:
+    from evaluation.runner import row_timeout_s
 
     remaining = (
-        PER_SPEC_TIMEOUT_S - (time.perf_counter() - row_started) - ENUM_ROW_MARGIN_S
+        row_timeout_s(ladder_level)
+        - (time.perf_counter() - row_started)
+        - ENUM_ROW_MARGIN_S
     )
-    return float(max(ENUM_MIN_TIMEOUT_S, min(ENUM_TIMEOUT_S, remaining)))
+    return float(max(ENUM_MIN_TIMEOUT_S, remaining))
+
+
+ENUM_TIMEOUT_S = 200  # the standalone default (the row budget at L1)
 
 
 def _enum_track(
@@ -800,7 +808,10 @@ def run_one(
     if ladder_level >= LadderLevel.L1 and row["verdict"] == "abstain":
         try:
             row["enum"] = _enum_track(
-                spec, seed, row["static"], timeout_s=_enum_budget_s(row_started)
+                spec,
+                seed,
+                row["static"],
+                timeout_s=_enum_budget_s(row_started, ladder_level),
             )
         except Exception as e:  # noqa: BLE001
             row["enum"] = {

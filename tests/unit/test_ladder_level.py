@@ -19,8 +19,13 @@ import pytest
 # the evaluation package lives at the repo root (not installed)
 sys.path.insert(0, str(Path(__file__).resolve().parents[2]))
 
-from evaluation.harness import _classify  # noqa: E402
-from evaluation.runner import results_header  # noqa: E402
+from evaluation.harness import _classify, _enum_budget_s  # noqa: E402
+from evaluation.runner import (  # noqa: E402
+    PER_SPEC_TIMEOUT_L1_S,
+    PER_SPEC_TIMEOUT_S,
+    results_header,
+    row_timeout_s,
+)
 from triton_viz.clients.race_detector.ladder import (  # noqa: E402
     DEFAULT_LADDER_LEVEL,
     LADDER_LEVEL_NAMES,
@@ -86,12 +91,41 @@ def test_compiled_client_stamps_the_level_into_verdict_attrs():
     assert det0.last_global_verdict["ladder_level"] == "L0"
 
 
-def test_results_header_carries_the_level():
+def test_results_header_carries_the_level_and_the_row_budget():
     h = results_header("golden_smoke", 0, {"upstream": "abc"}, LadderLevel.L1)
     assert h["header"] is True
     assert h["ladder_level"] == "L1"
+    assert h["row_timeout_s"] == 200
     assert h["upstream"] == "abc"
-    assert results_header("golden_smoke", 0, {})["ladder_level"] == "L0"
+    h0 = results_header("golden_smoke", 0, {})
+    assert h0["ladder_level"] == "L0"
+    assert h0["row_timeout_s"] == 180
+    assert (
+        results_header("golden_smoke", 0, {}, LadderLevel.L1, 240)["row_timeout_s"]
+        == 240
+    )
+
+
+def test_row_budget_is_level_dependent():
+    # L0 keeps the paper's protocol; L1 runs a third track after the two
+    # symbolic ones and gets 200 s (Hao, 2026-09-04)
+    assert PER_SPEC_TIMEOUT_S == 180
+    assert PER_SPEC_TIMEOUT_L1_S == 200
+    assert row_timeout_s(LadderLevel.L0) == 180
+    assert row_timeout_s(LadderLevel.L1) == 200
+    assert row_timeout_s(LadderLevel.L2) == 200
+
+
+def test_enum_budget_is_the_remaining_row_budget():
+    import time
+
+    now = time.perf_counter()
+    # nothing spent yet: 200 - 10 margin
+    assert abs(_enum_budget_s(now, LadderLevel.L1) - 190.0) < 1.0
+    # the symbolic tracks took 100 s: 90 s remain
+    assert abs(_enum_budget_s(now - 100.0, LadderLevel.L1) - 90.0) < 1.0
+    # floored so a spin still ends in a named refusal
+    assert _enum_budget_s(now - 1000.0, LadderLevel.L1) == 30.0
 
 
 # ── the composed dispatcher with the L1 leg ────────────────────────
