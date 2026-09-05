@@ -1,5 +1,10 @@
 """TritonRaceBench — Phase A labeled micro corpus (plan S5).
 
+Fence-ordered model (paper design-fence-order.md, stage 4): the
+synchronization kernels (trb021/022 guarded family, trb025 comm/comp, and
+the folded rmw_sync / await_sync kernels) fence (tl.debug_barrier)
+between their data accesses and their atomics, on both twins.
+
 DRB-style yes/no PAIRS per race pattern, named ``trbNNN_<pattern>_<yes|no>``.
 Ground truth is scoped to the (kernel, launch) row; a kernel with any
 yes-labeled launch derives the kernel-level "∃ racy input" truth that the
@@ -706,8 +711,10 @@ def trb021_acq_rel_kernel(flag_ptr, data_ptr, out_ptr):
     is_prod = pid == 0
     is_cons = pid == 1
     tl.store(data_ptr, 1, mask=is_prod)
+    tl.debug_barrier()
     cmp = tl.where(is_prod, 0, 1)
     old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acq_rel", scope="gpu")
+    tl.debug_barrier()
     cons_mask = is_cons & (old == 1)
     x = tl.load(data_ptr, mask=cons_mask, other=0)
     tl.store(out_ptr + pid, x, mask=cons_mask)
@@ -719,8 +726,10 @@ def trb021_release_only_kernel(flag_ptr, data_ptr, out_ptr):
     is_prod = pid == 0
     is_cons = pid == 1
     tl.store(data_ptr, 1, mask=is_prod)
+    tl.debug_barrier()
     cmp = tl.where(is_prod, 0, 1)
     old = tl.atomic_cas(flag_ptr, cmp, 1, sem="release", scope="gpu")
+    tl.debug_barrier()
     cons_mask = is_cons & (old == 1)
     x = tl.load(data_ptr, mask=cons_mask, other=0)
     tl.store(out_ptr + pid, x, mask=cons_mask)
@@ -732,8 +741,10 @@ def trb021_acquire_only_kernel(flag_ptr, data_ptr, out_ptr):
     is_prod = pid == 0
     is_cons = pid == 1
     tl.store(data_ptr, 1, mask=is_prod)
+    tl.debug_barrier()
     cmp = tl.where(is_prod, 0, 1)
     old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acquire", scope="gpu")
+    tl.debug_barrier()
     cons_mask = is_cons & (old == 1)
     x = tl.load(data_ptr, mask=cons_mask, other=0)
     tl.store(out_ptr + pid, x, mask=cons_mask)
@@ -800,6 +811,7 @@ def trb022_failed_cas_kernel(flag_ptr, data_ptr, out_ptr):
     is_prod = pid == 0
     is_cons = pid == 1
     tl.store(data_ptr, 1, mask=is_prod)
+    tl.debug_barrier()
     # Producer publishes via a SUCCESSFUL CAS 0->1. The consumer's cmp=7
     # can never match (flag stays in {0,1}), so its CAS always FAILS —
     # but a failed acquire-CAS still READS the location, and reading the
@@ -807,6 +819,7 @@ def trb022_failed_cas_kernel(flag_ptr, data_ptr, out_ptr):
     # the reader's own success).
     cmp = tl.where(is_prod, 0, 7)
     old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acq_rel", scope="gpu")
+    tl.debug_barrier()
     cons_mask = is_cons & (old == 1)
     x = tl.load(data_ptr, mask=cons_mask, other=0)
     tl.store(out_ptr + pid, x, mask=cons_mask)
@@ -818,8 +831,10 @@ def trb022_failed_cas_relaxed_kernel(flag_ptr, data_ptr, out_ptr):
     is_prod = pid == 0
     is_cons = pid == 1
     tl.store(data_ptr, 1, mask=is_prod)
+    tl.debug_barrier()
     cmp = tl.where(is_prod, 0, 7)
     old = tl.atomic_cas(flag_ptr, cmp, 1, sem="relaxed", scope="gpu")
+    tl.debug_barrier()
     cons_mask = is_cons & (old == 1)
     x = tl.load(data_ptr, mask=cons_mask, other=0)
     tl.store(out_ptr + pid, x, mask=cons_mask)
@@ -980,10 +995,12 @@ def trb025_comm_comp_kernel(
     if pid < N_COMM:
         offs = pid * BLOCK + tl.arange(0, BLOCK)
         tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))
+        tl.debug_barrier()
         tl.atomic_xchg(sem_ptr, 1, sem="release")
     else:
         while tl.atomic_add(sem_ptr, 0, sem="acquire") != N_COMM:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(payload_ptr + offs)
         tl.store(out_ptr + (pid - N_COMM) * BLOCK + tl.arange(0, BLOCK), v)
@@ -997,12 +1014,14 @@ def trb025_relaxed_poll_kernel(
     if pid < N_COMM:
         offs = pid * BLOCK + tl.arange(0, BLOCK)
         tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))
+        tl.debug_barrier()
         tl.atomic_xchg(sem_ptr, 1, sem="release")
     else:
         # racy twin (a): the poll observes the arrival but at relaxed —
         # the value carries, the ordering does not
         while tl.atomic_add(sem_ptr, 0, sem="relaxed") != N_COMM:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(payload_ptr + offs)
         tl.store(out_ptr + (pid - N_COMM) * BLOCK + tl.arange(0, BLOCK), v)
@@ -1016,6 +1035,7 @@ def trb025_poll_initial_kernel(
     if pid < N_COMM:
         offs = pid * BLOCK + tl.arange(0, BLOCK)
         tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))
+        tl.debug_barrier()
         tl.atomic_xchg(sem_ptr, 1, sem="release")
     else:
         # racy twin (b): polls the WRONG counter value — the initial 0
@@ -1023,6 +1043,7 @@ def trb025_poll_initial_kernel(
         # the release arrival and no sw edge forms
         while tl.atomic_add(sem_ptr, 0, sem="acquire") != 0:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(payload_ptr + offs)
         tl.store(out_ptr + (pid - N_COMM) * BLOCK + tl.arange(0, BLOCK), v)
@@ -1036,6 +1057,7 @@ def trb025_role_skip_kernel(
     if pid < N_COMM:
         offs = pid * BLOCK + tl.arange(0, BLOCK)
         tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))
+        tl.debug_barrier()
         tl.atomic_xchg(sem_ptr, 1, sem="release")
     else:
         # racy twin (c): only the FIRST comp pid polls; the role split's
@@ -1043,6 +1065,7 @@ def trb025_role_skip_kernel(
         if pid == N_COMM:
             while tl.atomic_add(sem_ptr, 0, sem="acquire") != N_COMM:
                 pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(payload_ptr + offs)
         tl.store(out_ptr + (pid - N_COMM) * BLOCK + tl.arange(0, BLOCK), v)

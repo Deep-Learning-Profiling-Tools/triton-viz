@@ -1,5 +1,9 @@
 """B.4 litmus corpus: RMW-return synchronization patterns (spec part B).
 
+Fence-ordered model (paper design-fence-order.md, stage 4): every kernel
+fences (tl.debug_barrier) between its data accesses and its atomics, on
+both twins, so the twins still differ by the ordering annotation alone.
+
 Four DRB-style pairs — last-block-done, single-fetch work queue, split-k
 semaphore (non-spin), atomic-max-in-mask — each race-free version proved by
 the RMW observation model (counting axiom + reads-through), each racy twin
@@ -32,7 +36,9 @@ BLOCK = 64
 def lbd_acq_rel_kernel(partial_ptr, counter_ptr, out_ptr):
     pid = tl.program_id(0)
     tl.store(partial_ptr + pid, pid + 1)
+    tl.debug_barrier()
     old = tl.atomic_add(counter_ptr, 1, sem="acq_rel")
+    tl.debug_barrier()
     done = old == tl.num_programs(0) - 1
     p = tl.load(partial_ptr + 0, mask=done, other=0)
     tl.store(out_ptr, p, mask=done)
@@ -42,7 +48,9 @@ def lbd_acq_rel_kernel(partial_ptr, counter_ptr, out_ptr):
 def lbd_relaxed_kernel(partial_ptr, counter_ptr, out_ptr):
     pid = tl.program_id(0)
     tl.store(partial_ptr + pid, pid + 1)
+    tl.debug_barrier()
     old = tl.atomic_add(counter_ptr, 1, sem="relaxed")
+    tl.debug_barrier()
     done = old == tl.num_programs(0) - 1
     p = tl.load(partial_ptr + 0, mask=done, other=0)
     tl.store(out_ptr, p, mask=done)
@@ -176,7 +184,9 @@ def splitk_acq_rel_kernel(
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     x = tl.load(x_ptr + offs)
     tl.store(partial_ptr + pid, tl.sum(x, axis=0))
+    tl.debug_barrier()
     old = tl.atomic_add(sem_ptr, 1, sem="acq_rel")
+    tl.debug_barrier()
     done = old == tl.num_programs(0) - 1
     lanes = tl.arange(0, MAXB)
     lm = done & (lanes < tl.num_programs(0))
@@ -192,7 +202,9 @@ def splitk_relaxed_kernel(
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     x = tl.load(x_ptr + offs)
     tl.store(partial_ptr + pid, tl.sum(x, axis=0))
+    tl.debug_barrier()
     old = tl.atomic_add(sem_ptr, 1, sem="relaxed")
+    tl.debug_barrier()
     done = old == tl.num_programs(0) - 1
     lanes = tl.arange(0, MAXB)
     lm = done & (lanes < tl.num_programs(0))

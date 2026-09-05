@@ -1,5 +1,9 @@
 """C1.4 litmus corpus: the await abstraction (spin-loop synchronization).
 
+Fence-ordered model (paper design-fence-order.md, stage 4): every kernel
+fences (tl.debug_barrier) between its data accesses and its atomics, on
+both twins, so the twins still differ by the one detail each names.
+
 Three DRB-style groups — producer/consumer wait, CAS mutex, decoupled
 look-back chain — each race-free version proved through the awaited-read
 encoding (exit predicate as a termination premise + rf/sw machinery), each
@@ -37,10 +41,12 @@ def pc_wait_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constexpr):
     if pid == 0:
         offs = tl.arange(0, BLOCK)
         tl.store(data_ptr + offs, offs)
+        tl.debug_barrier()
         tl.atomic_xchg(flag_ptr, 1, sem="release")
     else:
         while tl.atomic_add(flag_ptr, 0, sem="acquire") != 1:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(data_ptr + offs)
         tl.store(out_ptr + pid * BLOCK + offs, v)
@@ -52,10 +58,12 @@ def pc_wait_relaxed_writer_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constex
     if pid == 0:
         offs = tl.arange(0, BLOCK)
         tl.store(data_ptr + offs, offs)
+        tl.debug_barrier()
         tl.atomic_xchg(flag_ptr, 1, sem="relaxed")
     else:
         while tl.atomic_add(flag_ptr, 0, sem="acquire") != 1:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(data_ptr + offs)
         tl.store(out_ptr + pid * BLOCK + offs, v)
@@ -67,10 +75,12 @@ def pc_wait_relaxed_spin_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constexpr
     if pid == 0:
         offs = tl.arange(0, BLOCK)
         tl.store(data_ptr + offs, offs)
+        tl.debug_barrier()
         tl.atomic_xchg(flag_ptr, 1, sem="release")
     else:
         while tl.atomic_add(flag_ptr, 0, sem="relaxed") != 1:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(data_ptr + offs)
         tl.store(out_ptr + pid * BLOCK + offs, v)
@@ -82,10 +92,12 @@ def pc_wait_cta_scope_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constexpr):
     if pid == 0:
         offs = tl.arange(0, BLOCK)
         tl.store(data_ptr + offs, offs)
+        tl.debug_barrier()
         tl.atomic_xchg(flag_ptr, 1, sem="release", scope="cta")
     else:
         while tl.atomic_add(flag_ptr, 0, sem="acquire", scope="cta") != 1:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(data_ptr + offs)
         tl.store(out_ptr + pid * BLOCK + offs, v)
@@ -97,10 +109,12 @@ def pc_wait_or_poll_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constexpr):
     if pid == 0:
         offs = tl.arange(0, BLOCK)
         tl.store(data_ptr + offs, offs)
+        tl.debug_barrier()
         tl.atomic_xchg(flag_ptr, 1, sem="release")
     else:
         while tl.atomic_or(flag_ptr, 0, sem="acquire") != 1:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(data_ptr + offs)
         tl.store(out_ptr + pid * BLOCK + offs, v)
@@ -112,10 +126,12 @@ def pc_wait_xor_poll_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constexpr):
     if pid == 0:
         offs = tl.arange(0, BLOCK)
         tl.store(data_ptr + offs, offs)
+        tl.debug_barrier()
         tl.atomic_xchg(flag_ptr, 1, sem="release")
     else:
         while tl.atomic_xor(flag_ptr, 0, sem="acquire") != 1:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(data_ptr + offs)
         tl.store(out_ptr + pid * BLOCK + offs, v)
@@ -210,11 +226,13 @@ def pc_wait_cta_reset_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constexpr):
     if pid == 0:
         offs = tl.arange(0, BLOCK)
         tl.store(data_ptr + offs, offs)
+        tl.debug_barrier()
         tl.atomic_xchg(flag_ptr, 0, sem="relaxed", scope="cta")
         tl.atomic_xchg(flag_ptr, 1, sem="release")
     else:
         while tl.atomic_add(flag_ptr, 0, sem="acquire") != 1:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(data_ptr + offs)
         tl.store(out_ptr + pid * BLOCK + offs, v)
@@ -226,11 +244,13 @@ def pc_wait_atomic_reset_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constexpr
     if pid == 0:
         offs = tl.arange(0, BLOCK)
         tl.store(data_ptr + offs, offs)
+        tl.debug_barrier()
         tl.atomic_xchg(flag_ptr, 0, sem="relaxed")
         tl.atomic_xchg(flag_ptr, 1, sem="release")
     else:
         while tl.atomic_add(flag_ptr, 0, sem="acquire") != 1:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(data_ptr + offs)
         tl.store(out_ptr + pid * BLOCK + offs, v)
@@ -242,12 +262,14 @@ def pc_wait_flag_read_kernel(flag_ptr, data_ptr, out_ptr, BLOCK: tl.constexpr):
     if pid == 0:
         offs = tl.arange(0, BLOCK)
         tl.store(data_ptr + offs, offs)
+        tl.debug_barrier()
         fv = tl.load(flag_ptr)
         tl.store(out_ptr, fv)
         tl.atomic_xchg(flag_ptr, 1, sem="release")
     else:
         while tl.atomic_add(flag_ptr, 0, sem="acquire") != 1:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(data_ptr + offs)
         tl.store(out_ptr + pid * BLOCK + offs, v)
@@ -323,8 +345,10 @@ def mutex_kernel(lock_ptr, x_ptr, out_ptr):
     pid = tl.program_id(0)
     while tl.atomic_cas(lock_ptr, 0, 1, sem="acquire") != 0:
         pass
+    tl.debug_barrier()
     v = tl.load(x_ptr)
     tl.store(x_ptr, v + 1)
+    tl.debug_barrier()
     tl.atomic_xchg(lock_ptr, 0, sem="release")
     tl.store(out_ptr + pid, 1)
 
@@ -334,8 +358,10 @@ def mutex_plain_unlock_kernel(lock_ptr, x_ptr, out_ptr):
     pid = tl.program_id(0)
     while tl.atomic_cas(lock_ptr, 0, 1, sem="acquire") != 0:
         pass
+    tl.debug_barrier()
     v = tl.load(x_ptr)
     tl.store(x_ptr, v + 1)
+    tl.debug_barrier()
     tl.store(lock_ptr, 0)
     tl.store(out_ptr + pid, 1)
 
@@ -345,8 +371,10 @@ def mutex_relaxed_cas_kernel(lock_ptr, x_ptr, out_ptr):
     pid = tl.program_id(0)
     while tl.atomic_cas(lock_ptr, 0, 1, sem="relaxed") != 0:
         pass
+    tl.debug_barrier()
     v = tl.load(x_ptr)
     tl.store(x_ptr, v + 1)
+    tl.debug_barrier()
     tl.atomic_xchg(lock_ptr, 0, sem="release")
     tl.store(out_ptr + pid, 1)
 
@@ -410,10 +438,12 @@ def lookback_kernel(flag_ptr, out_ptr):
     if pid > 0:
         while tl.atomic_add(flag_ptr + pid - 1, 0, sem="acquire") == 0:
             pass
+        tl.debug_barrier()
         prev = tl.load(out_ptr + pid - 1)
         tl.store(out_ptr + pid, prev + 1)
     else:
         tl.store(out_ptr + pid, 1)
+    tl.debug_barrier()
     tl.atomic_xchg(flag_ptr + pid, 1, sem="release")
 
 
@@ -423,10 +453,12 @@ def lookback_cta_scope_kernel(flag_ptr, out_ptr):
     if pid > 0:
         while tl.atomic_add(flag_ptr + pid - 1, 0, sem="acquire", scope="cta") == 0:
             pass
+        tl.debug_barrier()
         prev = tl.load(out_ptr + pid - 1)
         tl.store(out_ptr + pid, prev + 1)
     else:
         tl.store(out_ptr + pid, 1)
+    tl.debug_barrier()
     tl.atomic_xchg(flag_ptr + pid, 1, sem="release", scope="cta")
 
 
