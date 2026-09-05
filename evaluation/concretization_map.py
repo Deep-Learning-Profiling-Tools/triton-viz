@@ -80,6 +80,11 @@ def load_rows(paths: list[Path]) -> list[dict]:
         for line in p.read_text().splitlines():
             row = json.loads(line)
             if row.get("header"):
+                if row.get("worker_reuse"):
+                    # a debugging dataset (runner --debug-reuse-workers):
+                    # never aggregated into a quoted number
+                    print(f"[map] skipping debugging dataset {p.name}", file=sys.stderr)
+                    break
                 continue
             row["_corpus"] = row.get("corpus", p.stem)
             rows.append(row)

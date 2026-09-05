@@ -232,7 +232,13 @@ def render(paths: list[Path]) -> str:
     for path in paths:
         header, rows = _load(path)
         lines += [
-            f"## {header.get('corpus', path.stem)}",
+            f"## {header.get('corpus', path.stem)}"
+            + (
+                " (DEBUGGING ONLY: worker reuse, wall times exclude start-up; "
+                "not a protocol dataset)"
+                if header.get("worker_reuse")
+                else ""
+            ),
             "",
             f"versions: triton {header.get('triton')}, z3 {header.get('z3')}, "
             f"torch {header.get('torch')}, numpy {header.get('numpy')}, "

@@ -31,9 +31,18 @@ def _rows(path: Path) -> list[dict]:
     out = []
     for line in path.read_text().splitlines():
         d = json.loads(line)
-        if not d.get("header"):
-            d["_corpus"] = path.stem
-            out.append(d)
+        if d.get("header"):
+            if d.get("worker_reuse"):
+                # a debugging dataset (runner --debug-reuse-workers):
+                # never aggregated into a quoted number
+                print(
+                    f"[headline] skipping debugging dataset {path.name}",
+                    file=sys.stderr,
+                )
+                return []
+            continue
+        d["_corpus"] = path.stem
+        out.append(d)
     return out
 
 

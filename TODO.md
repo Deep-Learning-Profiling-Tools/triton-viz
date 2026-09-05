@@ -1000,9 +1000,15 @@ L1, jobs=1, 200 s per row, 1.42 h; commit 5ba8b6a; report:
       races-unclassified) instead of corrupting the process. Cost:
       ~4 us per access on the ~2% of rows that reach replay (24 of
       1062 in the pin), under 1 ms per row. Two pins.
-- [x] Runner process reuse (Hao, 2026-09-05; opt-in `--reuse-workers`,
-      default OFF so the paper's per-row-subprocess protocol and its
-      wall_s basis are untouched): `harness --serve` is a worker that
+- [x] Runner process reuse, DEBUGGING ONLY (Hao, 2026-09-05:
+      `--debug-reuse-workers`; FORBIDDEN for a pinned rerun or any
+      quoted number, because the paper's per-row wall times are
+      per-row subprocess walls). A debugging dataset is unmistakable:
+      the `_debug-reuse` file suffix, `worker_reuse.debugging_only` in
+      the header, a stderr banner at start, `report.py` labelling it,
+      `headline.py` / `concretization_map.py` skipping it, and
+      `runner.assert_protocol_dataset` (for the pinned driver to call
+      on every input) refusing it. Mechanism: `harness --serve` is a worker that
       runs rows requested on stdin (corpus loaded once), `runner._Worker`
       drives it under the per-row budget with select (a silent worker
       is killed: `timeout`; a dead one: `crash` with the stderr tail;

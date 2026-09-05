@@ -153,9 +153,48 @@ def _versions() -> dict:
     }
 
 
-# ── process reuse (opt-in): one served worker runs many rows ─────────
+# ── process reuse: DEBUGGING ONLY (Hao, 2026-09-05) ─────────────────
+#
+# One served worker runs many rows, saving the 2-3 s of interpreter and
+# corpus start-up per row. It is FORBIDDEN for a pinned rerun and for any
+# dataset the paper quotes: the paper's per-row wall times are per-row
+# subprocess walls (start-up included), so a reused-worker dataset is on
+# a different basis and its rows must never be merged with, or compared
+# against, protocol rows. The runner makes a debugging dataset
+# unmistakable: the output file carries the ``_debug-reuse`` suffix, the
+# header carries ``worker_reuse.debugging_only``, a banner is printed at
+# start, and ``assert_protocol_dataset`` (for the pinned driver) refuses
+# such a file.
 WORKER_ROWS = 50  # recycle a worker after this many rows (leak/memory bound)
 WORKER_RSS_MB = 8192  # ...or when its resident set exceeds this
+DEBUG_REUSE_SUFFIX = "_debug-reuse"
+DEBUG_REUSE_BANNER = (
+    "[runner] DEBUGGING ONLY: rows are served by reused worker processes; "
+    "wall times exclude process start-up. This dataset is NOT on the "
+    "paper's protocol and must never enter a pinned rerun."
+)
+
+
+def is_protocol_dataset(header: dict) -> bool:
+    """True when a results header describes a per-row-subprocess run
+    (the paper's protocol); False for a debugging (worker-reuse) run."""
+    return not header.get("worker_reuse")
+
+
+def assert_protocol_dataset(path: Path) -> dict:
+    """Read a results file's header and refuse a debugging dataset. The
+    pinned-rerun driver calls this on every input before merging."""
+    with open(path) as f:
+        first = f.readline()
+    header = json.loads(first) if first.strip() else {}
+    if not header.get("header"):
+        raise ValueError(f"{path}: no results header")
+    if not is_protocol_dataset(header):
+        raise ValueError(
+            f"{path}: a DEBUGGING dataset (worker reuse, wall times exclude "
+            "start-up); forbidden in a pinned rerun or any quoted number"
+        )
+    return header
 
 
 class _Worker:
@@ -458,17 +497,30 @@ def run_corpus(
     out_path = RESULTS_DIR / f"{corpus_name}{suffix}.jsonl"
 
     reuse = (
-        {"rows_per_worker": worker_rows, "rss_limit_mb": worker_rss_mb}
+        {
+            "debugging_only": True,
+            "rows_per_worker": worker_rows,
+            "rss_limit_mb": worker_rss_mb,
+        }
         if reuse_workers
         else None
     )
+    if reuse_workers:
+        # a debugging dataset names itself: never the protocol file
+        suffix = suffix + DEBUG_REUSE_SUFFIX
+        out_path = RESULTS_DIR / f"{corpus_name}{suffix}.jsonl"
+        print(DEBUG_REUSE_BANNER, file=sys.stderr, flush=True)
     header = results_header(
         corpus_name, seed, corpus.provenance, ladder_level, timeout, reuse
     )
     print(
         f"[runner] {corpus_name}: {len(specs)} specs -> {out_path} "
         f"(jobs={jobs}, ladder {ladder_level.name}, {timeout}s per row"
-        + (f", workers reused for {worker_rows} rows)" if reuse_workers else ")")
+        + (
+            f", DEBUGGING: workers reused for {worker_rows} rows)"
+            if reuse_workers
+            else ")"
+        )
     )
 
     workers: list[_Worker] = []
@@ -564,18 +616,21 @@ def main() -> None:
         "Stamped into the JSONL header and every row.",
     )
     ap.add_argument(
-        "--reuse-workers",
+        "--debug-reuse-workers",
         action="store_true",
-        help="serve rows from long-lived worker processes instead of one "
+        help="DEBUGGING ONLY, never for a pinned rerun or a quoted number: "
+        "serve rows from long-lived worker processes instead of one "
         "subprocess per row (saves the 2-3 s import + corpus load per row; "
-        "the per-row budget and crash containment are kept by the parent; "
-        "wall_s then excludes process start-up, stamped in the header)",
+        "the per-row budget and crash containment are kept by the parent). "
+        "Wall times then exclude process start-up, so the output is written "
+        "to <name>_debug-reuse.jsonl with a debugging_only header stamp and "
+        "is refused by the pinned-rerun merge.",
     )
     ap.add_argument(
-        "--worker-rows",
+        "--debug-worker-rows",
         type=int,
         default=WORKER_ROWS,
-        help="recycle a reused worker after this many rows",
+        help="(debugging) recycle a reused worker after this many rows",
     )
     ns = ap.parse_args()
 
@@ -607,8 +662,8 @@ def main() -> None:
         ladder_level=parse_ladder_level(ns.ladder_level),
         only_names=only_names,
         out_suffix=ns.out_suffix,
-        reuse_workers=ns.reuse_workers,
-        worker_rows=ns.worker_rows,
+        reuse_workers=ns.debug_reuse_workers,
+        worker_rows=ns.debug_worker_rows,
     )
     if not ns.no_report:
         from evaluation.report import render
