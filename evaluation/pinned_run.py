@@ -38,7 +38,9 @@ committed so the run is reproducible from the repo alone. Protocol:
      ``<merged>_SUMMARY.md``.
 
 Output: ``evaluation/results/PINNED_<commit>[_L<n>].jsonl`` plus the
-per-corpus files ``<corpus>[_L<n>]_pinned.jsonl`` the runner wrote.
+per-corpus files ``<corpus>[_L<n>]_pinned.jsonl`` the runner wrote. The
+row-by-row diff against the previous pin (the plan's step 7) and the
+fence-order attribution (section 4c) are ``evaluation.compare_runs``.
 ``--rehearsal`` (a dry run on small corpora) names its outputs
 ``REHEARSAL_...`` and is the only mode in which the row budget may be
 overridden (to exercise the retry pass) or the tree may be dirty.
