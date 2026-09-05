@@ -270,6 +270,7 @@ def parse_cutile_ir(
             pid_axes=st.pid_axes,
             loops=list(st.loops),
             multipath=True,
+            frontend="cutile",
         )
     return AccessGraph(
         kernel_name=kernel_name,
