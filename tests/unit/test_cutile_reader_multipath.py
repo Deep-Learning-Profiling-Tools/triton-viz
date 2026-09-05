@@ -196,7 +196,7 @@ WHILE_LOOP = _ir(
         (SEQ_LOOPS, "nested-loop", "multiple/nested loops"),
         (NESTED_LOOPS, "nested-loop", "multiple/nested loops"),
         (_if_expr("$c0"), "control-flow", "`if` block structure"),
-        (GUARD, "control-flow", "`if` block structure"),
+        (GUARD, "control-flow", "unrecognized statement"),  # the pre-change message
         (WHILE_LOOP, "control-flow", "while-form"),
     ],
 )

@@ -371,7 +371,9 @@ def _handle_line(lines: list[str], i: int, indent: int, line: str, st: _State) -
         im = _RE_IF.match(line)
         if im and st.multipath:
             return _handle_if(lines, i, indent, [], im.group(1), st)
-        if line in ("then", "else") or line.startswith(("then", "else", "if ", "if(")):
+        # single-path: unchanged (an `if(cond=...)` statement is reached only
+        # after its expression form raised at the `then` line, as before)
+        if line in ("then", "else") or line.startswith(("then", "else", "if ")):
             raise UnsupportedTTIR(
                 f"line {i + 1}: `if` block structure is not modeled",
                 kind="control-flow",
@@ -401,7 +403,10 @@ def _handle_line(lines: list[str], i: int, indent: int, line: str, st: _State) -
     im = _RE_IF.match(rhs)
     if im and st.multipath:
         return _handle_if(lines, i, indent, results, im.group(1), st)
-    if rhs.startswith(("if ", "if(")) or rhs == "if":
+    # single-path: unchanged — the `if(cond=...)` expression falls through
+    # to the unknown-op binding and the `then` line raises, exactly as
+    # before, so refusal messages stay byte-identical at L0
+    if rhs.startswith("if ") or rhs == "if":
         raise UnsupportedTTIR(
             f"line {i + 1}: `if` block structure is not modeled",
             kind="control-flow",
