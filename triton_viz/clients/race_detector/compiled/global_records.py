@@ -1252,13 +1252,56 @@ def _linear_at_t0(term: Term, graph: AccessGraph) -> bool:
     return _linear_in(term, graph, _SYMBOLIC_LEAVES)
 
 
+def _and_all(terms: list[Term]) -> Term:
+    out = terms[0]
+    for t in terms[1:]:
+        out = BoolBin("and", out, t)
+    return out
+
+
+def content_free_view(access: AccessEvent) -> AccessEvent:
+    """The access with every loaded value treated as FREE: the view T0
+    encodes (no launch, hence no snapshot) and the view the client's
+    content-free T1 attempt encodes first (contents are a concretization,
+    used only when the verdict needs them). A mask or path conjunct built
+    on a free value cannot help a proof (the solver may set the value
+    either way) but it can be NONLINEAR (``offs < pid * len[pid]``), which
+    would keep the kernel out of the rung although single-path parsing,
+    which dropped the conjunct as unmodelable, proved it there. Drop such
+    conjuncts, the same widening, and flag the record (mask_dropped /
+    guarded) so it stays uncertain. Addresses are left alone: a free
+    address refuses in _record_for."""
+    from dataclasses import replace
+
+    def strip(t: Term | None) -> tuple[Term | None, bool]:
+        if t is None:
+            return None, False
+        conj = _conjuncts(t)
+        kept = [c for c in conj if not mentions_loaded(c)]
+        if len(kept) == len(conj):
+            return t, False
+        return (_and_all(kept) if kept else None), True
+
+    mask, m_dropped = strip(access.mask)
+    path, p_dropped = strip(access.path)
+    if not (m_dropped or p_dropped):
+        return access
+    return replace(
+        access,
+        mask=mask,
+        path=path,
+        mask_dropped=access.mask_dropped or m_dropped,
+        guarded=access.guarded or p_dropped,
+    )
+
+
 def t0_linearity_gate(graph: AccessGraph) -> bool:
     """The tier selector's cheap syntactic gate: attempt T0 only when every
     address/mask/path term stays LINEAR once the scalar params go symbolic
     (no symbolic×symbolic product, no symbolic divisor — Z3-unknown bait).
     T1, with params concrete, is linear again for the same terms."""
     terms: list[Term] = []
-    for a in graph.accesses:
+    for a in map(content_free_view, graph.accesses):
         terms.append(a.offset)
         if a.mask is not None:
             terms.append(a.mask)
@@ -1311,7 +1354,9 @@ def encode_graph_t0(
     for seq, access in enumerate(graph.accesses):
         if env.zero_trip_for(access):
             continue
-        groups.setdefault(access.base_param, []).append((seq, access))
+        groups.setdefault(access.base_param, []).append(
+            (seq, content_free_view(access))
+        )
 
     out: list[tuple[str, GlobalEncoding]] = []
     for name, items in groups.items():

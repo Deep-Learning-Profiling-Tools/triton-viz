@@ -1084,6 +1084,18 @@ class CompiledRaceDetector(Client):
             return ("proved", "T0")
         from z3 import IntVal, set_param
 
+        # Least concretization (the ladder's rule): the launch's tensor
+        # contents are a concretization, used only when the verdict needs
+        # them. With every loaded value FREE an UNSAT is the any-contents
+        # proof single-path parsing made for the same kernel, so the row
+        # keeps proved@T1 instead of shrinking to +content; a SAT is not
+        # reported (widened by construction) — the snapshot attempt below
+        # decides it exactly.
+        if self.ladder_level >= 2 and graph.multipath:
+            free = self._t1_content_free(graph, params, tensors, lg)
+            if free is not None:
+                return free
+
         set_param("timeout", self.T1_TIMEOUT_MS)
         try:
             # The encoder's L2 rule (pid-linear symbolic T1 bounds) applies
@@ -1191,6 +1203,66 @@ class CompiledRaceDetector(Client):
         if solver.enum_used:
             return ("proved-launch", [])
         return ("proved", "T1")
+
+    def _t1_content_free(
+        self,
+        graph: AccessGraph,
+        params: dict,
+        tensors: dict,
+        lg: tuple[int, ...] | None,
+    ):
+        """The T1 attempt with every loaded value free (see _solve_one_graph):
+        ``("proved", "T1")`` / ``("proved-launch", [])`` when the widened
+        encoding is UNSAT over a feasible base, None otherwise (a SAT, a
+        refusal such as an address on a loaded value, or an undecided
+        query) — never a report, never a claim about contents."""
+        from dataclasses import replace
+
+        from z3 import IntVal, set_param
+
+        from .global_records import content_free_view, graph_mentions_loaded
+
+        if not graph_mentions_loaded(graph):
+            return None
+        view = replace(graph, accesses=[content_free_view(a) for a in graph.accesses])
+        blind = {
+            name: replace(t, snapshot=None, snapshot_reason="content-free attempt")
+            for name, t in tensors.items()
+        }
+        lg3 = None
+        if lg is not None:
+            padded = tuple(int(d) for d in lg) + (1, 1, 1)
+            lg3 = (padded[0], padded[1], padded[2])
+        set_param("timeout", self.T1_TIMEOUT_MS)
+        try:
+            enc = encode_graph(view, params, blind, multipath=True)
+            grid = symbolic_grid(enc, lg)
+            solver = TwoCopySymbolicHBSolver(
+                enc.records,
+                grid=grid,
+                arange_dict=enc.arange_dict,
+                ablations=self.ablations,
+                enum_fallback_grid=lg3,
+            )
+            if solver.find_races():
+                return None
+            if solver.enum_used:
+                assert lg3 is not None
+                pins = tuple(
+                    d == IntVal(lg3[i])
+                    for i, d in enumerate(grid)
+                    if not isinstance(d, int)
+                )
+                feasible = solver.check_feasibility(extra=pins)
+            else:
+                feasible = solver.check_feasibility()
+        except Exception:  # noqa: BLE001 — refusal, Z3 unknown, solver error
+            return None
+        finally:
+            set_param("timeout", self._Z3_DEFAULT_TIMEOUT)
+        if not feasible:
+            return None
+        return ("proved-launch", []) if solver.enum_used else ("proved", "T1")
 
     def _launch_scoped_requery(
         self, enc: Any, lg: tuple[int, ...] | None, prior_reports: list[Any]

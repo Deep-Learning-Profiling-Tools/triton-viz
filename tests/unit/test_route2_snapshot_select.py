@@ -265,6 +265,56 @@ def test_t0_keeps_loaded_values_free_and_refuses_them_in_addresses():
         encode_graph_t0(_mp(SCATTER), multipath=True)
 
 
+def test_t0_drops_a_loaded_mask_conjunct_instead_of_losing_the_rung():
+    """``out[pid*C + offs] = v, mask = offs < pid * len[pid]``: the loaded
+    factor makes the mask nonlinear at T0, where the value is free
+    anyway. Single-path proved this at T0 with the mask dropped; the L2
+    reader must not lose that rung (a T1+content proof would be a
+    smaller claim), so T0 sees the mask without the loaded conjunct and
+    the record widened."""
+    from triton_viz.clients.race_detector.compiled.global_records import (
+        t0_linearity_gate,
+    )
+
+    text = _module(
+        "%out_ptr: !tt.ptr<i32>, %len_ptr: !tt.ptr<i32>",
+        "%c1 = arith.constant 1 : i32",
+        "%c8 = arith.constant 8 : i32",
+        "%pid = tt.get_program_id x : i32",
+        "%offs = tt.make_range {end = 8 : i32, start = 0 : i32} : tensor<8xi32>",
+        "%lp = tt.addptr %len_ptr, %pid : !tt.ptr<i32>, i32",
+        "%len = tt.load %lp : !tt.ptr<i32>",
+        "%lim = arith.muli %pid, %len : i32",
+        "%lims = tt.splat %lim : i32 -> tensor<8xi32>",
+        "%m = arith.cmpi slt, %offs, %lims : tensor<8xi32>",
+        "%row = arith.muli %pid, %c8 : i32",
+        "%rs = tt.splat %row : i32 -> tensor<8xi32>",
+        "%o = arith.addi %rs, %offs : tensor<8xi32>",
+        "%os = tt.splat %out_ptr : !tt.ptr<i32> -> tensor<8x!tt.ptr<i32>>",
+        "%op = tt.addptr %os, %o : tensor<8x!tt.ptr<i32>>, tensor<8xi32>",
+        "%vs = tt.splat %c1 : i32 -> tensor<8xi32>",
+        "tt.store %op, %vs, %m : tensor<8x!tt.ptr<i32>>",
+    )
+    g = _mp(text)
+    (store,) = [a for a in g.accesses if a.kind == "store"]
+    assert loaded_leaves(store.mask) and not store.mask_dropped
+    assert t0_linearity_gate(g)
+    ((name, enc),) = encode_graph_t0(g, multipath=True)
+    assert name == "out_ptr" and enc.uncertain_event_ids == {1}
+    solver = TwoCopySymbolicHBSolver(
+        enc.records, grid=symbolic_grid(enc, t0=True), arange_dict=enc.arange_dict
+    )
+    assert solver.find_races() == []  # rows of 8 never overlap
+    # at T1 the mask is exact and the proof content-qualified
+    tensors = {
+        "out_ptr": _t(0x300000, 1024),
+        "len_ptr": _t(0x100000, 4, snapshot=(8, 8, 8, 8)),
+    }
+    enc, reports = _t1(g, {}, tensors)
+    assert enc.content_qualified and enc.uncertain_event_ids == set()
+    assert reports == []
+
+
 GUARD_THEN_ADDRESS = _module(
     "%idx_ptr: !tt.ptr<i32>, %out_ptr: !tt.ptr<i32>",
     "%c1 = arith.constant 1 : i32",
