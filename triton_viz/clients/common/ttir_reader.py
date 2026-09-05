@@ -321,6 +321,10 @@ class FuncArg:
     # Float-typed pointee (f*/bf*): atomic results on it stay DataDep — the
     # Int-sort observation model must not carry float values (spec B.5).
     elem_float: bool = False
+    # Dependency order (D2/D3): indices (into AccessGraph.accesses) of the
+    # load / atomic accesses whose result this access's value, mask, or
+    # compare operand consumes through element-wise ops only.
+    deps: tuple[int, ...] = ()
 
 
 @dataclass(frozen=True)
@@ -853,6 +857,26 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
     env: dict[str, object] = {}
     accesses: list[AccessEvent] = []
     fences: list[float] = []
+    # Dependency provenance: SSA name -> (access indices it derives from,
+    # still position-preserving?). Loads and atomics seed it; element-wise
+    # ops propagate it; position-changing ops clear the flag.
+    prov: dict[str, tuple[frozenset[int], bool]] = {}
+
+    def _prov_of(ssa_names):
+        idxs: set[int] = set()
+        elementwise = True
+        for name in ssa_names:
+            got = prov.get(name)
+            if got is None:
+                continue
+            idxs |= set(got[0])
+            elementwise = elementwise and got[1]
+        return frozenset(idxs), elementwise
+
+    def _deps_of(*ssa_names) -> tuple[int, ...]:
+        idxs, elementwise = _prov_of(ssa_names)
+        return tuple(sorted(idxs)) if elementwise else ()
+
     loop: LoopInfo | None = None
     loops: list[tuple[int, LoopInfo]] = []  # (opening order, loop)
     loops_opened = 0
@@ -1379,6 +1403,32 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                 kind="control-flow",
             )
 
+        # ---- dependency provenance (D2/D3) ----
+        # Every value-producing statement that is not a memory access
+        # inherits the provenance of its SSA operands; ops that move
+        # elements between positions (or aggregate them) drop the
+        # position-preserving flag. Accesses seed/consume it below.
+        if res is not None and not body.startswith(
+            ("tt.load", "tt.store", "tt.atomic_")
+        ):
+            operands = [t for t in re.findall(_SSA, body)]
+            idxs, elementwise = _prov_of(operands)
+            if idxs:
+                position_preserving = body.startswith(
+                    (
+                        "arith.",
+                        "math.",
+                        "tt.addptr",
+                        "tt.bitcast",
+                        "tt.fp_to_fp",
+                        "tt.int_to_ptr",
+                        "tt.ptr_to_int",
+                        "tt.clampf",
+                        "tt.precise_",
+                    )
+                )
+                prov[res] = (idxs, elementwise and position_preserving)
+
         # ---- tile-level fence ----
         if body.startswith("gpu.barrier"):
             fences.append(len(accesses) - 0.5)
@@ -1430,6 +1480,8 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                     )
                 else:
                     env[res] = DataDep("loaded value")
+            if res is not None:
+                prov[res] = (frozenset({len(accesses) - 1}), True)
             continue
         sm = _RE_STORE.match(body)
         if sm:
@@ -1456,6 +1508,11 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                 loops=loops_,
                 keep_partial_mask=multipath,
             )
+            object.__setattr__(
+                accesses[-1],
+                "deps",
+                _deps_of(sm.group(2), *re.findall(_SSA, sm.group(3) or "")),
+            )
             continue
         am = _RE_ATOMIC_RMW.match(body)
         if am:
@@ -1481,6 +1538,9 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
             )
             if res is not None:
                 env[res] = observed_result_binding()
+            object.__setattr__(accesses[-1], "deps", _deps_of(am.group(5), am.group(6)))
+            if res is not None:
+                prov[res] = (frozenset({len(accesses) - 1}), True)
             continue
         am = _RE_ATOMIC_CAS.match(body)
         if am:
@@ -1507,6 +1567,9 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
             )
             if res is not None:
                 env[res] = observed_result_binding()
+            object.__setattr__(accesses[-1], "deps", _deps_of(am.group(4), am.group(5)))
+            if res is not None:
+                prov[res] = (frozenset({len(accesses) - 1}), True)
             continue
 
         # ---- fail closed on unrecognized memory ops ----

@@ -296,6 +296,9 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # use: an access with a fence seq strictly between it and a later
         # access of the same instance is fence-ordered before it.
         self.fence_seqs: list[int] = []
+        # id(load/atomic SymbolicExpr node) -> event_id, for dependency
+        # order (data.py AccessEventRecord.dep_loads).
+        self._dep_anchor_ids: dict[int, int] = {}
         self.last_reports: list[Any] = []
         # Premise tracking for the address-position lifting: launches
         # where an event ADDRESS chain embeds a plain load lower through
@@ -980,6 +983,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
     def grid_callback(self, grid: tuple[int, ...]) -> None:
         self.records = []
         self.fence_seqs = []
+        self._dep_anchor_ids = {}
         self.last_reports = []
         # Pessimistic until finalize() proves otherwise: if the launch dies
         # before finalize runs (a mid-kernel exception with no
@@ -1444,6 +1448,69 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                         f"failed to normalize record templates: {exc}"
                     ) from exc
 
+    # ── Dependency order (design-fence-order.md D2/D3) ────────────────────
+    # Ops that keep every element at its position: a chain of these from a
+    # load's result to a later operation's value/mask means position lambda
+    # of the later operation depends on position lambda of the load.
+    _ELEMENTWISE_OPS: frozenset[str] = frozenset(
+        (
+            "where",
+            "fma",
+            "cast_impl",
+            "bitcast",
+            "fp_to_fp",
+            "addptr",
+            "const",
+            "pid",
+            "arange",
+        )
+    )
+    # Memory ops whose RESULT anchors a dependency (the chain stops here).
+    _DEP_ANCHOR_OPS: frozenset[str] = frozenset(
+        ("load", "atomic_rmw", "atomic_cas", "tensor_pointer_load")
+    )
+
+    def _append_record(self, record: AccessEventRecord) -> None:
+        self.records.append(record)
+        expr = record.symbolic_expr
+        if expr is not None and getattr(expr, "op", None) in self._DEP_ANCHOR_OPS:
+            self._dep_anchor_ids[id(expr)] = record.event_id
+
+    def _dep_loads_of(self, expr: Any) -> tuple[int, ...]:
+        """event_ids of the anchors this record's value / mask / compare
+        operands reach through element-wise ops only (D3's positional
+        rule). The record's own pointer chain is excluded: a loaded value
+        in an address is the indirect-address refusal, not a dependency."""
+        if expr is None or not hasattr(expr, "children"):
+            return ()
+        roots = [
+            child
+            for name, child in expr.children.items()
+            if name in ("value", "val", "mask", "cmp") and child is not None
+        ]
+        elementwise = (
+            self._ELEMENTWISE_OPS
+            | set(SymbolicExpr.UNARY_OPS)
+            | set(SymbolicExpr.BINARY_OPS)
+        )
+        found: set[int] = set()
+        seen: set[int] = set()
+        stack = list(roots)
+        while stack:
+            node = stack.pop()
+            if id(node) in seen or not hasattr(node, "op"):
+                continue
+            seen.add(id(node))
+            if node.op in self._DEP_ANCHOR_OPS:
+                eid = self._dep_anchor_ids.get(id(node))
+                if eid is not None:
+                    found.add(eid)
+                continue  # the anchor's own operands are not this record's dependence
+            if node.op not in elementwise:
+                continue  # position-changing op: the chain is not positional
+            stack.extend(c for c in node.children.values() if c is not None)
+        return tuple(sorted(found))
+
     def _record_access_event(
         self,
         access_mode: AccessMode,
@@ -1519,13 +1586,14 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 return
             self._loop_flush_signatures.add(signature)
 
-        self.records.append(
+        self._append_record(
             AccessEventRecord(
                 op_type=op_type,
                 access_mode=access_mode,
                 tensor=tensor,
                 tensor_name=tensor_name,
                 symbolic_expr=symbolic_expr,
+                dep_loads=self._dep_loads_of(symbolic_expr),
                 addr_expr=access_addr,
                 premises=premises,
                 local_constraints=local,
@@ -1621,13 +1689,14 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # two-copy solver per copy from cas_cmp_value / cas_new_value /
         # old_value. Storing them here as None keeps the per-copy CAS return
         # rename in lockstep with the substitution applied to old_value.
-        self.records.append(
+        self._append_record(
             AccessEventRecord(
                 op_type=AtomicCas,
                 access_mode="read",
                 tensor=tensor,
                 tensor_name=tensor_name,
                 symbolic_expr=symbolic_expr,
+                dep_loads=self._dep_loads_of(symbolic_expr),
                 addr_expr=addr_expr,
                 premises=premises,
                 local_constraints=local,
@@ -1699,13 +1768,14 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # copy_local_vars for the per-copy alpha-rename. None for an
         # unmodeled (float-typed) RMW — the solver then keeps this write in
         # the unmodeled-writer set.
-        self.records.append(
+        self._append_record(
             AccessEventRecord(
                 op_type=AtomicRMW,
                 access_mode="read",
                 tensor=tensor,
                 tensor_name=tensor_name,
                 symbolic_expr=symbolic_expr,
+                dep_loads=self._dep_loads_of(symbolic_expr),
                 addr_expr=addr_expr,
                 premises=premises,
                 local_constraints=local,

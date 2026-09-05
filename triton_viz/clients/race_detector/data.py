@@ -83,6 +83,16 @@ class AccessEventRecord:
     # kernel scalar args, and global constants are explicitly NOT included.
     copy_local_vars: tuple[Any, ...] = field(default_factory=tuple)
 
+    # Dependency order (paper design-fence-order.md, decisions D2/D3):
+    # event_ids of the load / atomic records whose RESULT this record's
+    # value, mask, or compare operand consumes through an element-wise
+    # chain (no reduce, scan, broadcast, reshape, transpose, join/split,
+    # splat in between). At the same position such a pair is ordered by
+    # causality (the value must exist before it is written), so under
+    # fence-ordered semantics the intra-instance query ranges over
+    # DISTINCT positions only for these pairs.
+    dep_loads: tuple[int, ...] = ()
+
 
 @dataclass(frozen=True)
 class RaceReport:

@@ -913,6 +913,7 @@ def _record_for(
         ),
         source_location=source,
         program_seq=seq,
+        dep_loads=tuple(getattr(access, "deps", ())),
         debug_name=f"{kernel_name}:ttir{access.line_no}:{access.kind}",
         active=active,
         reads=reads,

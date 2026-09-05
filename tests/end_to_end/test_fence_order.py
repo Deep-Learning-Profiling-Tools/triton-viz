@@ -270,3 +270,93 @@ def test_static_legacy_reading_unchanged(fence_order_off):
         _store_then_load_kernel, (1,), _FIG1_SIG, {"N": N}, lambda seed: _fig1_args()
     )
     assert res["status"] == "ok", res
+
+
+# ── Dependency order (D2/D3): in-place idioms under fence order ───────────
+# A store whose value depends element-wise on a load is ordered after that
+# load AT THE SAME POSITION (the value must exist before it is written), so
+# the in-place element-wise idiom is race-free while the in-place shift (the
+# store at position i depends on the load at i+1, not on the load at i that
+# reads the same address) still races. A dependency through a
+# position-changing op (reshape / flip) is not positional and stays reported.
+
+
+@triton.jit
+def _inplace_elementwise_kernel(x_ptr, BLOCK: tl.constexpr):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    v = tl.load(x_ptr + offs)
+    tl.store(x_ptr + offs, v + 1)
+
+
+@triton.jit
+def _inplace_shift_kernel(x_ptr, BLOCK: tl.constexpr):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    v = tl.load(x_ptr + offs + 1)
+    tl.store(x_ptr + offs, v)
+
+
+@triton.jit
+def _inplace_rotate_kernel(x_ptr, BLOCK: tl.constexpr):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    v = tl.load(x_ptr + offs)
+    r = tl.reshape(v, (2, BLOCK // 2))
+    r = tl.flip(r, 1)
+    tl.store(x_ptr + offs, tl.reshape(r, (BLOCK,)))
+
+
+_X_SIG = {"x_ptr": "*i32", "BLOCK": "constexpr"}
+
+
+def _x_args(n=4 * N + 1):
+    return (torch.zeros(n, dtype=torch.int32),)
+
+
+def test_dependency_orders_the_inplace_elementwise_pair(fence_order_on):
+    detector = _run(_inplace_elementwise_kernel, (4,), *_x_args(), N)
+    assert detector.last_status == "ok"
+    assert detector.last_reports == []
+    records = {r.event_id: r for r in detector.records}
+    store = next(r for r in records.values() if r.access_mode == "write")
+    load = next(r for r in records.values() if r.access_mode == "read")
+    assert store.dep_loads == (load.event_id,)
+
+
+def test_dependency_does_not_order_the_inplace_shift(fence_order_on):
+    detector = _run(_inplace_shift_kernel, (4,), *_x_args(), N)
+    assert detector.last_status == "ok"
+    expected = frozenset(
+        (
+            _line_no(_inplace_shift_kernel, "v = tl.load(x_ptr + offs + 1)"),
+            _line_no(_inplace_shift_kernel, "tl.store(x_ptr + offs, v)"),
+        )
+    )
+    assert expected in _report_lines(detector)
+
+
+def test_dependency_through_reshape_is_not_positional(fence_order_on):
+    detector = _run(_inplace_rotate_kernel, (4,), *_x_args(4 * N), N)
+    assert detector.last_status == "ok"
+    store = next(r for r in detector.records if r.access_mode == "write")
+    assert store.dep_loads == ()
+    assert detector.last_reports != []
+
+
+def test_static_dependency_orders_the_inplace_elementwise_pair(fence_order_on):
+    res = _static(
+        _inplace_elementwise_kernel, (4,), _X_SIG, {"BLOCK": N}, lambda seed: _x_args()
+    )
+    assert res["status"] == "ok", res
+
+
+def test_static_dependency_does_not_order_the_inplace_shift(fence_order_on):
+    res = _static(
+        _inplace_shift_kernel, (4,), _X_SIG, {"BLOCK": N}, lambda seed: _x_args()
+    )
+    assert res["status"] == "races", res
+
+
+def test_static_dependency_through_reshape_is_not_positional(fence_order_on):
+    res = _static(
+        _inplace_rotate_kernel, (4,), _X_SIG, {"BLOCK": N}, lambda seed: _x_args(4 * N)
+    )
+    assert res["status"] == "races", res

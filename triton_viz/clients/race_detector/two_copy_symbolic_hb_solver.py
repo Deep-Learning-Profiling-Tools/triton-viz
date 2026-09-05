@@ -321,6 +321,14 @@ class TwoCopySymbolicHBSolver:
         # the legacy reading (every earlier operation orders every later one).
         self.fence_seqs: tuple[float, ...] = tuple(sorted(float(x) for x in fence_seqs))
         self.fence_order = bool(fence_order)
+        # Dependency order (D2/D3): unordered record pairs (load, dependent)
+        # whose same-position accesses are ordered by causality. Consulted
+        # only under fence order; the legacy reading already orders them.
+        self.dep_pairs: frozenset[tuple[int, int]] = frozenset(
+            (int(d), int(r.event_id))
+            for r in self.records
+            for d in getattr(r, "dep_loads", ())
+        )
         self.grid = self._normalize_grid(grid)
         self.arange_dict = dict(arange_dict or {})
         self.extra_assumptions = tuple(extra_assumptions)
@@ -755,11 +763,37 @@ class TwoCopySymbolicHBSolver:
                 return None
             if self._fence_between(a.program_seq, b.program_seq):
                 return None
+            if (a.event_id, b.event_id) in self.dep_pairs or (
+                b.event_id,
+                a.event_id,
+            ) in self.dep_pairs:
+                # Dependency order (D2/D3): the same position is ordered by
+                # causality, so only DISTINCT positions can race.
+                return self._lanes_differ(a, b)
             # Fence-ordered semantics: two distinct operations of one
             # instance with no fence between them are concurrently in
             # flight, so the pair is queried like any conflicting pair.
             return BoolVal(True)
         return BoolVal(True)
+
+    def _lanes_differ(
+        self, a: SymbolicMemoryEvent, b: SymbolicMemoryEvent
+    ) -> BoolRef | None:
+        """Constraint that the a-copy lane of ``a`` and the b-copy lane of
+        ``b`` are DIFFERENT positions, over the arange vars either event
+        uses; ``None`` when neither has a lane (scalar accesses: one
+        position, dependency-ordered, never queried)."""
+        occurring = _collect_z3_var_keys((a.addr, a.active, b.addr, b.active))
+        diffs = [
+            var_a != var_b
+            for (_, var_a), (_, var_b) in zip(
+                self.ctx_a.arange_substitutions, self.ctx_b.arange_substitutions
+            )
+            if _z3_var_key(var_a) in occurring or _z3_var_key(var_b) in occurring
+        ]
+        if not diffs:
+            return None
+        return diffs[0] if len(diffs) == 1 else Or(*diffs)
 
     def _lane_identity_differs(self, e: SymbolicMemoryEvent) -> BoolRef | None:
         """Constraint that the a/b copies of ``e`` denote two DIFFERENT
@@ -1041,6 +1075,12 @@ class TwoCopySymbolicHBSolver:
         if e1.program_seq >= e2.program_seq:
             return BoolVal(False)
         if self.fence_order and not self._fence_between(e1.program_seq, e2.program_seq):
+            if (e1.event_id, e2.event_id) in self.dep_pairs:
+                # Dependency order: within one copy the two records share
+                # their position variables, so this is the same-position
+                # edge of D3 (cross-position pairs are the intra-instance
+                # query's business).
+                return And(e1.active, e2.active)
             # Fence-ordered semantics: source order alone carries no
             # happens-before between distinct operations of one instance.
             return BoolVal(False)
