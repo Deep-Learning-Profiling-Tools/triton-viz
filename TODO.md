@@ -1075,11 +1075,30 @@ capture-artifact rows. Landed on the branch, backward compatible
   `ValueStore.beside(specs)` to `make_args_fn`. Fingerprints include
   the reference, so dedup stays content-based.
 - Tests: `tests/unit/test_capture_values.py` (10).
-- [ ] Recapture all 8 Triton corpora on the GPU machine (this one:
-      the upstream environments are in the venv), then the pinned
-      rerun at L0 AND L1 on the new contents (Hao: together). Contents
-      change every analyzed-launch verdict's basis, so the paper's
-      66 proved@interp and the L1 numbers move; a fresh pin.
+- [x] RECAPTURED all 8 Triton corpora (2026-09-05, this machine, RTX
+      4090, 51 min end to end; every installed upstream matched the
+      recorded pin: aiter b0d56a0, fla 0.5.1, flaggems 1051e56, torchao
+      bfbc842, tritonbench_meta 1edaf3e, Tilebench 224ec81, FlagAttention
+      41fc31d, TritonBench_G_v1 603e28a). Every row rebuilds and every
+      sidecar array passes its hash; no `values_dropped`; no old row
+      lost. Rows: flagattn 28 (specs byte-identical), torchao 67,
+      tilebench 56, tritonbench_meta 41, fla 378, aiter_ops 113 (the
+      same 5 failing cases) unchanged; flaggems 82 -> 84 and
+      tritonbench_g 202 -> 224 gained rows that capture-side changes
+      landed AFTER the old capture now admit (non-contiguous args,
+      dtype constexprs, two files no longer failing) -- not the
+      snapshot change; the pinned rerun's row set is therefore +24
+      against the fb91fc0 pin and must align by name. Sidecars
+      (`<corpus>_values.npz`, 7 files, 73.8 MB: tritonbench_g 27.9,
+      tritonbench_meta 26.2, tilebench 17.8, aiter_ops 1.3, flaggems
+      0.4, torchao 0.1, fla <0.1; flagattn needs none; 52 arrays in
+      all) are gitignored, present in the branch worktree and the
+      main checkout, and backed up to `~/workspace/triton-viz-values-
+      backup/`; storage decision (LFS vs out-of-tree) pending Hao.
+- [ ] Pinned rerun at L0 AND L1 on the new contents (Hao: together,
+      after the recapture). Contents change every analyzed-launch
+      verdict's basis, so the paper's 66 proved@interp and the L1
+      numbers move; a fresh pin.
 - Note: destindex-class rows (upstream tests that draw duplicate
   indices with randint, casebook A6) will still say race@enum on the
   real snapshot; that is the honest analyzed-launch reading of the
