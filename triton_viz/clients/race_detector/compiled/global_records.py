@@ -266,6 +266,11 @@ class _RaceEnv:
         self._loop_step: int = 1
         self._loops: dict[str, _LoopBinding] = {}
         self.loop_vars: tuple[Any, ...] = ()
+        # The read-only-source premise must be known BEFORE the loop bounds
+        # are evaluated (a CSR row pointer the kernel also writes has no
+        # usable snapshot in a bound either).
+        if multipath and self.tensors:
+            self.unusable_sources.update(_written_load_sources(graph, self.tensors))
         for index, lp in enumerate(_graph_loops(graph)):
             self._bind_loop(lp, index)
 
@@ -304,14 +309,22 @@ class _RaceEnv:
         from z3 import Int
 
         assert loop is not None
-        free_before = set(self.free_loaded)
         lower_z3 = self.eval(loop.lower)
         upper_z3 = self.eval(loop.upper)
         step_z3 = self.eval(loop.step)
-        if self.free_loaded - free_before:
-            # a bound over an unmodeled loaded value: the iteration range
-            # is over-approximated, every access of the loop is widened
+        bound_leaves = loaded_leaves(loop.lower) + loaded_leaves(loop.upper)
+        if any(
+            lf.access_index in self.free_loaded or self._pad_reaches(lf, ())
+            for lf in bound_leaves
+        ):
+            # a bound over an unspecified loaded value (no usable snapshot,
+            # or a masked-off lane without `other`): the iteration range is
+            # over-approximated, every access of the loop is widened
             self.free_bound_loops.add(loop.loop_ssa)
+        # Route 2: the loads feeding the bounds must be in bounds themselves
+        # (the standing in-bounds premise applied to the load), so the
+        # iteration-existence premise carries their domain premises.
+        domain = self.domain_premises_for(bound_leaves)
         lower_c = self._as_long(lower_z3)
         upper_c = self._as_long(upper_z3)
         step_c = self._as_long(step_z3)
@@ -338,7 +351,7 @@ class _RaceEnv:
             # exact range — fabricating an iteration (max(1, n)) produced
             # definite race reports for launches that never run the body.
             zero_trip = n_iters == 0
-            premises: tuple[Any, ...] = (And(var >= 0, var < n_iters),)
+            premises: tuple[Any, ...] = (And(var >= 0, var < n_iters),) + domain
         else:
             # Route 3 (multipath, L2): a T1 bound that stays symbolic after
             # the params are pinned is a pid- or iterator-dependent bound
@@ -368,7 +381,7 @@ class _RaceEnv:
                     var >= 0,
                     lower_z3 + var * IntVal(step_c) < upper_z3,
                 ),
-            )
+            ) + domain
         binding = _LoopBinding(var, premises, zero_trip, lower_z3, step_c)
         self._loops[loop.loop_ssa] = binding
         self.loop_vars = self.loop_vars + (var,)
@@ -440,6 +453,17 @@ class _RaceEnv:
             return b.lower + b.var * IntVal(b.step)
         if isinstance(term, IterArgOffset):
             info = self.graph.iter_args[term.arg_id]
+            if mentions_loaded(info.delta):
+                # offset0 + k·delta stands for the pointer only when the
+                # advance is the same every iteration; a loaded advance
+                # (``p += step[k]``, a linked-list walk) is not, and even a
+                # loop-invariant one makes k·Select nonlinear. Refused by
+                # name, as before Route 2.
+                raise UnsupportedTTIR(
+                    f"loop-carried pointer advance depends on a loaded value "
+                    f"(iter_arg {term.arg_id})",
+                    kind="indirect-address",
+                )
             b = self._binding(info.loop_ssa) if info.loop_ssa else self._binding("")
             return self.eval(info.offset0) + b.var * self.eval(info.delta)
         if isinstance(term, Bin):
@@ -524,33 +548,91 @@ class _RaceEnv:
         return pad
 
     def _loaded(self, term: Loaded) -> Any:
-        """``If(mask ∧ in-domain, snap[off], other-or-free)``: on an active
-        in-bounds lane the value is the snapshot element; a masked-off lane
-        holds ``other`` when the load names one and an unspecified value
-        otherwise (a free array, so no two lanes or instances are forced to
-        agree); an out-of-domain offset is unspecified too (the load's own
-        in-bounds premise excludes it on active lanes). Without a usable
-        snapshot the whole value is free: the widening Route 3 applied to
-        unmodeled loaded values, and the record is marked uncertain by the
-        caller (an address built on it refuses instead, see _record_for)."""
+        """``If(mask, snap[off], other-or-free)``: on an active lane the
+        value is the snapshot element at the lane's offset; a masked-off
+        lane holds ``other`` when the load names one and an unspecified
+        value otherwise (a free array, so no two lanes or instances are
+        forced to agree). The offset's domain is NOT guarded here: an
+        active lane whose load is out of bounds lies outside the model
+        (the standing in-bounds premise), and every consumer carries
+        ``mask → 0 ≤ off < numel`` as a local premise instead
+        (:meth:`domain_premises_for`) — a free value there would let an
+        instance beyond the snapshotted table fabricate a definite race.
+        Without a usable snapshot the whole value is free: the widening
+        Route 3 applied to unmodeled loaded values, and the record is
+        marked uncertain by the caller (an address built on it refuses
+        instead, see _record_for)."""
         off = self.eval(term.offset)
-        pad = self._pad(term.access_index)
         snap = self._snapshot_array(term.base_param)
         if snap is None:
             self.free_loaded.add(term.access_index)
             self.free_reason[term.access_index] = self.unusable_sources.get(
                 term.base_param, "no snapshot"
             )
-            return Select(pad, off)
-        arr, numel = snap
+            return Select(self._pad(term.access_index), off)
+        arr, _numel = snap
         self.used_snapshot = True
-        in_dom = And(off >= 0, off < IntVal(numel))
-        value = If(in_dom, Select(arr, off), Select(pad, off))
+        value = Select(arr, off)
         if term.mask is None:
             return value
         mask = _as_bool(self.eval(term.mask))
-        other = self.eval(term.other) if term.other is not None else Select(pad, off)
-        return If(mask, value, other)
+        if term.other is not None:
+            return If(mask, value, self.eval(term.other))
+        return If(mask, value, Select(self._pad(term.access_index), off))
+
+    def free_reason_for(self, term: Loaded) -> str | None:
+        """Why ``term``'s value is free (no usable snapshot), or None when
+        the snapshot stands for it. Order-independent: the answer does not
+        depend on whether the term was evaluated before."""
+        if self._snapshot_array(term.base_param) is None:
+            return self.unusable_sources.get(term.base_param, "no snapshot")
+        return None
+
+    def _pad_reaches(self, term: Loaded, guards: tuple[Term, ...]) -> bool:
+        """True when ``term``'s masked-off lanes are UNSPECIFIED (a mask
+        without ``other``) and the consumer's own activity does not confine
+        it to the load's active lanes: ``guards`` are the consumer's mask
+        and path terms; when every conjunct of the load's mask is among
+        their conjuncts, the free lanes are inactive for the consumer and
+        never reach the solver. A load with no usable snapshot is handled
+        by free_loaded, not here."""
+        if term.mask is None or term.other is not None:
+            return False
+        if self.free_reason_for(term) is not None:
+            return False
+        have: set[Term] = set()
+        for g in guards:
+            have.update(_conjuncts(g))
+        return not all(c in have for c in _conjuncts(term.mask))
+
+    def domain_premises_for(self, leaves: list[Loaded]) -> tuple[Any, ...]:
+        """The in-bounds premise of every snapshotted load among ``leaves``
+        (``mask → 0 ≤ off < numel``), for the CONSUMER's activity: an
+        instance whose load reads outside its source is outside the model,
+        exactly as its own access record says. Free (unsnapshotted) loads
+        carry no premise — their value is unspecified, the over-report
+        direction."""
+        from z3 import Implies
+
+        out: list[Any] = []
+        for lf in leaves:
+            snap = self._snapshot_array(lf.base_param)
+            if snap is None:
+                continue
+            _arr, numel = snap
+            off = self.eval(lf.offset)
+            in_dom = And(off >= 0, off < IntVal(numel))
+            if lf.mask is None:
+                out.append(in_dom)
+            else:
+                out.append(Implies(_as_bool(self.eval(lf.mask)), in_dom))
+        return tuple(out)
+
+
+def _conjuncts(term: Term) -> list[Term]:
+    if isinstance(term, BoolBin) and term.op == "and":
+        return _conjuncts(term.a) + _conjuncts(term.b)
+    return [term]
 
 
 def _as_bool(e: Any) -> Any:
@@ -684,19 +766,22 @@ def _record_for(
             "loop-carried atomic)",
             kind="indirect-address",
         )
-    free_before = set(env.free_loaded)
+    # Route 2: a loaded value with no usable snapshot is FREE, and a free
+    # address aliases everything — refuse by name. Decided structurally on
+    # the address term, never on which evaluation happened first (the same
+    # Loaded may already have been evaluated by an earlier record's mask,
+    # a loop bound, or this record's atomic operand).
+    for lf in loaded_leaves(access.offset):
+        why = env.free_reason_for(lf)
+        if why is not None:
+            raise UnsupportedTTIR(
+                f"line {access.line_no}: address depends on a loaded value with "
+                f"no usable snapshot ({why})",
+                kind="snapshot-bound"
+                if why.startswith("too large")
+                else "indirect-address",
+            )
     addr_off = env.eval(access.offset)
-    new_free = env.free_loaded - free_before
-    if new_free:
-        idx = min(new_free)
-        why = env.free_reason.get(idx, "no snapshot")
-        raise UnsupportedTTIR(
-            f"line {access.line_no}: address depends on a loaded value with no "
-            f"usable snapshot ({why})",
-            kind="snapshot-bound"
-            if why.startswith("too large")
-            else "indirect-address",
-        )
     bounds: tuple[Any, ...]
     if meta is not None:
         if meta.elem_size != elem:
@@ -768,9 +853,11 @@ def _record_for(
     # observation between the two copies and manufacturing UNSAT (a false
     # proof) for masks like ``o == 0`` vs ``o == 2``.
     ref_obs = observed_indices(access.offset)
+    loaded = loaded_leaves(access.offset)
     for t in (access.mask, access.path, access.exit_pred):
         if t is not None:
             ref_obs |= observed_indices(t)
+            loaded += loaded_leaves(t)
     for i in sorted(ref_obs):
         copy_local = copy_local + (env.observed(i),)
     if old_value is not None:
@@ -816,7 +903,9 @@ def _record_for(
             else env.premises_for(access) + await_premises
         ),
         local_constraints=(
-            bounds + env.premises_for(access) if env.multipath else bounds
+            bounds + env.premises_for(access) + env.domain_premises_for(loaded)
+            if env.multipath
+            else bounds
         ),
         source_location=source,
         program_seq=seq,
@@ -921,8 +1010,6 @@ def encode_graph(
             )
 
     env = _RaceEnv(graph, params, multipath=multipath, tensors=tensors)
-    if multipath:
-        env.unusable_sources.update(_written_load_sources(graph, tensors))
     await_prems, await_obs = _await_premises(graph, env)
     records = []
     uncertain: set[int] = set()
@@ -1035,12 +1122,20 @@ def _widened_by_free_loaded(access: AccessEvent, env: _RaceEnv) -> bool:
     """A mask, path, or exit predicate built on a loaded value that had no
     usable snapshot is a free boolean: over-approximated activity, so the
     record is uncertain; likewise every access of a loop whose bounds went
-    through such a value."""
-    for t in (access.mask, access.path, access.exit_pred):
+    through such a value. A masked load without ``other`` is unspecified
+    on its masked-off lanes: wherever that value can reach an ACTIVE lane
+    of the consumer (address, mask, path or exit predicate) the record is
+    uncertain too, unless the consumer's own mask/path repeats the load's
+    mask, which keeps those lanes inactive."""
+    guards = tuple(t for t in (access.mask, access.path) if t is not None)
+    for t in (access.offset, access.mask, access.path, access.exit_pred):
         if t is None:
             continue
-        if any(lf.access_index in env.free_loaded for lf in loaded_leaves(t)):
-            return True
+        for lf in loaded_leaves(t):
+            if lf.access_index in env.free_loaded and t is not access.offset:
+                return True
+            if env._pad_reaches(lf, guards):
+                return True
     loops = access.loops or (
         (env.graph.loop.loop_ssa,) if access.in_loop and env.graph.loop else ()
     )

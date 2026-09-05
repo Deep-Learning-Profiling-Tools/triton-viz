@@ -92,11 +92,20 @@ def headline(results_dir: Path) -> str:
             f"- **proved@T0** (any scalar params, any grid — beyond both the "
             f"dynamic mode and T1): {len(t0)} — {t0}"
         )
+        content = [
+            r["name"] for r in rows if (r.get("terminal") or "").endswith("+content")
+        ]
         lines.append(
             f"- proved@T1 (this input, any grid): {len(t1)}"
             + (
                 f", of which conditional on termination: {len(cond)} — {cond}"
                 if cond
+                else ""
+            )
+            + (
+                f", of which content-qualified (this launch's tensor contents, "
+                f"L2 snapshot Selects): {len(content)} — {content}"
+                if content
                 else ""
             )
         )

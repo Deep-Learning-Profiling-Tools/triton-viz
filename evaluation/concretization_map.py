@@ -51,6 +51,15 @@ POINTS: dict[str, tuple[int, int, str]] = {
     # per-row metadata, not a separate point.
     "proved@T1-launch": (1, 2, "launch-scoped proof"),
     "proved@T1-launch+assumes-termination": (1, 2, "conditional proof"),
+    # Route 2 (L2, "+content"): the proof went through a snapshot Select,
+    # so this launch's tensor CONTENTS are concretized too — one step
+    # further along x than T1, with paths still symbolic (Route 3's
+    # activity predicates), which is what makes the memory-without-paths
+    # column reachable at all. The y extent is the underlying rung's.
+    "proved@T1+content": (2, 3, "content-qualified proof"),
+    "proved@T1+assumes-termination+content": (2, 3, "conditional proof"),
+    "proved@T1-launch+content": (2, 2, "content-qualified proof"),
+    "proved@T1-launch+assumes-termination+content": (2, 2, "conditional proof"),
     # A static-track race verdict is decided on the IR front-end at T1.
     "races-unclassified": (1, 3, "report"),
     # Confirmation/refutation happen on the interpreter front-end, where
@@ -114,9 +123,10 @@ def to_markdown(points: Counter, by_corpus: Counter, residual: Counter) -> str:
         "# 2-D concretization map (plan §I.2)",
         "",
         "x: what is concretized (cumulative). y: what stays symbolic.",
-        "The (memory-without-paths) column is unreachable by construction —",
-        "concretizing memory means executing load semantics, which forces",
-        "one path (§I.2); the interpreter front-end owns both at once.",
+        "The (memory-without-paths) column is reachable only through the L2",
+        "snapshot Selects (Route 2): a loaded value becomes a Select over the",
+        "launch's pre-launch contents while the paths stay symbolic; the",
+        "interpreter front-end concretizes memory and paths at once.",
         "",
         "| x (concretized) | y (symbolic) | class | rows | corpora |",
         "|---|---|---|---|---|",

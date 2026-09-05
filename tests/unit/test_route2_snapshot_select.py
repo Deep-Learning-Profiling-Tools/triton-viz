@@ -51,15 +51,23 @@ def _mp(text):
     return parse_ttir(text, multipath=True)
 
 
-def _t1(graph, params, tensors, grid=(4, 1, 1)):
-    """The launch-PINNED T1 query (the client's launch-scoped rung): pids
-    are confined to the launch extent, so a witness is always in-table.
-    (The any-grid query also admits instances beyond the snapshotted
-    table, whose loaded values are unspecified; the client reports those
-    as grid-fragility evidence, tested through the client below.)"""
+def _t1(graph, params, tensors, grid=(4, 1, 1), pinned=True):
+    """The T1 query with the snapshot equalities asserted; ``pinned``
+    confines the pids to the launch extent (the client's launch-scoped
+    rung), otherwise the grid stays symbolic (the any-grid rung, where an
+    instance beyond the snapshotted table is excluded by the consumer's
+    domain premise rather than admitted with an unspecified value)."""
     from z3 import IntVal
 
     enc = encode_graph(graph, params, tensors, multipath=True)
+    if not pinned:
+        solver = TwoCopySymbolicHBSolver(
+            enc.records,
+            grid=symbolic_grid(enc, grid),
+            arange_dict=enc.arange_dict,
+            extra_assumptions=enc.assumptions,
+        )
+        return enc, solver.find_races()
     g = symbolic_grid(enc, grid)
     pins = tuple(
         d == IntVal(grid[i]) for i, d in enumerate(g) if not isinstance(d, int)
@@ -138,6 +146,22 @@ def test_permutation_scatter_proves_content_qualified_and_duplicates_race():
     assert reports and any(set(_pids(r)) == {0, 3} for r in reports)
 
 
+def test_any_grid_query_excludes_instances_beyond_the_table():
+    """The consumer store carries the index load's domain premise
+    (``0 <= pid*4+lane < 16``): an instance beyond the 16-entry table
+    would read its index out of bounds, which is outside the model, so
+    the ANY-grid query proves the permutation instead of admitting a
+    free out-of-table value that two instances could agree on."""
+    g = _mp(SCATTER)
+    (store,) = [a for a in g.accesses if a.kind == "store"]
+    enc, reports = _t1(g, {}, _tensors(PERM), pinned=False)
+    assert reports == [] and enc.uncertain_event_ids == set()
+    (rec,) = [r for r in enc.records if r.event_id == 2]
+    assert len(rec.local_constraints) == 3  # two bounds + the domain premise
+    enc, reports = _t1(g, {}, _tensors(DUP), pinned=False)
+    assert reports and all(max(_pids(r)) < 4 for r in reports)
+
+
 def test_client_lands_the_scatter_on_the_content_qualified_rungs():
     jit = SimpleNamespace(arg_names=["idx_ptr", "x_ptr", "out_ptr"])
 
@@ -169,12 +193,40 @@ def test_client_lands_the_scatter_on_the_content_qualified_rungs():
 
     det = run(PERM)
     assert det.last_global_status == "ok"
-    assert det.last_global_provenance == "proved@T1-launch+content"
+    assert det.last_global_provenance == "proved@T1+content"
     assert det.last_global_verdict["content_qualified"]
     det = run(DUP)
     assert det.last_global_status == "races"
     assert det.last_global_verdict["content_qualified"]
     assert any(set(_pids(r)) == {0, 3} for r in det.last_global_reports)
+
+
+def test_client_never_certifies_a_race_on_out_of_table_instances():
+    """A callable grid leaves the client without a launch extent, so the
+    launch-scoped requery cannot run: the any-grid verdict must stand on
+    its own. With the domain premise the permutation proves; the report
+    for the duplicate stays in-table."""
+    jit = SimpleNamespace(arg_names=["idx_ptr", "x_ptr", "out_ptr"])
+
+    def run(idx):
+        det = CompiledRaceDetector(confirm_races=False, ladder_level=2)
+        det.pre_warmup_callback(
+            jit,
+            torch.tensor(idx, dtype=torch.int32),
+            torch.zeros(16, dtype=torch.int32),
+            torch.zeros(64, dtype=torch.int32),
+            grid=lambda meta: (4,),
+        )
+        det.post_warmup_callback(jit, SimpleNamespace(asm={"ttir": SCATTER}))
+        det.finalize()
+        return det
+
+    det = run(PERM)
+    assert det.last_global_status == "ok"
+    assert det.last_global_provenance == "proved@T1+content"
+    det = run(DUP)
+    assert det.last_global_status == "races"
+    assert all(max(_pids(r)) < 4 for r in det.last_global_reports)
 
 
 # ───────────────────── refusals and widening ─────────────────────
@@ -211,6 +263,48 @@ def test_source_written_by_the_kernel_is_unusable():
 def test_t0_keeps_loaded_values_free_and_refuses_them_in_addresses():
     with pytest.raises(UnsupportedTTIR, match="no usable snapshot"):
         encode_graph_t0(_mp(SCATTER), multipath=True)
+
+
+GUARD_THEN_ADDRESS = _module(
+    "%idx_ptr: !tt.ptr<i32>, %out_ptr: !tt.ptr<i32>",
+    "%c1 = arith.constant 1 : i32",
+    "%cm1 = arith.constant -1 : i32",
+    "%pid = tt.get_program_id x : i32",
+    "%ip = tt.addptr %idx_ptr, %pid : !tt.ptr<i32>, i32",
+    "%y = tt.load %ip : !tt.ptr<i32>",
+    "%g = arith.cmpi eq, %y, %cm1 : i32",
+    "scf.if %g {",
+    "tt.store %out_ptr, %c1 : !tt.ptr<i32>",
+    "}",
+    "%op = tt.addptr %out_ptr, %y : !tt.ptr<i32>, i32",
+    "tt.store %op, %c1 : !tt.ptr<i32>",
+)
+
+
+def test_free_loaded_in_an_address_refuses_regardless_of_evaluation_order():
+    """``y = idx[pid]; if y == -1: out[0] = 1; out[y] = 1``: the guarded
+    store evaluates the loaded value FIRST (in its path), so a refusal
+    keyed on "newly free during this address" would miss the second
+    store's address and lower it to a free copy-local array, a definite
+    race no launch produces. The refusal is structural on the address."""
+    g = _mp(GUARD_THEN_ADDRESS)
+    tensors = {
+        "idx_ptr": _t(0x100000, 4, reason="too large (40000 elements, bound 16384)"),
+        "out_ptr": _t(0x300000, 64),
+    }
+    with pytest.raises(UnsupportedTTIR, match="too large") as ei:
+        encode_graph(g, {}, tensors, multipath=True)
+    assert ei.value.kind == "snapshot-bound"
+    with pytest.raises(UnsupportedTTIR, match="no usable snapshot") as ei:
+        encode_graph_t0(g, multipath=True)
+    assert ei.value.kind == "indirect-address"
+    tensors["idx_ptr"] = _t(0x100000, 4, snapshot=(1, 2, 3, 4))
+    enc, reports = _t1(g, {}, tensors)
+    assert enc.content_qualified and enc.uncertain_event_ids == set()
+    assert reports == []  # the guard never fires, out[1..4] distinct per pid
+    tensors["idx_ptr"] = _t(0x100000, 4, snapshot=(1, -1, 3, 1))
+    enc, reports = _t1(g, {}, tensors)
+    assert reports and any(set(_pids(r)) == {0, 3} for r in reports)
 
 
 MASKED_GUARD = _module(
@@ -257,6 +351,71 @@ def test_masked_load_with_other_and_a_flag_guard():
     assert reports  # widened, never definite: the client withholds them
 
 
+def test_masked_off_lanes_take_other():
+    """n = 2 masks pids 2 and 3 off: they read ``other``, not the flag
+    table. other = 0 keeps them out of the guard (flags (1,0,1,0) prove);
+    other = 1 sends both through it (flags all zero race between 2 and 3),
+    so a lowering that dropped the mask or the other would flip both."""
+    g = _mp(MASKED_GUARD)
+    two = {
+        "out_ptr": _t(0x300000, 64),
+        "flag_ptr": _t(0x400000, 4, snapshot=(1, 0, 1, 0)),
+    }
+    enc, reports = _t1(g, {"n": 2}, two)
+    assert enc.uncertain_event_ids == set() and reports == []
+    other_one = _mp(MASKED_GUARD.replace("%fp, %m, %c0", "%fp, %m, %c1"))
+    none = {
+        "out_ptr": _t(0x300000, 64),
+        "flag_ptr": _t(0x400000, 4, snapshot=(0, 0, 0, 0)),
+    }
+    enc, reports = _t1(other_one, {"n": 2}, none)
+    assert enc.uncertain_event_ids == set()
+    assert reports and all(set(_pids(r)) == {2, 3} for r in reports)
+
+
+def test_masked_load_without_other_widens_unless_the_consumer_repeats_the_mask():
+    """Without ``other`` a masked-off lane holds an unspecified value. A
+    guard built on it decides the store's activity for those lanes, so
+    the record is uncertain (its reports are widened, never definite).
+    When the consumer's own mask repeats the load's mask the unspecified
+    lanes are inactive for it and the record stays exact."""
+    no_other = _mp(
+        MASKED_GUARD.replace("%fp, %m, %c0 : !tt.ptr<i32>", "%fp, %m : !tt.ptr<i32>")
+    )
+    (store,) = [a for a in no_other.accesses if a.kind == "store"]
+    (leaf,) = loaded_leaves(store.path)
+    assert leaf.mask is not None and leaf.other is None
+    flags = {
+        "out_ptr": _t(0x300000, 64),
+        "flag_ptr": _t(0x400000, 4, snapshot=(1, 0, 0, 0)),
+    }
+    enc, reports = _t1(no_other, {"n": 1}, flags)
+    assert enc.content_qualified and 1 in enc.uncertain_event_ids
+    assert reports  # pids 1..3 are masked off: their guard is unspecified
+    # the scatter with the index load and the store under the SAME mask
+    masked_scatter = _mp(
+        SCATTER.replace(
+            "%i = tt.load %ip : tensor<4x!tt.ptr<i32>>",
+            "%ns = tt.splat %n : i32 -> tensor<4xi32>\n"
+            "    %m = arith.cmpi slt, %offs, %ns : tensor<4xi1>\n"
+            "    %i = tt.load %ip, %m : tensor<4x!tt.ptr<i32>>",
+        )
+        .replace(
+            "tt.store %op, %v : tensor<4x!tt.ptr<i32>>",
+            "tt.store %op, %v, %m : tensor<4x!tt.ptr<i32>>",
+        )
+        .replace("%out_ptr: !tt.ptr<i32>", "%out_ptr: !tt.ptr<i32>, %n: i32")
+    )
+    (store,) = [a for a in masked_scatter.accesses if a.kind == "store"]
+    (leaf,) = loaded_leaves(store.offset)
+    assert leaf.mask is not None and leaf.other is None and store.mask == leaf.mask
+    enc, reports = _t1(masked_scatter, {"n": 8}, _tensors(PERM))
+    assert enc.uncertain_event_ids == set() and reports == []
+    enc, reports = _t1(masked_scatter, {"n": 16}, _tensors(DUP))
+    assert enc.uncertain_event_ids == set()
+    assert reports and any(set(_pids(r)) == {0, 3} for r in reports)
+
+
 def test_loaded_index_tile_follows_expand_dims():
     """``rows = load(row_ptr + offs_m)`` then ``out + rows[:, None] * S +
     offs_n[None, :]``: the Loaded's lane arange is retagged with the
@@ -301,6 +460,72 @@ def test_loaded_index_tile_follows_expand_dims():
     tensors["row_ptr"] = _t(0x100000, 8, snapshot=tuple([0] * 8))
     enc, reports = _t1(g, {"S": 2}, tensors)
     assert reports and all(max(_pids(r)) < 4 for r in reports)
+
+
+LOADED_ADVANCE = _module(
+    "%out_ptr: !tt.ptr<i32>, %step_ptr: !tt.ptr<i32>, %n: i32",
+    "%c0 = arith.constant 0 : i32",
+    "%c1 = arith.constant 1 : i32",
+    "%pid = tt.get_program_id x : i32",
+    "%p0 = tt.addptr %out_ptr, %pid : !tt.ptr<i32>, i32",
+    "%r = scf.for %k = %c0 to %n step %c1 iter_args(%p = %p0) -> (!tt.ptr<i32>)  : i32 {",
+    "tt.store %p, %c1 : !tt.ptr<i32>",
+    "%sp = tt.addptr %step_ptr, %k : !tt.ptr<i32>, i32",
+    "%s = tt.load %sp : !tt.ptr<i32>",
+    "%pn = tt.addptr %p, %s : !tt.ptr<i32>, i32",
+    "scf.yield %pn : !tt.ptr<i32>",
+    "}",
+)
+
+
+def test_loaded_pointer_advance_refuses_instead_of_a_false_proof():
+    """``p += step[k]`` inside the loop: ``offset0 + k·delta`` stands for
+    the pointer only for a loop-invariant advance. With step = (1, 5),
+    pid 0 writes out[0], out[1] and pid 1 writes out[1], out[2] (a WAW
+    the k·step[k] model misses), so the iter_arg refuses by name."""
+    g = _mp(LOADED_ADVANCE)
+    tensors = {
+        "out_ptr": _t(0x300000, 64),
+        "step_ptr": _t(0x100000, 2, snapshot=(1, 5)),
+    }
+    with pytest.raises(UnsupportedTTIR, match="pointer advance") as ei:
+        encode_graph(g, {"n": 2}, tensors, multipath=True)
+    assert ei.value.kind == "indirect-address"
+    with pytest.raises(UnsupportedTTIR, match="pointer advance"):
+        encode_graph_t0(g, multipath=True)
+
+
+def test_unmodelable_other_leaves_the_masked_lanes_unspecified_and_widens():
+    """``other`` is an i32 ``andi`` (unmodeled): the reader drops it, so a
+    masked-off lane holds an unspecified value; the consumer's address
+    goes through it, and the record is uncertain (never a definite race:
+    the real lanes hold the kernel's defined ``pid & 7``)."""
+    text = _module(
+        "%idx_ptr: !tt.ptr<i32>, %out_ptr: !tt.ptr<i32>, %n: i32",
+        "%c7 = arith.constant 7 : i32",
+        "%pid = tt.get_program_id x : i32",
+        "%m = arith.cmpi slt, %pid, %n : i32",
+        "%o = arith.andi %pid, %c7 : i32",
+        "%ip = tt.addptr %idx_ptr, %pid : !tt.ptr<i32>, i32",
+        "%i = tt.load %ip, %m, %o : !tt.ptr<i32>",
+        "%op = tt.addptr %out_ptr, %i : !tt.ptr<i32>, i32",
+        "tt.store %op, %c7 : !tt.ptr<i32>",
+    )
+    g = _mp(text)
+    (store,) = [a for a in g.accesses if a.kind == "store"]
+    (leaf,) = loaded_leaves(store.offset)
+    assert leaf.mask is not None and leaf.other is None
+    tensors = {
+        "idx_ptr": _t(0x100000, 4, snapshot=(0, 1, 2, 3)),
+        "out_ptr": _t(0x300000, 64),
+    }
+    enc, reports = _t1(g, {"n": 2}, tensors)
+    assert enc.content_qualified and 1 in enc.uncertain_event_ids
+    # every witness involves a masked-off pid (its unspecified value can
+    # match anything, including pid 1's real index): widened, never definite
+    assert reports and all(max(_pids(r)) >= 2 for r in reports)
+    enc, reports = _t1(g, {"n": 4}, tensors)  # no lane masked off: exact
+    assert 1 in enc.uncertain_event_ids and reports == []
 
 
 def _walk(term):
@@ -356,3 +581,37 @@ def test_csr_loop_bounds_from_a_loaded_row_pointer_table():
     free = {"ptr_ptr": _t(0x100000, 5, reason="too large"), "out_ptr": _t(0x300000, 64)}
     enc, reports = _t1(g, {}, free)
     assert not enc.content_qualified and enc.uncertain_event_ids == {2}
+    # the bounds' loads carry their domain premise into the loop premise:
+    # an instance beyond the 5-entry table never iterates (any-grid proof)
+    enc, reports = _t1(g, {}, disjoint, pinned=False)
+    assert reports == []
+
+
+def test_gather_golden_binds_a_masked_index_load_with_a_dense_other():
+    """The compiled gather: ``idx = load(idx_ptr + offs, mask, other=0)``
+    (a dense-constant ``other``) addresses a FLOAT source. The index is a
+    Loaded with the modeled mask and ``other == Const(0)``; the float load
+    it steers stays unmodeled in value. At T0 the read-only groups are
+    skipped, so the kernel proves without any snapshot; at T1 a permuted
+    index table proves content-qualified."""
+    from pathlib import Path
+
+    from triton_viz.clients.common.ttir_reader import Const
+
+    golden = Path(__file__).resolve().parents[1] / "golden" / "ttgir"
+    g = _mp((golden / "gather_sm80.ttir").read_text())
+    idx_load, src_load, store = g.accesses
+    (leaf,) = loaded_leaves(src_load.offset)
+    assert leaf.base_param == "idx_ptr"
+    assert leaf.mask is not None and leaf.other == Const(0)
+    assert loaded_leaves(store.offset) == []
+    assert [name for name, _ in encode_graph_t0(g, multipath=True)] == ["out_ptr"]
+    perm = tuple(reversed(range(1024)))
+    tensors = {
+        "idx_ptr": _t(0x100000, 1024, snapshot=perm),
+        "src_ptr": _t(0x200000, 1024),
+        "out_ptr": _t(0x300000, 1024),
+    }
+    enc, reports = _t1(g, {"n_elements": 1024}, tensors)
+    assert enc.content_qualified and enc.uncertain_event_ids == set()
+    assert reports == []
