@@ -394,3 +394,29 @@ def test_static_scalar_splat_keeps_the_tile_operand_dependence(fence_order_on):
         _xg_args,
     )
     assert res["status"] == "ok", res
+
+
+# libdevice calls print as tt.extern_elementwise in TTIR; they are
+# element-wise by construction and must keep the positional dependence
+# (liger's GeGLU backward recomputes tanh before storing in place).
+
+
+from triton.language.extra import libdevice  # noqa: E402  (kernel dependency below)
+
+
+@triton.jit
+def _inplace_libdevice_kernel(x_ptr, BLOCK: tl.constexpr):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    v = tl.load(x_ptr + offs)
+    tl.store(x_ptr + offs, libdevice.tanh(v))
+
+
+def test_static_libdevice_call_keeps_the_dependence(fence_order_on):
+    res = _static(
+        _inplace_libdevice_kernel,
+        (4,),
+        {"x_ptr": "*fp32", "BLOCK": "constexpr"},
+        {"BLOCK": N},
+        lambda seed: (torch.zeros(4 * N, dtype=torch.float32),),
+    )
+    assert res["status"] == "ok", res

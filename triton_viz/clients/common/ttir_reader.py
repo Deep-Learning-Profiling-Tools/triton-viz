@@ -1423,6 +1423,11 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                     "tt.ptr_to_int",
                     "tt.clampf",
                     "tt.precise_",
+                    "tt.mulhiui",
+                    # libdevice / inline-asm calls are element-wise by
+                    # construction (liger's tanh-based GeGLU backward)
+                    "tt.extern_elementwise",
+                    "tt.elementwise_inline_asm",
                 )
             )
             merged = _prov_of(operands, position_preserving)
