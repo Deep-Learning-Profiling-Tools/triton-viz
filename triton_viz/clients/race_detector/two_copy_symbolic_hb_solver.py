@@ -307,8 +307,20 @@ class TwoCopySymbolicHBSolver:
         only_pairs: frozenset[tuple[int, int]] | None = None,
         enum_fallback_grid: tuple[int, int, int] | None = None,
         launch_ceiling: bool = False,
+        fence_seqs: tuple[int, ...] = (),
+        fence_order: bool = False,
     ) -> None:
         self.records = list(records)
+        # Fence-ordered intra-instance semantics (paper design-fence-order.md,
+        # option A). ``fence_seqs`` are the program_seq positions of the
+        # capture's tile-level fences (tl.debug_barrier). With
+        # ``fence_order`` on, program order between two records of one
+        # instance is a happens-before edge only when a fence lies strictly
+        # between them, and same-instance pairs of distinct operations that
+        # no fence separates enter the intra-instance race query. Off keeps
+        # the legacy reading (every earlier operation orders every later one).
+        self.fence_seqs: tuple[int, ...] = tuple(sorted(int(x) for x in fence_seqs))
+        self.fence_order = bool(fence_order)
         self.grid = self._normalize_grid(grid)
         self.arange_dict = dict(arange_dict or {})
         self.extra_assumptions = tuple(extra_assumptions)
@@ -739,7 +751,14 @@ class TwoCopySymbolicHBSolver:
             # skipping is uniform and cheaper.
             return None
         if a.program_seq >= 0 and b.program_seq >= 0 and a.program_seq != b.program_seq:
-            return None
+            if not self.fence_order:
+                return None
+            if self._fence_between(a.program_seq, b.program_seq):
+                return None
+            # Fence-ordered semantics: two distinct operations of one
+            # instance with no fence between them are concurrently in
+            # flight, so the pair is queried like any conflicting pair.
+            return BoolVal(True)
         return BoolVal(True)
 
     def _lane_identity_differs(self, e: SymbolicMemoryEvent) -> BoolRef | None:
@@ -1006,13 +1025,24 @@ class TwoCopySymbolicHBSolver:
 
     # ──────────────────────── Edges & HB closure ────────────────────────
 
-    @staticmethod
-    def _program_order(e1: SymbolicMemoryEvent, e2: SymbolicMemoryEvent) -> BoolRef:
+    def _fence_between(self, seq1: int, seq2: int) -> bool:
+        """True when a captured tile-level fence lies strictly between the
+        two program_seq positions (both orientations accepted)."""
+        lo, hi = (seq1, seq2) if seq1 <= seq2 else (seq2, seq1)
+        return any(lo < f < hi for f in self.fence_seqs)
+
+    def _program_order(
+        self, e1: SymbolicMemoryEvent, e2: SymbolicMemoryEvent
+    ) -> BoolRef:
         if e1.copy != e2.copy:
             return BoolVal(False)
         if e1.program_seq < 0 or e2.program_seq < 0:
             return BoolVal(False)
         if e1.program_seq >= e2.program_seq:
+            return BoolVal(False)
+        if self.fence_order and not self._fence_between(e1.program_seq, e2.program_seq):
+            # Fence-ordered semantics: source order alone carries no
+            # happens-before between distinct operations of one instance.
             return BoolVal(False)
         return And(e1.active, e2.active)  # active-gated
 

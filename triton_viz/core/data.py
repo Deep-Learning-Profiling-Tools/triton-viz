@@ -304,6 +304,15 @@ class AtomicRMW(Op):
 
 
 @dataclass
+class Barrier(Op):
+    """A tile-level fence (``tl.debug_barrier``): no accesses of its own; it
+    orders every access of a control-flow-earlier operation of its instance
+    before every access of a later one."""
+
+    name: ClassVar[str] = "barrier"
+
+
+@dataclass
 class Tensor:
     ptr: int
     dtype: str

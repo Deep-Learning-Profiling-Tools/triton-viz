@@ -28,6 +28,7 @@ from ...core.data import (
     Op,
     AtomicCas,
     AtomicRMW,
+    Barrier,
     Load,
     Store,
 )
@@ -290,6 +291,11 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         # concrete observation (evaluation/ablation.py). Default: none.
         self.ablations = frozenset(ablations)
         self.records: list[AccessEventRecord] = []
+        # Tile-level fences (tl.debug_barrier) seen by the capture, as
+        # program_seq positions in the same sequence the access records
+        # use: an access with a fence seq strictly between it and a later
+        # access of the same instance is fence-ordered before it.
+        self.fence_seqs: list[int] = []
         self.last_reports: list[Any] = []
         # Premise tracking for the address-position lifting: launches
         # where an event ADDRESS chain embeds a plain load lower through
@@ -916,6 +922,8 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                     ablations=tuple(
                         a for a in self.ablations if a in ("hb", "coherence")
                     ),
+                    fence_seqs=tuple(self.fence_seqs),
+                    fence_order=cfg.race_detector_fence_order,
                 )
                 reports = solver.find_races()
                 if reports or solver.check_feasibility():
@@ -971,6 +979,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
 
     def grid_callback(self, grid: tuple[int, ...]) -> None:
         self.records = []
+        self.fence_seqs = []
         self.last_reports = []
         # Pessimistic until finalize() proves otherwise: if the launch dies
         # before finalize runs (a mid-kernel exception with no
@@ -1016,7 +1025,18 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         SymbolicExpr._scalar_concretize_observer_owner = id(self)
 
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
+        if op_type is Barrier:
+            return OpCallbacks(before_callback=self._on_barrier)
         return SymbolicClient.register_op_callback(self, op_type)
+
+    def _on_barrier(self, *args: Any, **kwargs: Any) -> None:
+        """``tl.debug_barrier``: record a tile-level fence at the current
+        program_seq position. The fence carries no accesses; the two-copy
+        solver reads ``fence_seqs`` to decide which same-instance access
+        pairs are fence-ordered (paper design-fence-order.md)."""
+        if self._unsupported_capture or not self._capture_active():
+            return
+        self.fence_seqs.append(self._next_program_seq())
 
     # ── Race-detector-only overrides for load/store overriders ────────────
     # The shared SymbolicClient versions concretise nested loads in ``ptr``

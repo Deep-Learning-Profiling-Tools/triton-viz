@@ -40,6 +40,7 @@ from ..data import (
     Ashr,
     AtomicCas,
     AtomicRMW,
+    Barrier,
     BinaryOp,
     Bitcast,
     Broadcast,
@@ -121,6 +122,7 @@ from .base import (
 TRITON_NAMESPACES: dict[Any, dict[str, type[Op]]] = {
     interpreter_builder: {
         "create_get_program_id": ProgramId,
+        "create_barrier": Barrier,
         "create_store": RawStore,
         "create_masked_store": Store,
         "create_load": RawLoad,
