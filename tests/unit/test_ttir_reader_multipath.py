@@ -25,6 +25,7 @@ import pytest
 from triton_viz.clients.common.ttir_reader import (
     Arange,
     Bin,
+    loaded_leaves,
     BoolBin,
     Cmp,
     Const,
@@ -100,17 +101,19 @@ def test_early_return_guard_becomes_a_path_predicate():
         assert a.loops == () and not a.in_loop
 
 
-def test_loaded_value_guard_widens_instead_of_modeling():
-    """``if y == -1: return`` with y loaded: the condition is DataDep, so
-    both targets stay reachable under the predecessor's predicate alone
-    and the fall-through accesses are ``guarded`` (over-approximated,
-    never a witness) — the reader's existing unmodeled-condition path."""
+def test_loaded_value_guard_is_a_loaded_term_in_the_path():
+    """``if y == -1: return`` with y loaded: under the L2 reader mode the
+    guard is modeled through a Loaded term (Route 2); whether it is exact
+    or free is the encoder's call (a snapshot of idx_ptr, or not)."""
     g = parse_ttir(_read("early_return_loaded"), multipath=True)
     idx_load, load, store = g.accesses
     assert not idx_load.guarded and idx_load.path is None
     for a in (load, store):
-        assert a.guarded
-        assert a.path is None  # nothing modelable to conjoin
+        assert not a.guarded
+        assert isinstance(a.path, Not) and isinstance(a.path.a, Cmp)
+        (leaf,) = loaded_leaves(a.path)
+        assert leaf.access_index == 0 and leaf.base_param == "idx_ptr"
+        assert leaf.mask is None and leaf.other is None
 
 
 def test_nested_guards_merge_through_a_select():
@@ -416,22 +419,22 @@ def test_attribute_dict_region_close_pops_the_loop_frame():
 
 
 def test_mixed_and_mask_keeps_its_modelable_conjunct_at_l2():
-    """``tl.store(p, v, mask=bounds and loaded_guard)`` (the FlagGems
-    cross-entropy backward idiom): single-path drops the whole mask, so
-    lanes past the bounds looked active and two rows overlapped in a
-    phantom WAW. Multipath keeps ``bounds`` (a sound over-approximation of
-    ``bounds ∧ guard``) and the access stays widened."""
+    """``tl.store(p, v, mask=bounds and loaded_guard)`` where the guard
+    comes from a FLOAT load (not a Loaded term): single-path drops the
+    whole mask; multipath keeps ``bounds`` (a sound over-approximation of
+    ``bounds ∧ guard``) and the access stays widened. An integer guard is
+    a Loaded term instead (Route 2) and the mask is fully modeled."""
     text = _module(
-        "%out_ptr: !tt.ptr<f32>, %tgt_ptr: !tt.ptr<i32>, %C: i32",
+        "%out_ptr: !tt.ptr<f32>, %tgt_ptr: !tt.ptr<f32>, %C: i32",
         "%c1 = arith.constant 1.0 : f32",
-        "%cm1 = arith.constant -1 : i32",
+        "%cm1 = arith.constant -1.0 : f32",
         "%pid = tt.get_program_id x : i32",
         "%offs = tt.make_range {end = 256 : i32, start = 0 : i32} : tensor<256xi32>",
         "%Cs = tt.splat %C : i32 -> tensor<256xi32>",
         "%bounds = arith.cmpi slt, %offs, %Cs : tensor<256xi32>",
-        "%tp = tt.addptr %tgt_ptr, %pid : !tt.ptr<i32>, i32",
-        "%tgt = tt.load %tp : !tt.ptr<i32>",
-        "%g = arith.cmpi ne, %tgt, %cm1 : i32",
+        "%tp = tt.addptr %tgt_ptr, %pid : !tt.ptr<f32>, i32",
+        "%tgt = tt.load %tp : !tt.ptr<f32>",
+        "%g = arith.cmpf one, %tgt, %cm1 : f32",
         "%gs = tt.splat %g : i1 -> tensor<256xi1>",
         "%m = arith.andi %bounds, %gs : tensor<256xi1>",
         "%row = arith.muli %pid, %C : i32",
@@ -449,6 +452,25 @@ def test_mixed_and_mask_keeps_its_modelable_conjunct_at_l2():
     (s2,) = [a for a in multi.accesses if a.kind == "store"]
     assert s2.mask_dropped
     assert s2.mask == Cmp("slt", Arange("%offs", 0, 256), Param("C"))
+    integer = (
+        text.replace("%tgt_ptr: !tt.ptr<f32>", "%tgt_ptr: !tt.ptr<i32>")
+        .replace(
+            "%tp = tt.addptr %tgt_ptr, %pid : !tt.ptr<f32>, i32",
+            "%tp = tt.addptr %tgt_ptr, %pid : !tt.ptr<i32>, i32",
+        )
+        .replace(
+            "%tgt = tt.load %tp : !tt.ptr<f32>", "%tgt = tt.load %tp : !tt.ptr<i32>"
+        )
+        .replace("%cm1 = arith.constant -1.0 : f32", "%cm1 = arith.constant -1 : i32")
+        .replace(
+            "%g = arith.cmpf one, %tgt, %cm1 : f32",
+            "%g = arith.cmpi ne, %tgt, %cm1 : i32",
+        )
+    )
+    (s3,) = [
+        a for a in parse_ttir(integer, multipath=True).accesses if a.kind == "store"
+    ]
+    assert not s3.mask_dropped and len(loaded_leaves(s3.mask)) == 1
 
 
 def test_attribute_dict_close_in_single_path_ends_the_loop():
@@ -479,20 +501,21 @@ def test_attribute_dict_close_in_single_path_ends_the_loop():
 
 def test_kept_conjunct_follows_expand_dims():
     """A mixed ``and`` computed on 1-D lanes and then expanded to a 2-D
-    tile: the kept conjunct's Arange must be retagged with the tile
-    dimension like the address's, or the partial mask would constrain a
-    lane variable the address never uses."""
+    tile (the guard from a FLOAT load, so it is not a Loaded term): the
+    kept conjunct's Arange must be retagged with the tile dimension like
+    the address's, or the partial mask would constrain a lane variable
+    the address never uses."""
     text = _module(
-        "%out_ptr: !tt.ptr<f32>, %tgt_ptr: !tt.ptr<i32>, %C: i32",
+        "%out_ptr: !tt.ptr<f32>, %tgt_ptr: !tt.ptr<f32>, %C: i32",
         "%c1 = arith.constant 1.0 : f32",
-        "%cm1 = arith.constant -1 : i32",
+        "%cm1 = arith.constant -1.0 : f32",
         "%pid = tt.get_program_id x : i32",
         "%offs = tt.make_range {end = 8 : i32, start = 0 : i32} : tensor<8xi32>",
         "%Cs = tt.splat %C : i32 -> tensor<8xi32>",
         "%bounds = arith.cmpi slt, %offs, %Cs : tensor<8xi32>",
-        "%tp = tt.addptr %tgt_ptr, %pid : !tt.ptr<i32>, i32",
-        "%tgt = tt.load %tp : !tt.ptr<i32>",
-        "%g = arith.cmpi ne, %tgt, %cm1 : i32",
+        "%tp = tt.addptr %tgt_ptr, %pid : !tt.ptr<f32>, i32",
+        "%tgt = tt.load %tp : !tt.ptr<f32>",
+        "%g = arith.cmpf one, %tgt, %cm1 : f32",
         "%gs = tt.splat %g : i1 -> tensor<8xi1>",
         "%m1 = arith.andi %bounds, %gs : tensor<8xi1>",
         "%m2 = tt.expand_dims %m1 {axis = 1 : i32} : tensor<8xi1> -> tensor<8x1xi1>",
@@ -548,20 +571,16 @@ def test_result_loops_in_sibling_regions_stay_distinct():
     assert else_store.loops == (b.loop_ssa,)
 
 
-def test_mixed_pid_and_loaded_guard_widens_both_arms():
-    """``if pid >= T and y == -1: return``: the false edge (not (a and d))
-    does not imply (not a), so the kept conjunct of the mixed ``and`` must
-    NOT become an edge condition; both targets stay reachable and
-    widened."""
-    text = _module(
-        "%out_ptr: !tt.ptr<i32>, %idx_ptr: !tt.ptr<i32>, %T: i32",
+def _mixed_guard(pointee: str, cmp: str, const: str):
+    return _module(
+        f"%out_ptr: !tt.ptr<i32>, %idx_ptr: !tt.ptr<{pointee}>, %T: i32",
         "%c1 = arith.constant 1 : i32",
-        "%cm1 = arith.constant -1 : i32",
+        f"%cm1 = arith.constant {const}",
         "%pid = tt.get_program_id x : i32",
         "%a = arith.cmpi sge, %pid, %T : i32",
-        "%ip = tt.addptr %idx_ptr, %pid : !tt.ptr<i32>, i32",
-        "%y = tt.load %ip : !tt.ptr<i32>",
-        "%d = arith.cmpi eq, %y, %cm1 : i32",
+        f"%ip = tt.addptr %idx_ptr, %pid : !tt.ptr<{pointee}>, i32",
+        f"%y = tt.load %ip : !tt.ptr<{pointee}>",
+        f"%d = {cmp}",
         "%c = arith.andi %a, %d : i1",
         "cf.cond_br %c, ^bb1, ^bb2",
         "^bb1:  // pred: ^bb0",
@@ -572,7 +591,26 @@ def test_mixed_pid_and_loaded_guard_widens_both_arms():
         "tt.store %op, %c1 : !tt.ptr<i32>",
         "tt.return",
     )
-    g = parse_ttir(text, multipath=True)
+
+
+def test_mixed_pid_and_loaded_guard_widens_both_arms():
+    """``if pid >= T and y == -1: return`` with y a FLOAT load (not a
+    Loaded term): the false edge (not (a and d)) does not imply (not a),
+    so the kept conjunct of the mixed ``and`` must NOT become an edge
+    condition; both targets stay reachable and widened. With an integer
+    load the whole condition is a modeled term (Route 2) and both arms
+    carry it exactly."""
+    g = parse_ttir(
+        _mixed_guard("f32", "arith.cmpf oeq, %y, %cm1 : f32", "-1.0 : f32"),
+        multipath=True,
+    )
     _load, s1, s2 = g.accesses
     assert s1.guarded and s1.path is None
     assert s2.guarded and s2.path is None
+    g = parse_ttir(
+        _mixed_guard("i32", "arith.cmpi eq, %y, %cm1 : i32", "-1 : i32"),
+        multipath=True,
+    )
+    _load, s1, s2 = g.accesses
+    assert not s1.guarded and not s2.guarded
+    assert len(loaded_leaves(s1.path)) == 1 and len(loaded_leaves(s2.path)) == 1

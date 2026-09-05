@@ -42,7 +42,7 @@ from typing import TYPE_CHECKING, Any, Literal
 if TYPE_CHECKING:
     from ..data import AtomicKind, MemorySem
 
-from z3 import And, If, IntVal, Or, simplify
+from z3 import And, Array, If, IntSort, IntVal, Or, Select, simplify
 from z3 import Not as Z3Not
 
 from ....core.data import AtomicCas, AtomicRMW, Load, Store
@@ -56,17 +56,20 @@ from ...common.ttir_reader import (
     Const,
     DataDep,
     IterArgOffset,
+    Loaded,
     LoopVar,
     Not,
     NumPrograms,
     Observed,
     Param,
     Pid,
-    Select,
     Term,
     UnsupportedTTIR,
+    loaded_leaves,
+    mentions_loaded,
     observed_indices,
 )
+from ...common.ttir_reader import Select as TSelect
 
 _KNOWN_SEMS = ("relaxed", "acquire", "release", "acq_rel")
 
@@ -100,6 +103,12 @@ class GlobalTensor:
     # non-contiguous view): the solver then falls back to rf_unknown /
     # omits the counting axiom, the over-report direction.
     init_values: tuple[int, ...] | None = None
+    # Route 2 (L2 only): the PRE-LAUNCH contents of an integer tensor up
+    # to the address-snapshot bound, the source of every Loaded term's
+    # value; ``snapshot_reason`` names why it is absent (float dtype,
+    # too large, non-contiguous), so the refusal can say so.
+    snapshot: tuple[int, ...] | None = None
+    snapshot_reason: str = ""
 
 
 class _InitValueTensor:
@@ -161,6 +170,12 @@ class GlobalEncoding:
     # launch-contract violation, not a kernel bug). The claim: "race-free
     # for every grid along the axes the kernel reads".
     used_pid_axes: set[int] = field(default_factory=set)
+    # Route 2: the snapshot equalities (``snap_<tensor>[i] == v``) the
+    # solver asserts in its base; empty when no Loaded term was encoded.
+    assumptions: tuple[Any, ...] = ()
+    # True when any record's terms went through a snapshot Select: the
+    # proof holds for this launch's tensor CONTENTS (content-qualified).
+    content_qualified: bool = False
 
 
 @dataclass
@@ -207,6 +222,7 @@ class _RaceEnv:
         *,
         symbolic_params: bool = False,
         multipath: bool = False,
+        tensors: "dict[str, GlobalTensor] | None" = None,
     ) -> None:
         from ...symbolic_engine import SymbolicExpr
 
@@ -214,6 +230,22 @@ class _RaceEnv:
         self.graph = graph
         self.params = params
         self.symbolic_params = symbolic_params
+        # Route 2 state: per-tensor snapshot arrays and their equalities,
+        # per-load free "padding" arrays (copy-local: masked-off lanes hold
+        # an unspecified value that may differ between instances), the
+        # loads whose value had to stay FREE (no usable snapshot: T0, a
+        # float/large/non-contiguous source, or a source this kernel
+        # writes) and the loops whose bounds depend on such a free value.
+        self.tensors = tensors or {}
+        self._snap_arrays: dict[str, Any] = {}
+        self.snapshot_assumptions: list[Any] = []
+        self._pad_arrays: dict[int, Any] = {}
+        self.pad_vars: tuple[Any, ...] = ()
+        self.used_snapshot = False
+        self.unusable_sources: dict[str, str] = {}
+        self.free_loaded: set[int] = set()
+        self.free_reason: dict[int, str] = {}
+        self.free_bound_loops: set[str] = set()
         self._param_vars: dict[str, Any] = {}
         self.arange_dict: dict[Any, Any] = {}
         self._arange_vars: dict[tuple[str, int], Any] = {}
@@ -272,9 +304,14 @@ class _RaceEnv:
         from z3 import Int
 
         assert loop is not None
+        free_before = set(self.free_loaded)
         lower_z3 = self.eval(loop.lower)
         upper_z3 = self.eval(loop.upper)
         step_z3 = self.eval(loop.step)
+        if self.free_loaded - free_before:
+            # a bound over an unmodeled loaded value: the iteration range
+            # is over-approximated, every access of the loop is widened
+            self.free_bound_loops.add(loop.loop_ssa)
         lower_c = self._as_long(lower_z3)
         upper_c = self._as_long(upper_z3)
         step_c = self._as_long(step_z3)
@@ -435,7 +472,7 @@ class _RaceEnv:
         if isinstance(term, BoolBin):
             a, b = _as_bool(self.eval(term.a)), _as_bool(self.eval(term.b))
             return And(a, b) if term.op == "and" else Or(a, b)
-        if isinstance(term, Select):
+        if isinstance(term, TSelect):
             return If(
                 _as_bool(self.eval(term.cond)), self.eval(term.t), self.eval(term.f)
             )
@@ -443,9 +480,77 @@ class _RaceEnv:
             return Z3Not(_as_bool(self.eval(term.a)))
         if isinstance(term, Observed):
             return self.observed(term.access_index)
+        if isinstance(term, Loaded):
+            return self._loaded(term)
         if isinstance(term, DataDep):
             raise UnsupportedTTIR(f"data-dependent term ({term.why})")
         raise UnsupportedTTIR(f"unhandled term {type(term).__name__}")
+
+    # ── Route 2: the snapshot Select ─────────────────────────────────
+    def _snapshot_array(self, base: str) -> tuple[Any, int] | None:
+        """The source tensor's snapshot array, or None with the reason
+        recorded when the value must stay free (T0, no metadata, no
+        snapshot, or a source this kernel writes)."""
+        arr = self._snap_arrays.get(base)
+        meta = self.tensors.get(base)
+        if arr is not None:
+            assert meta is not None
+            return arr, meta.numel
+        why: str | None = None
+        if self.symbolic_params:
+            why = "no launch at T0"
+        elif meta is None:
+            why = "not captured"
+        elif base in self.unusable_sources:
+            why = self.unusable_sources[base]
+        elif meta.snapshot is None:
+            why = meta.snapshot_reason or "no snapshot"
+        if why is not None:
+            self.unusable_sources.setdefault(base, why)
+            return None
+        assert meta is not None and meta.snapshot is not None
+        arr = Array(f"snap_{base}", IntSort(), IntSort())
+        for i, v in enumerate(meta.snapshot):
+            self.snapshot_assumptions.append(Select(arr, IntVal(i)) == IntVal(int(v)))
+        self._snap_arrays[base] = arr
+        return arr, meta.numel
+
+    def _pad(self, index: int) -> Any:
+        pad = self._pad_arrays.get(index)
+        if pad is None:
+            pad = Array(f"pad_{index}", IntSort(), IntSort())
+            self._pad_arrays[index] = pad
+            self.pad_vars = self.pad_vars + (pad,)
+        return pad
+
+    def _loaded(self, term: Loaded) -> Any:
+        """``If(mask ∧ in-domain, snap[off], other-or-free)``: on an active
+        in-bounds lane the value is the snapshot element; a masked-off lane
+        holds ``other`` when the load names one and an unspecified value
+        otherwise (a free array, so no two lanes or instances are forced to
+        agree); an out-of-domain offset is unspecified too (the load's own
+        in-bounds premise excludes it on active lanes). Without a usable
+        snapshot the whole value is free: the widening Route 3 applied to
+        unmodeled loaded values, and the record is marked uncertain by the
+        caller (an address built on it refuses instead, see _record_for)."""
+        off = self.eval(term.offset)
+        pad = self._pad(term.access_index)
+        snap = self._snapshot_array(term.base_param)
+        if snap is None:
+            self.free_loaded.add(term.access_index)
+            self.free_reason[term.access_index] = self.unusable_sources.get(
+                term.base_param, "no snapshot"
+            )
+            return Select(pad, off)
+        arr, numel = snap
+        self.used_snapshot = True
+        in_dom = And(off >= 0, off < IntVal(numel))
+        value = If(in_dom, Select(arr, off), Select(pad, off))
+        if term.mask is None:
+            return value
+        mask = _as_bool(self.eval(term.mask))
+        other = self.eval(term.other) if term.other is not None else Select(pad, off)
+        return If(mask, value, other)
 
 
 def _as_bool(e: Any) -> Any:
@@ -579,6 +684,19 @@ def _record_for(
             "loop-carried atomic)",
             kind="indirect-address",
         )
+    free_before = set(env.free_loaded)
+    addr_off = env.eval(access.offset)
+    new_free = env.free_loaded - free_before
+    if new_free:
+        idx = min(new_free)
+        why = env.free_reason.get(idx, "no snapshot")
+        raise UnsupportedTTIR(
+            f"line {access.line_no}: address depends on a loaded value with no "
+            f"usable snapshot ({why})",
+            kind="snapshot-bound"
+            if why.startswith("too large")
+            else "indirect-address",
+        )
     bounds: tuple[Any, ...]
     if meta is not None:
         if meta.elem_size != elem:
@@ -586,14 +704,14 @@ def _record_for(
                 f"element width mismatch for {access.base_param!r}: TTIR says "
                 f"{elem} bytes, the launch tensor says {meta.elem_size}"
             )
-        addr = IntVal(meta.data_ptr) + env.eval(access.offset) * IntVal(elem)
+        addr = IntVal(meta.data_ptr) + addr_off * IntVal(elem)
         # The in-bounds premise (see the module docstring's model boundary).
         bounds = (
             addr >= IntVal(meta.data_ptr),
             addr < IntVal(meta.data_ptr + meta.numel * meta.elem_size),
         )
     else:
-        addr = env.eval(access.offset) * IntVal(elem)
+        addr = addr_off * IntVal(elem)
         bounds = ()
 
     active: Any = True
@@ -658,6 +776,9 @@ def _record_for(
     if old_value is not None:
         copy_local = copy_local + (old_value,)
     copy_local = copy_local + tuple(await_obs)
+    # Route 2: every free padding array is copy-local (the solver unions
+    # copy_local_vars over all records, so listing them here is enough)
+    copy_local = copy_local + tuple(env.pad_vars)
     source = (
         (access.loc.file, access.loc.line, kernel_name)
         if access.loc is not None
@@ -799,7 +920,9 @@ def encode_graph(
                 kind="cas-synchronization",
             )
 
-    env = _RaceEnv(graph, params, multipath=multipath)
+    env = _RaceEnv(graph, params, multipath=multipath, tensors=tensors)
+    if multipath:
+        env.unusable_sources.update(_written_load_sources(graph, tensors))
     await_prems, await_obs = _await_premises(graph, env)
     records = []
     uncertain: set[int] = set()
@@ -832,6 +955,7 @@ def encode_graph(
             access.mask_dropped
             or access.guarded
             or _references_unmodeled_observation(access, env)
+            or _widened_by_free_loaded(access, env)
         )
         if is_uncertain:
             uncertain.add(seq)
@@ -852,7 +976,75 @@ def encode_graph(
         used_pid_axes=set(graph.pid_axes),
         assumes_termination=any(a.awaited for a in graph.accesses),
         has_atomics=any(a.kind.startswith("atomic") for a in graph.accesses),
+        assumptions=tuple(env.snapshot_assumptions),
+        content_qualified=env.used_snapshot,
     )
+
+
+def _graph_terms(graph: AccessGraph) -> list:
+    terms: list = []
+    for a in graph.accesses:
+        terms.append(a.offset)
+        for t in (a.mask, a.path, a.exit_pred, a.atomic_val, a.atomic_cmp):
+            if t is not None:
+                terms.append(t)
+    for lp in _graph_loops(graph):
+        terms.extend((lp.lower, lp.upper, lp.step))
+    for info in graph.iter_args.values():
+        terms.extend((info.offset0, info.delta))
+    return terms
+
+
+def graph_mentions_loaded(graph: AccessGraph) -> bool:
+    return any(mentions_loaded(t) for t in _graph_terms(graph))
+
+
+def _written_load_sources(
+    graph: AccessGraph, tensors: dict[str, GlobalTensor]
+) -> dict[str, str]:
+    """The read-only-source premise (Route 2): a Loaded term's value is
+    the PRE-LAUNCH snapshot, which stands for the value the load observes
+    only if no instance writes the source before the load. The static
+    frontend cannot order instances, so a source that overlaps any tensor
+    the kernel writes has NO usable snapshot: its loads stay free (widened
+    in mask/path position, refused in address position), the interpreter
+    frontend's fail-stop (`_note_load_source_or_raise`) transposed."""
+    sources = {lf.base_param for t in _graph_terms(graph) for lf in loaded_leaves(t)}
+    if not sources:
+        return {}
+    written = {a.base_param for a in graph.accesses if a.kind != "load"}
+
+    def interval(name: str) -> tuple[int, int] | None:
+        m = tensors.get(name)
+        if m is None:
+            return None
+        return (m.data_ptr, m.data_ptr + m.numel * m.elem_size)
+
+    out: dict[str, str] = {}
+    for src in sorted(sources):
+        si = interval(src)
+        for w in sorted(written):
+            wi = interval(w)
+            if src == w or (si and wi and max(si[0], wi[0]) < min(si[1], wi[1])):
+                out[src] = f"the kernel writes {w!r}, which overlaps the source"
+                break
+    return out
+
+
+def _widened_by_free_loaded(access: AccessEvent, env: _RaceEnv) -> bool:
+    """A mask, path, or exit predicate built on a loaded value that had no
+    usable snapshot is a free boolean: over-approximated activity, so the
+    record is uncertain; likewise every access of a loop whose bounds went
+    through such a value."""
+    for t in (access.mask, access.path, access.exit_pred):
+        if t is None:
+            continue
+        if any(lf.access_index in env.free_loaded for lf in loaded_leaves(t)):
+            return True
+    loops = access.loops or (
+        (env.graph.loop.loop_ssa,) if access.in_loop and env.graph.loop else ()
+    )
+    return any(lp in env.free_bound_loops for lp in loops)
 
 
 def _references_unmodeled_observation(access: AccessEvent, env: _RaceEnv) -> bool:
@@ -912,9 +1104,13 @@ def symbolic_grid(
 # product with another symbol is exactly the Z3-unknown bait the gate
 # exists to keep out. NumPrograms is a symbolic grid dim for the same
 # reason.
-_SYMBOLIC_LEAVES = (Pid, Param, Arange, LoopVar, IterArgOffset, Observed, NumPrograms)
+_SYMBOLIC_LEAVES = (
+    Pid, Param, Arange, LoopVar, IterArgOffset, Observed, NumPrograms, Loaded,
+)  # fmt: skip
 # At T1 the params are concrete, so only these leaves stay symbolic.
-_T1_SYMBOLIC_LEAVES = (Pid, Arange, LoopVar, IterArgOffset, Observed, NumPrograms)
+_T1_SYMBOLIC_LEAVES = (
+    Pid, Arange, LoopVar, IterArgOffset, Observed, NumPrograms, Loaded,
+)  # fmt: skip
 
 
 def _has_symbols(term: Term, leaves: tuple = _SYMBOLIC_LEAVES) -> bool:
@@ -1003,6 +1199,9 @@ def encode_graph_t0(
                 kind="cas-synchronization",
             )
 
+    # Route 2 at T0: there is no launch, so every Loaded value stays FREE
+    # (the widening Route 3 applied), and an address built on one refuses
+    # inside _record_for; the T1 rung is where the snapshot enters.
     env = _RaceEnv(graph, {}, symbolic_params=True, multipath=multipath)
     await_prems, await_obs = _await_premises(graph, env)
     # NO pre-exit representative at T0 — sound for a verified reason: T0
@@ -1034,6 +1233,8 @@ def encode_graph_t0(
             if access.mask_dropped or access.guarded:
                 uncertain.add(seq)
             if _references_unmodeled_observation(access, env):
+                uncertain.add(seq)
+            if _widened_by_free_loaded(access, env):
                 uncertain.add(seq)
         out.append(
             (

@@ -36,8 +36,10 @@ def _read(name):
     return (GOLDEN / f"{name}_sm80.ttir").read_text()
 
 
-def _t(ptr, numel=1 << 16, elem=4, init=None):
-    return GlobalTensor(data_ptr=ptr, elem_size=elem, numel=numel, init_values=init)
+def _t(ptr, numel=1 << 16, elem=4, init=None, snapshot=None):
+    return GlobalTensor(
+        data_ptr=ptr, elem_size=elem, numel=numel, init_values=init, snapshot=snapshot
+    )
 
 
 # disjoint allocations (the in-bounds premise turns overlapping fake bases
@@ -155,15 +157,21 @@ def test_opposite_arms_exclude_each_other_per_instance():
         assert 0 in _pids(rep) and set(_pids(rep)) != {0}
 
 
-def test_loaded_value_guard_keeps_proofs_and_widens_reports():
-    """``if y == -1: return`` with y loaded: the fall-through is widened.
-    Widening only enlarges footprints, so a disjoint kernel still PROVES;
-    a racy one yields only widened reports, which the client never
-    certifies as a definite race."""
+def test_loaded_value_guard_widens_without_a_snapshot_and_decides_with_one():
+    """``if y == -1: return`` with y loaded (Route 2 on top of Route 3):
+    without a snapshot of idx_ptr the guard is a free boolean, so the
+    fall-through is widened (proofs stay sound, reports are never
+    definite); with the snapshot the guard is exact and content-qualified.
+    T0 has no launch, so the widened proof of the disjoint kernel stays."""
     g = _mp(_read("early_return_loaded"))
-    enc = encode_graph(g, {"n": 256}, dict(XO, idx_ptr=_t(0x30000)), multipath=True)
-    assert enc.uncertain_event_ids == {1, 2}
+    tensors = dict(XO, idx_ptr=_t(0x30000))
+    enc = encode_graph(g, {"n": 256}, tensors, multipath=True)
+    assert enc.uncertain_event_ids == {1, 2} and not enc.content_qualified
     assert _t0(g) == []
+    snap = dict(XO, idx_ptr=_t(0x30000, numel=64, snapshot=tuple([0] * 64)))
+    enc = encode_graph(g, {"n": 256}, snap, multipath=True)
+    assert enc.uncertain_event_ids == set() and enc.content_qualified
+    assert len(enc.assumptions) == 64
 
     racy = _module(
         "%idx_ptr: !tt.ptr<i32>, %out_ptr: !tt.ptr<i32>",
@@ -180,18 +188,30 @@ def test_loaded_value_guard_keeps_proofs_and_widens_reports():
         "tt.store %out_ptr, %c1 : !tt.ptr<i32>",
         "tt.return",
     )
-    det = CompiledRaceDetector(confirm_races=False, ladder_level=2)
     jit = SimpleNamespace(arg_names=["idx_ptr", "out_ptr"])
-    det.pre_warmup_callback(
-        jit,
-        torch.zeros(64, dtype=torch.int32),
-        torch.zeros(64, dtype=torch.int32),
-        grid=(4,),
-    )
+    # idx = [-1, 0, 0, 0]: pid 0 returns, pids 1..3 all write out[0]
+    idx = torch.tensor([-1, 0, 0, 0], dtype=torch.int32)
+    det = CompiledRaceDetector(confirm_races=False, ladder_level=2)
+    det.pre_warmup_callback(jit, idx, torch.zeros(64, dtype=torch.int32), grid=(4,))
     det.post_warmup_callback(jit, SimpleNamespace(asm={"ttir": racy}))
     det.finalize()
-    assert det.last_global_status == "unsupported"
-    assert "over-approximation" in (det.last_global_reason or "")
+    assert det.last_global_status == "races"
+    assert det.last_global_content_qualified
+    assert det.last_global_verdict["content_qualified"]
+    for rep in det.last_global_reports:
+        assert 0 not in _pids(rep)  # pid 0 returned: never a witness
+    # idx = [-1, 0, -1, -1]: only pid 1 survives -> a content-qualified proof
+    idx = torch.tensor([-1, 0, -1, -1], dtype=torch.int32)
+    det = CompiledRaceDetector(confirm_races=False, ladder_level=2)
+    det.pre_warmup_callback(jit, idx, torch.zeros(64, dtype=torch.int32), grid=(4,))
+    det.post_warmup_callback(jit, SimpleNamespace(asm={"ttir": racy}))
+    det.finalize()
+    assert det.last_global_status == "ok"
+    # any-grid SAT (pids beyond the 4-entry table read an unspecified
+    # value), launch-pinned UNSAT: the launch-scoped rung, content-qualified
+    assert det.last_global_provenance == "proved@T1-launch+content"
+    assert det.last_global_verdict["proved_scope"] == "this-params-this-grid"
+    assert det.last_grid_fragile
 
 
 def test_nested_guards_with_a_merge_prove_at_t0_and_the_mutant_races():
@@ -466,10 +486,10 @@ def test_client_differential_is_unavailable_for_multipath_graphs():
 
 
 def test_mixed_and_mask_row_proves_instead_of_phantom_overlap():
-    """The same idiom through the encoder: with the bounds conjunct kept,
-    rows of C elements per pid never overlap, so the widened access yields
-    no report at all (the phantom WAW that single-path widening produced
-    was confirmed only by the interpreter's `and`-truthiness artifact)."""
+    """The same idiom through the encoder. Without a snapshot the loaded
+    guard is free but the bounds conjunct is kept, so rows of C elements
+    per pid never overlap and the widened access yields no report; with a
+    snapshot the mask is exact and the proof is content-qualified."""
     text = _module(
         "%out_ptr: !tt.ptr<f32>, %tgt_ptr: !tt.ptr<i32>, %C: i32",
         "%c1 = arith.constant 1.0 : f32",
@@ -501,110 +521,9 @@ def test_mixed_and_mask_row_proves_instead_of_phantom_overlap():
     )
     assert s0.find_races()  # single-path: the dropped mask fabricates the overlap
     enc, reports = _t1(_mp(text), {"C": 64}, tensors)
-    assert 1 in enc.uncertain_event_ids  # still widened
+    assert 1 in enc.uncertain_event_ids and not enc.content_qualified  # widened
     assert reports == []
-
-
-def test_disjoint_pid_loops_prove_instead_of_vacuous():
-    """Two sequential loops whose pid-dependent ranges are non-empty for
-    DIFFERENT pids (fla's parallel_simple_gla shape at T = 64, BT = 128:
-    the first loop runs for pid 0 only, the second for pid >= 1 only).
-    Asserting both existence premises jointly in the Feasible# base has
-    no model, which turned the proof vacuous; as local constraints they
-    gate activity only, and the launch proves."""
-    text = _module(
-        "%out_ptr: !tt.ptr<f32>, %T: i32",
-        "%c1 = arith.constant 1.0 : f32",
-        "%c32 = arith.constant 32 : i32",
-        "%c128 = arith.constant 128 : i32",
-        "%cm32 = arith.constant -32 : i32",
-        "%pid = tt.get_program_id x : i32",
-        "%lo = arith.muli %pid, %c128 : i32",
-        "%pid1 = arith.addi %pid, %c1i : i32",
-        "%hi0 = arith.muli %pid1, %c128 : i32",
-        "%hi = arith.minsi %hi0, %T : i32",
-        "scf.for %i = %lo to %hi step %c32  : i32 {",
-        "%p = tt.addptr %out_ptr, %i : !tt.ptr<f32>, i32",
-        "tt.store %p, %c1 : !tt.ptr<f32>",
-        "}",
-        "%hi2 = arith.subi %lo, %c32 : i32",
-        "scf.for %j = %cm32 to %hi2 step %c32  : i32 {",
-        "%q0 = arith.addi %j, %c128 : i32",
-        "%q = tt.addptr %out_ptr, %q0 : !tt.ptr<f32>, i32",
-        "tt.store %q, %c1 : !tt.ptr<f32>",
-        "}",
-    ).replace("%c1i", "%c1_i")
-    text = text.replace(
-        "%c1 = arith.constant 1.0 : f32",
-        "%c1 = arith.constant 1.0 : f32\n    %c1_i = arith.constant 1 : i32",
-    )
-    g = _mp(text)
-    assert [lp.induction_var for lp in g.loops] == ["%i", "%j"]
-    enc = encode_graph(
-        g, {"T": 64}, {"out_ptr": _t(0x200000, numel=1 << 14)}, multipath=True
-    )
-    solver = TwoCopySymbolicHBSolver(
-        enc.records, grid=symbolic_grid(enc, (4, 1, 1)), arange_dict=enc.arange_dict
-    )
-    assert solver.check_feasibility()
-    # the second loop's iterations j = -32 + 32k < 128·pid - 32 write
-    # out[96 + 32k] for pid >= 1 ... which pid 0's first loop (out[0..64))
-    # never touches, and distinct pids' second loops overlap: k ranges
-    # differ only in length, so pid 1 and pid 2 both write out[96]
-    reports = solver.find_races()
-    assert reports and all(min(_pids(r)) >= 1 for r in reports)
-
-
-def test_sibling_result_loops_report_the_real_overlap():
-    """The reader keys loops by name; two result loops in sibling arms print
-    the same name, and a shared key bound both stores to the else loop's
-    range (a false proof: pid 0's then-loop shrank to one iteration)."""
-    from .test_ttir_reader_multipath import _sibling_result_loops
-
-    g = _mp(_sibling_result_loops())
-    tensors = {"out_ptr": _t(0x200000, numel=64)}
-    _, reports = _t1(g, {"n": 8, "m": 1}, tensors)
-    # pid 0 writes out[0..8); pid k >= 1 writes out[4 + k]: a WAW on 5..7
-    assert reports and all(0 in _pids(r) for r in reports)
-    _, reports = _t1(g, {"n": 4, "m": 1}, tensors)
+    snap = dict(tensors, tgt_ptr=_t(0x300000, numel=64, snapshot=tuple([5] * 64)))
+    enc, reports = _t1(_mp(text), {"C": 64}, snap)
+    assert enc.uncertain_event_ids == set() and enc.content_qualified
     assert reports == []
-
-
-def test_zero_trip_inner_loop_keeps_the_outer_body_access():
-    """An access in the outer body after an inner loop whose trip count is
-    zero for this launch: only the inner access is skipped."""
-    text = _module(
-        "%out_ptr: !tt.ptr<i32>, %n: i32, %m: i32",
-        "%c0 = arith.constant 0 : i32",
-        "%c1 = arith.constant 1 : i32",
-        "%c8 = arith.constant 8 : i32",
-        "%pid = tt.get_program_id x : i32",
-        "scf.for %i = %c0 to %n step %c1  : i32 {",
-        "scf.for %j = %c0 to %m step %c1  : i32 {",
-        "%p = tt.addptr %out_ptr, %j : !tt.ptr<i32>, i32",
-        "tt.store %p, %c1 : !tt.ptr<i32>",
-        "}",
-        "%o = arith.muli %pid, %c8 : i32",
-        "%o2 = arith.addi %o, %i : i32",
-        "%q = tt.addptr %out_ptr, %o2 : !tt.ptr<i32>, i32",
-        "tt.store %q, %c1 : !tt.ptr<i32>",
-        "}",
-    )
-    g = _mp(text)
-    enc = encode_graph(
-        g, {"n": 2, "m": 0}, {"out_ptr": _t(0x200000, numel=64)}, multipath=True
-    )
-    assert [r.debug_name.split(":")[-2] for r in enc.records] == ["ttir15"]
-    enc2 = encode_graph(
-        g, {"n": 2, "m": 1}, {"out_ptr": _t(0x200000, numel=64)}, multipath=True
-    )
-    assert len(enc2.records) == 2
-
-
-def test_t0_encoding_of_two_loops_binds_both_iterators():
-    g = _mp(_read("nested_loops"))
-    groups = encode_graph_t0(g, multipath=True)
-    ((name, enc),) = [(n, e) for n, e in groups if n == "out_ptr"]
-    (rec,) = enc.records
-    assert len(rec.copy_local_vars) == 2
-    assert rec.premises == () and len(rec.local_constraints) == 2

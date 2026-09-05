@@ -241,12 +241,19 @@ class CompiledRaceDetector(Client):
                     # (numel·elem understates a strided view's extent).
                     is_contig = getattr(value, "is_contiguous", None)
                     contiguous = bool(is_contig()) if is_contig else False
+                    snapshot, why = (
+                        self._capture_snapshot(value, contiguous)
+                        if self.ladder_level >= LadderLevel.L2
+                        else (None, "L2 only")
+                    )
                     self._launch_tensors[name] = GlobalTensor(
                         data_ptr=int(value.data_ptr()),
                         elem_size=int(value.element_size()),
                         numel=int(value.numel()),
                         contiguous=contiguous,
                         init_values=self._capture_init_values(value, contiguous),
+                        snapshot=snapshot,
+                        snapshot_reason=why,
                     )
                 elif isinstance(value, bool):
                     self._launch_params[name] = int(value)
@@ -292,6 +299,46 @@ class CompiledRaceDetector(Client):
             return tuple(int(v) for v in vals)
         except Exception:  # noqa: BLE001
             return None
+
+    # Route 2 (L2): the address-snapshot bound. An integer tensor up to
+    # this many elements is captured pre-launch so a Loaded term (an index
+    # or offset table read by the kernel) can be a Select over its
+    # contents; larger tables refuse by name (kind "snapshot-bound", the
+    # interpreter frontend's 1024-element load-source cap generalized). A
+    # structural bound of the encoding, not a tunable: 16384 equalities in
+    # the solver base is the size at which the base check stays
+    # sub-second on this machine.
+    ADDRESS_SNAPSHOT_MAX_ELEMENTS: ClassVar[int] = 16384
+
+    @classmethod
+    def _capture_snapshot(
+        cls, value: Any, contiguous: bool
+    ) -> tuple[tuple[int, ...] | None, str]:
+        """(pre-launch element values, "") or (None, why)."""
+        try:
+            dt = getattr(value, "dtype", None)
+            if dt is None:
+                return None, "unknown dtype"
+            if bool(getattr(dt, "is_floating_point", True)) or bool(
+                getattr(dt, "is_complex", False)
+            ):
+                return None, f"float dtype {dt}"
+            if not contiguous:
+                return None, "non-contiguous"
+            n = int(value.numel())
+            if n > cls.ADDRESS_SNAPSHOT_MAX_ELEMENTS:
+                return (
+                    None,
+                    f"too large ({n} elements, bound {cls.ADDRESS_SNAPSHOT_MAX_ELEMENTS})",
+                )
+            if n == 0:
+                return None, "empty"
+            vals = value.detach().cpu().reshape(-1).tolist()
+            if not all(isinstance(v, (int, bool)) for v in vals):
+                return None, "non-integer values"
+            return tuple(int(v) for v in vals), ""
+        except Exception as e:  # noqa: BLE001
+            return None, f"capture failed: {type(e).__name__}"
 
     # Replay snapshot cap: cloning the launch tensors is the price of
     # confirmable witnesses; past this total the replay is marked
@@ -569,6 +616,9 @@ class CompiledRaceDetector(Client):
             for a in g.accesses
         )
         self.last_global_assumes_termination = awaited_present
+        # Route 2: set by _solve_one_graph when an encoding went through a
+        # snapshot Select; the rung then carries "+content"
+        self.last_global_content_qualified = False
 
         reports: list[Any] = []
         widened_all: list[Any] = []
@@ -688,6 +738,8 @@ class CompiledRaceDetector(Client):
                 rung = "proved@T1"
             if awaited_present:
                 rung += "+assumes-termination"
+            if self.last_global_content_qualified:
+                rung += "+content"
             self.last_global_provenance = rung
 
         # ── C3: opt-in differential cross-check ──
@@ -767,6 +819,11 @@ class CompiledRaceDetector(Client):
             "unsupported_kind": None,
             "grid_fragile": bool(self.last_grid_fragile),
             "content_fragile": False,
+            # Route 2: the proof (or witness) went through a snapshot
+            # Select, so it holds for this launch's tensor CONTENTS
+            "content_qualified": bool(
+                getattr(self, "last_global_content_qualified", False)
+            ),
         }
         if status == "ok":
             v["verdict"] = "race-free"
@@ -1043,12 +1100,14 @@ class CompiledRaceDetector(Client):
             if lg is not None:
                 padded = tuple(int(d) for d in lg) + (1, 1, 1)
                 lg3 = (padded[0], padded[1], padded[2])
+            self.last_global_content_qualified |= enc.content_qualified
             solver = TwoCopySymbolicHBSolver(
                 enc.records,
                 grid=symbolic_grid(enc, lg),
                 arange_dict=enc.arange_dict,
                 ablations=self.ablations,
                 enum_fallback_grid=lg3,
+                extra_assumptions=enc.assumptions,
             )
             found = solver.find_races()
         except UnsupportedTTIR as e:
@@ -1176,7 +1235,7 @@ class CompiledRaceDetector(Client):
                 enc.records,
                 grid=grid,
                 arange_dict=enc.arange_dict,
-                extra_assumptions=pins,
+                extra_assumptions=pins + tuple(getattr(enc, "assumptions", ())),
                 ablations=self.ablations,
                 only_pairs=pair_ids,
                 enum_fallback_grid=(lg3[0], lg3[1], lg3[2]),

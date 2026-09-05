@@ -168,6 +168,27 @@ class DataDep:
 
 
 @dataclass(frozen=True)
+class Loaded:
+    """The VALUE of an integer ``tt.load`` (Route 2, the L2 reader mode):
+    lane-wise ``snapshot[base][offset]`` over the launch's pre-launch
+    contents of the source tensor, ``other`` (or a free value) on masked
+    lanes. Bound only under ``parse_ttir(multipath=True)``; single-path
+    keeps :class:`DataDep` for every loaded value. The encoder turns it
+    into an SMT-array Select over the tensor's snapshot and marks the
+    verdict content-qualified; it refuses by name when the launch carries
+    no snapshot for the source (float, too large, non-contiguous) or when
+    the kernel writes the source tensor (the read-only-source premise the
+    interpreter frontend enforces by fail-stop). Consumers that walk terms
+    descend into ``offset``, ``mask`` and ``other``."""
+
+    access_index: int
+    base_param: str
+    offset: "Term"
+    mask: "Term | None"
+    other: "Term | None"
+
+
+@dataclass(frozen=True)
 class Observed:
     """The OLD value observed by the atomic at ``graph.accesses[access_index]``
     (spec part B): a fresh per-program-instance symbol, NOT a function of
@@ -189,11 +210,14 @@ class Observed:
     access_index: int
 
 
+_TERM_CHILDREN = ("a", "b", "cond", "t", "f", "offset", "mask", "other")
+
+
 def mentions_observed(term: object) -> bool:
     """True when ``term`` contains an :class:`Observed` leaf."""
     if isinstance(term, Observed):
         return True
-    for attr in ("a", "b", "cond", "t", "f"):
+    for attr in _TERM_CHILDREN:
         sub = getattr(term, attr, None)
         if sub is not None and mentions_observed(sub):
             return True
@@ -206,7 +230,7 @@ def observed_indices(term: object) -> set[int]:
     if isinstance(term, Observed):
         out.add(term.access_index)
         return out
-    for attr in ("a", "b", "cond", "t", "f"):
+    for attr in _TERM_CHILDREN:
         sub = getattr(term, attr, None)
         if sub is not None:
             out |= observed_indices(sub)
@@ -248,7 +272,32 @@ Term = (
     | Not
     | DataDep
     | Observed
+    | Loaded
 )
+
+
+def mentions_loaded(term: object) -> bool:
+    """True when ``term`` contains a :class:`Loaded` leaf."""
+    if isinstance(term, Loaded):
+        return True
+    for attr in _TERM_CHILDREN:
+        sub = getattr(term, attr, None)
+        if sub is not None and mentions_loaded(sub):
+            return True
+    return False
+
+
+def loaded_leaves(term: object, out: "list[Loaded] | None" = None) -> "list[Loaded]":
+    """Every :class:`Loaded` leaf of ``term`` (outer before inner)."""
+    if out is None:
+        out = []
+    if isinstance(term, Loaded):
+        out.append(term)
+    for attr in _TERM_CHILDREN:
+        sub = getattr(term, attr, None)
+        if sub is not None:
+            loaded_leaves(sub, out)
+    return out
 
 
 @dataclass(frozen=True)
@@ -855,6 +904,21 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
         """An atomic cmp/val operand as a Term, or None when unmodelable."""
         return None if isinstance(v, (DataDep, PtrValue)) else v  # type: ignore[return-value]
 
+    def loaded_binding(acc: AccessEvent, idx: int, extra: str) -> object:
+        """Route 2: the value of an integer load whose mask is modeled;
+        float pointees and dropped masks stay DataDep (a masked-off lane
+        holds ``other`` or an undefined value, which only a modeled mask
+        can keep apart from the snapshot value)."""
+        if acc.elem_float or acc.mask_dropped:
+            return DataDep("loaded value")
+        trailing = _split_ssa(extra) if extra else []
+        other_t: Term | None = None
+        if len(trailing) > 1:
+            ov = val(trailing[1])
+            if not isinstance(ov, (DataDep, PtrValue)):
+                other_t = ov  # type: ignore[assignment]
+        return Loaded(idx, acc.base_param, acc.offset, acc.mask, other_t)
+
     def observed_result_binding() -> object:
         """The env value for the just-recorded access's result: Observed
         for an integer-typed access (spec part B / the await re-read),
@@ -1342,12 +1406,18 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                 )
                 # A spin re-read's value IS an observation (the await's
                 # exit predicate is asserted over it, C1.2); everywhere
-                # else a loaded value stays DataDep.
-                env[res] = (
-                    observed_result_binding()
-                    if in_while_cond
-                    else DataDep("loaded value")
-                )
+                # else a loaded value stays DataDep, except under the L2
+                # reader mode, where an integer load with a modeled mask
+                # becomes a Loaded term (Route 2: its value is a Select
+                # over the launch's snapshot of the source tensor).
+                if in_while_cond:
+                    env[res] = observed_result_binding()
+                elif multipath:
+                    env[res] = loaded_binding(
+                        accesses[-1], len(accesses) - 1, lm.group(2)
+                    )
+                else:
+                    env[res] = DataDep("loaded value")
             continue
         sm = _RE_STORE.match(body)
         if sm:
@@ -1518,6 +1588,16 @@ def _set_arange_dim(v: object, dim: int) -> object:
         )
     if isinstance(v, Not):
         return Not(_set_arange_dim(v.a, dim))  # type: ignore[arg-type]
+    if isinstance(v, Loaded):
+        # the loaded tile's lanes follow the consumer's dimension exactly
+        # like an arange's (an expand_dims of the loaded value)
+        return Loaded(
+            v.access_index,
+            v.base_param,
+            _set_arange_dim(v.offset, dim),  # type: ignore[arg-type]
+            None if v.mask is None else _set_arange_dim(v.mask, dim),  # type: ignore[arg-type]
+            None if v.other is None else _set_arange_dim(v.other, dim),  # type: ignore[arg-type]
+        )
     if isinstance(v, DataDep) and v.keep is not None:
         # The kept conjunct of a mixed ``and`` must follow the tile's
         # dimension like any other lane term, or its Arange would name a
