@@ -799,9 +799,15 @@ def _finalize_await(
         )
     # ONE kept read stands for every dropped iteration: sound only when the
     # re-read leaves the awaited location alone. A plain load never writes;
-    # an RMW re-read that mutates (atomic_add(flag, 1) spins) writes on
-    # every dropped iteration and could terminate on its own increments
-    # (the self-satisfying spin). Identity operands only: add/or/xor 0.
+    # a CAS writes exactly once, on success (the single modeled write); an
+    # RMW re-read that mutates (atomic_add(flag, 1) spins) writes on every
+    # dropped iteration and could terminate on its own increments (the
+    # self-satisfying spin). Identity operands only: add/or/xor 0.
+    if acc.kind == "atomic_cas" and (acc.atomic_cmp is None or acc.atomic_val is None):
+        raise UnsupportedTTIR(
+            f"{where}: the CAS poll's compare/desired operands are not modelable",
+            kind="spin-shape",
+        )
     if acc.kind == "atomic_rmw":
         op = ((acc.atomic.rmw_op if acc.atomic else None) or "").lower()
         identity = op in ("add", "or", "xor") and acc.atomic_val == Const(0)
@@ -1359,20 +1365,59 @@ def _handle_op(
         return
 
     if op == "tile_atomic_cas":
-        # A CAS is a MEMORY access: swallowing it as an unknown value op
-        # would drop an atomic write from the access graph and let the
-        # solver prove race freedom against an incomplete program. Until
-        # the reader models CAS (return value, success semantics), the
-        # row refuses with the construct named.
-        raise UnsupportedTTIR(
-            f"line {line_no}: tile_atomic_cas is not modeled by the CuTile "
-            "reader; refusing rather than dropping the atomic access",
-            kind="atomic-cas",
+        # Recorded exactly as the TTIR reader records tt.atomic_cas: the
+        # compare and the desired operands as terms (None when they carry
+        # loaded data), the observation of the old value bound to the
+        # integer result. The encoder decides what it can lower: the
+        # AWAITED CAS (a spin's poll, spec C1) has the full CAS machinery;
+        # a free-standing CAS refuses there as cas-synchronization, the
+        # Triton track's own boundary (its interpreter decides those rows;
+        # cuda.tile has none).
+        ptr = _val(st, kw["pointer"])
+        if not isinstance(ptr, PtrValue):
+            raise UnsupportedTTIR(
+                f"line {line_no}: atomic_cas of a non-pointer value",
+                kind="indirect-address",
+            )
+        mask_v = _as_term(_val(st, kw["mask"]), "atomic mask")
+        mask_dropped = _has_datadep(mask_v)
+        cmp_t = _as_term(_val(st, kw["expected"]), "atomic cas cmp")
+        new_t = _as_term(_val(st, kw["desired"]), "atomic cas new")
+        bits, is_f = st.ptr_meta.get(ptr.base_param, (0, False))
+        sem = kw.get("memory_order", "").split(".")[-1].lower() or "acq_rel"
+        scope = _SCOPE.get(kw.get("memory_scope", "").split(".")[-1], "gpu")
+        st.accesses.append(
+            AccessEvent(
+                kind="atomic_cas",
+                base_param=ptr.base_param,
+                offset=ptr.offset,
+                mask=None if mask_dropped else mask_v,
+                elem_bits=bits,
+                loc=None,
+                line_no=line_no,
+                in_loop=st.in_loop,
+                path=st.path,
+                guarded=st.guarded,
+                loops=tuple(st.loop_stack) if st.multipath else (),
+                atomic=AtomicInfo(rmw_op=None, sem=sem, scope=scope),
+                mask_dropped=mask_dropped,
+                atomic_val=None if (_has_datadep(new_t) or is_f) else new_t,
+                atomic_cmp=None if (_has_datadep(cmp_t) or is_f) else cmp_t,
+                elem_float=is_f,
+            )
         )
+        idx = len(st.accesses) - 1
+        for rname, rtyp in results:
+            if rtyp.strip() == "Token":
+                env[rname] = _TOKEN
+            else:
+                env[rname] = DataDep("atomic result") if is_f else Observed(idx)
+        return
 
     # every other op: value-level over-approximation, never an exception
-    # (VALUE ops only -- ops with memory effects must be handled or
-    # refused above, like tile_atomic_cas)
+    # (VALUE ops only -- every op with a memory effect is handled above:
+    # tile_load/tile_store, load_pointer/store_pointer, tile_atomic_rmw,
+    # tile_atomic_cas)
     st.unknown_ops[op] = st.unknown_ops.get(op, 0) + 1
     for rname, rtyp in results:
         env[rname] = _TOKEN if rtyp.strip() == "Token" else DataDep(f"cutile op {op}")

@@ -163,11 +163,41 @@ def test_exit_test_must_compare_the_observation_with_an_invariant():
     assert ei.value.kind == "spin-shape"
 
 
-def test_cas_poll_refuses_as_atomic_cas():
-    poll = "    $152: Tile[int32,(1)], $153: Token = tile_atomic_cas(pointer=$150, expected=$151, desired=$160, mask=$148, token=$token.14, memory_order=MemoryOrder.ACQUIRE, memory_scope=MemoryScope.DEVICE)"
+_CAS_POLL = "    $152: Tile[int32,(1)], $153: Token = tile_atomic_cas(pointer=$150, expected=$151, desired=$160, mask=$148, token=$token.14, memory_order=MemoryOrder.ACQUIRE, memory_scope=MemoryScope.DEVICE)"
+
+
+def test_cas_poll_is_the_await_shape():
+    """``while cas(lock, 0, 1) != 0``: the CAS writes exactly once, on
+    success, so one kept read stands for the dropped iterations; the exit
+    predicate is success (old == expected)."""
+    g = parse_cutile_ir(_ir(poll=_CAS_POLL), "t")
+    poll = g.accesses[0]
+    assert poll.kind == "atomic_cas" and poll.awaited
+    assert poll.atomic_cmp == Const(0) and poll.atomic_val == Const(1)
+    assert poll.atomic.rmw_op is None and poll.atomic.sem == "acquire"
+    assert isinstance(poll.exit_pred, Not) and poll.exit_pred.a.a == Observed(0)
+    enc = encode_graph(g, {"flag_1": 1, "data_1": 64}, _tensors())
+    assert enc.assumes_termination
+    rec = next(r for r in enc.records if r.atomic_kind == "cas")
+    assert rec.cas_cmp_value is not None and rec.cas_new_value is not None
+
+
+def test_free_standing_cas_is_recorded_and_refused_by_the_encoder():
+    """A CAS outside a spin is a memory access the reader keeps (never
+    dropped); the encoder refuses it as cas-synchronization, exactly the
+    Triton static track's boundary for tt.atomic_cas."""
+    text = (
+        _HDR
+        + "\n".join([_CAS_POLL.strip().replace("$token.14", "$token"), *_TAIL])
+        + "\n"
+    )
+    g = parse_cutile_ir(text, "t")
+    cas = g.accesses[0]
+    assert cas.kind == "atomic_cas" and not cas.awaited
+    assert cas.atomic_cmp == Const(0) and cas.atomic_val == Const(1)
     with pytest.raises(UnsupportedTTIR) as ei:
-        parse_cutile_ir(_ir(poll=poll), "t")
-    assert ei.value.kind == "atomic-cas"
+        encode_graph(g, {"flag_1": 1, "data_1": 64}, _tensors())
+    assert ei.value.kind == "cas-synchronization"
 
 
 def test_data_carrying_while_form_keeps_the_control_flow_refusal():
@@ -255,18 +285,44 @@ def test_benchmark_spin_twins_decide_like_their_triton_rows(row, _cutile_bench):
         assert res["n_reports"] >= 1
 
 
-@pytest.mark.parametrize(
-    "row",
-    [
-        "trb017_mutex_cas_no",
-        "trb017_mutex_plain_unlock_yes",
-        "trb017_mutex_relaxed_cas_yes",
-    ],
-)
-def test_benchmark_cas_spin_twins_refuse_by_name(row, _cutile_bench):
+_CAS_SPIN_ROWS = {
+    "trb017_mutex_cas_no": "race-free",
+    "trb017_mutex_plain_unlock_yes": "race",
+    "trb017_mutex_relaxed_cas_yes": "race",
+}
+_FREE_CAS_ROWS = [
+    "trb021_guarded_acq_rel_no",
+    "trb021_release_only_yes",
+    "trb021_acquire_only_yes",
+    "trb022_acquire_on_failure_no",
+    "trb022_acquire_on_failure_relaxed_yes",
+    "trb023_oversized_flag_conservative",
+]
+
+
+@pytest.mark.parametrize("row", sorted(_CAS_SPIN_ROWS))
+def test_benchmark_cas_spin_twins_decide_like_their_triton_rows(row, _cutile_bench):
+    """The mutex rows: a CAS poll (the awaited CAS) plus the unlock."""
+    from evaluation.harness import _static_track_cutile
+    from triton_viz.clients.race_detector.ladder import LadderLevel
+
+    res = _static_track_cutile(_cutile_bench[row], 0, LadderLevel.L0)
+    if _CAS_SPIN_ROWS[row] == "race-free":
+        assert res["status"] == "ok", res["reason"]
+        assert res["provenance"].endswith("+assumes-termination")
+    else:
+        assert res["status"] == "races", res["reason"]
+
+
+@pytest.mark.parametrize("row", _FREE_CAS_ROWS)
+def test_benchmark_free_standing_cas_twins_refuse_as_cas_synchronization(
+    row, _cutile_bench
+):
+    """A CAS outside a spin: the static boundary the Triton track has too
+    (its twins are decided by the interpreter, which cuda.tile lacks)."""
     from evaluation.harness import _static_track_cutile
     from triton_viz.clients.race_detector.ladder import LadderLevel
 
     res = _static_track_cutile(_cutile_bench[row], 0, LadderLevel.L2)
     assert res["status"] == "unsupported"
-    assert res["reason"].startswith("atomic-cas:"), res["reason"]
+    assert res["reason"].startswith("cas-synchronization:"), res["reason"]
