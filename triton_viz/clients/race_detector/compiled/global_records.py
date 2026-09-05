@@ -145,6 +145,10 @@ class _InitValueTensor:
 class GlobalEncoding:
     records: list[Any]
     arange_dict: dict[Any, Any]
+    # program_seq positions of the graph's tile-level fences (half-integers
+    # between the dense access seqs); the two-copy solver reads them under
+    # fence-ordered semantics (paper design-fence-order.md, option A).
+    fence_seqs: tuple[float, ...] = ()
     # event_ids of records built from over-approximated accesses
     # (mask_dropped / guarded): SAT reports touching them are not witnesses.
     uncertain_event_ids: set[int] = field(default_factory=set)
@@ -1057,6 +1061,7 @@ def encode_graph(
                 uncertain.add(next_rep_id)
             next_rep_id += 1
     return GlobalEncoding(
+        fence_seqs=tuple(graph.fences),
         records=records,
         arange_dict=env.arange_dict,
         uncertain_event_ids=uncertain,
@@ -1380,6 +1385,7 @@ def encode_graph_t0(
             (
                 name,
                 GlobalEncoding(
+                    fence_seqs=tuple(graph.fences),
                     records=records,
                     arange_dict=env.arange_dict,
                     uncertain_event_ids=uncertain,

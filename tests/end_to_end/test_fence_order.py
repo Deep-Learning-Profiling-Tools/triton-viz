@@ -206,3 +206,67 @@ def test_guarded_idiom_with_both_fences_is_race_free(fence_order_on):
     detector = _run(_guarded_fenced_kernel, (2,), *_guarded_args())
     assert detector.last_status == "ok"
     assert detector.last_reports == []
+
+
+# ── Static (TTIR) track: the same litmus through the compiled reader ─────
+# The TTIR reader records ``gpu.barrier`` (tl.debug_barrier's lowering) as a
+# fence position and the compiled client hands it to the same two-copy
+# solver, so the static track follows the flag exactly like the dynamic one.
+
+
+def _static(kernel, grid, signature, constexprs, make_args):
+    from evaluation.harness import _host_compile_ttir, _static_track
+    from evaluation.spec import LaunchSpec
+
+    spec = LaunchSpec(
+        name="fence-order-litmus",
+        kernel_fn=kernel,
+        signature=signature,
+        constexprs=constexprs,
+        make_args=make_args,
+        grid=grid,
+    )
+    ttir = _host_compile_ttir(spec)
+    return _static_track(spec, ttir, seed=0)
+
+
+_FIG1_SIG = {"hist_ptr": "*i32", "out_ptr": "*i32", "N": "constexpr"}
+
+
+def test_static_ttir_reader_records_the_fence():
+    from evaluation.harness import _host_compile_ttir
+    from evaluation.spec import LaunchSpec
+    from triton_viz.clients.common.ttir_reader import parse_ttir
+
+    spec = LaunchSpec(
+        name="x", kernel_fn=_store_fence_load_kernel, signature=_FIG1_SIG,
+        constexprs={"N": N}, make_args=lambda seed: _fig1_args(), grid=(1,),
+    )  # fmt: skip
+    graph = parse_ttir(_host_compile_ttir(spec))
+    assert graph.fences == [0.5]  # after the tile store, before the load
+    assert len(graph.accesses) == 3
+
+
+def test_static_unfenced_store_then_load_races_under_fence_order(fence_order_on):
+    res = _static(
+        _store_then_load_kernel, (1,), _FIG1_SIG, {"N": N}, lambda seed: _fig1_args()
+    )
+    assert res["status"] == "races", res
+    lines = {(w["first"][1], w["second"][1]) for w in res["witnesses"]}
+    store = _line_no(_store_then_load_kernel, "tl.store(hist_ptr + offs, offs)")
+    load = _line_no(_store_then_load_kernel, "n = tl.load(hist_ptr + p)")
+    assert any({a, b} == {store, load} for a, b in lines), lines
+
+
+def test_static_fenced_store_then_load_is_race_free(fence_order_on):
+    res = _static(
+        _store_fence_load_kernel, (1,), _FIG1_SIG, {"N": N}, lambda seed: _fig1_args()
+    )
+    assert res["status"] == "ok", res
+
+
+def test_static_legacy_reading_unchanged(fence_order_off):
+    res = _static(
+        _store_then_load_kernel, (1,), _FIG1_SIG, {"N": N}, lambda seed: _fig1_args()
+    )
+    assert res["status"] == "ok", res

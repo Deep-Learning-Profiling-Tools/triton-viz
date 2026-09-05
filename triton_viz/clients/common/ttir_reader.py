@@ -442,6 +442,12 @@ class AccessGraph:
     # address/mask terms: a pid read into a stored value, a dropped mask, or
     # an unmodeled branch condition still distinguishes the blocks' behavior.
     pid_axes: set[int] = field(default_factory=set)
+    # Tile-level fences (``gpu.barrier``, the TTIR lowering of
+    # ``tl.debug_barrier``), as program_seq positions: a fence recorded
+    # after k accesses sits at k - 0.5, strictly between access k-1 and
+    # access k in the encoder's dense integer seq (paper
+    # design-fence-order.md, option A).
+    fences: list[float] = field(default_factory=list)
     # Every scf.for of the kernel in textual (opening) order, outer before
     # inner. ``loop`` above stays the single loop when there is exactly one
     # (the pre-multipath consumers read it) and is None otherwise.
@@ -846,6 +852,7 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
     # SSA name -> value: Term (int/bool), PtrValue, or DataDep
     env: dict[str, object] = {}
     accesses: list[AccessEvent] = []
+    fences: list[float] = []
     loop: LoopInfo | None = None
     loops: list[tuple[int, LoopInfo]] = []  # (opening order, loop)
     loops_opened = 0
@@ -1372,6 +1379,11 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                 kind="control-flow",
             )
 
+        # ---- tile-level fence ----
+        if body.startswith("gpu.barrier"):
+            fences.append(len(accesses) - 0.5)
+            continue
+
         # ---- value-producing ops ----
         handled = _parse_value_op(
             body, res, env, val, as_term, base_elem_bits, pid_axes
@@ -1566,6 +1578,7 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
         loops=ordered,
         multipath=multipath,
         cf_blocks=len(blocks),
+        fences=fences,
     )
 
 

@@ -307,7 +307,7 @@ class TwoCopySymbolicHBSolver:
         only_pairs: frozenset[tuple[int, int]] | None = None,
         enum_fallback_grid: tuple[int, int, int] | None = None,
         launch_ceiling: bool = False,
-        fence_seqs: tuple[int, ...] = (),
+        fence_seqs: tuple[float, ...] = (),
         fence_order: bool = False,
     ) -> None:
         self.records = list(records)
@@ -319,7 +319,7 @@ class TwoCopySymbolicHBSolver:
         # between them, and same-instance pairs of distinct operations that
         # no fence separates enter the intra-instance race query. Off keeps
         # the legacy reading (every earlier operation orders every later one).
-        self.fence_seqs: tuple[int, ...] = tuple(sorted(int(x) for x in fence_seqs))
+        self.fence_seqs: tuple[float, ...] = tuple(sorted(float(x) for x in fence_seqs))
         self.fence_order = bool(fence_order)
         self.grid = self._normalize_grid(grid)
         self.arange_dict = dict(arange_dict or {})
@@ -1025,7 +1025,7 @@ class TwoCopySymbolicHBSolver:
 
     # ──────────────────────── Edges & HB closure ────────────────────────
 
-    def _fence_between(self, seq1: int, seq2: int) -> bool:
+    def _fence_between(self, seq1: float, seq2: float) -> bool:
         """True when a captured tile-level fence lies strictly between the
         two program_seq positions (both orientations accepted)."""
         lo, hi = (seq1, seq2) if seq1 <= seq2 else (seq2, seq1)
