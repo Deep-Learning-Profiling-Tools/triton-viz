@@ -210,7 +210,9 @@ def _cutile_bindings(args: list[dict]) -> tuple[dict, dict, bool]:
     references). Tensor base addresses are synthesized: distinct alias
     groups get disjoint fake allocations (the solver only needs interval
     disjointness/overlap structure, which the capture recorded), aliased
-    args share one base."""
+    args share one base. A descriptor's ``init_values`` (the pre-launch
+    contents of a small integer tensor) become the tensor's rf-init
+    source, exactly as the Triton track captures them at pre_warmup."""
     from triton_viz.clients.race_detector.compiled.global_records import GlobalTensor
 
     params: dict[str, int] = {}
@@ -238,11 +240,15 @@ def _cutile_bindings(args: list[dict]) -> tuple[dict, dict, bool]:
                 group_base[group] = base
                 next_base += (d["numel"] * d["elem_size"] + 4095) & ~4095
                 next_base += 4096  # guard gap between allocations
+            init = d.get("init_values")
             tensors[nm] = GlobalTensor(
                 data_ptr=base,
                 numel=d["numel"],
                 elem_size=d["elem_size"],
                 contiguous=bool(d["contiguous"]),
+                # the capture's pre-launch values (the Triton track's
+                # pre_warmup rule); absent in captures older than 2026-09-05
+                init_values=tuple(int(v) for v in init) if init is not None else None,
             )
     return params, tensors, aliased
 

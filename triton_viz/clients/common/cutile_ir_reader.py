@@ -53,14 +53,19 @@ TTIR reader's multipath mode does, and is byte-identical otherwise:
   binds them to a Select over the two ``yield``s. An unmodelable
   condition (loaded data) widens: both arms stay reachable, their
   accesses are ``guarded``, results bind to :class:`DataDep`.
-The while-form ``loop`` (carried values, data-dependent trip) and
+The while-form ``loop`` carrying data values (a data-dependent trip
+count over real values) is refused; the token-only while-form is the
+AWAIT shape (the TTIR reader's ``scf.while`` spin contract, spec C1.1:
+one non-mutating re-read of one location, compared against a
+loop-invariant value, exited on it) and becomes one awaited access
+carrying the loop's exit predicate, at every ladder level. The other
 ``break`` stay refused by name.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import Any
 
 from .ttir_reader import (
@@ -77,6 +82,7 @@ from .ttir_reader import (
     LoopInfo,
     LoopVar,
     Not,
+    Observed,
     Param,
     Pid,
     PtrValue,
@@ -84,6 +90,7 @@ from .ttir_reader import (
     Term,
     UnsupportedTTIR,
     _set_arange_dim,
+    observed_indices,
 )
 
 _DTYPE_BITS = {
@@ -110,6 +117,7 @@ _RMW_MODE = {
     "MIN_SIGNED_INT": "min", "MAX_SIGNED_INT": "max",
     "MIN_UNSIGNED_INT": "umin", "MAX_UNSIGNED_INT": "umax",
     "AND_INT": "and", "OR_INT": "or", "XOR_INT": "xor",
+    "BITWISE_AND": "and", "BITWISE_OR": "or", "BITWISE_XOR": "xor",
 }  # fmt: skip
 _SCOPE = {"DEVICE": "gpu", "BLOCK": "cta", "SYSTEM": "sys", "NONE": "gpu"}
 
@@ -143,6 +151,8 @@ _RE_TYPED_NAME = re.compile(rf"^\s*({_NAME})(?:\{{[^}}]*\}})?\s*:\s*(.*)$")
 _RE_OP = re.compile(r"^(\w+)\((.*)\)$")
 _RE_FOR = re.compile(rf"^for ({_NAME}) in range\((.*?)\)(?:\s*\(with (.*)\))?\s*$")
 _RE_IF = re.compile(rf"^if\(cond=({_NAME})\)\s*$")
+# the while-form construct: ``loop (with a: T = init, ...)``
+_RE_LOOP = re.compile(r"^loop\s*\((?:with\s*(.*?))?\)\s*$")
 _RE_TILE_TYPE = re.compile(r"^(?:const )?Tile\[(\w+),\(([^)]*)\)\]")
 _RE_ARRAY_TYPE = re.compile(r"^Array\[(\w+),\(([^)]*)\):\(([^)]*)\)\]")
 _RE_PARTVIEW_TYPE = re.compile(
@@ -215,13 +225,28 @@ class _State:
     unknown_ops: dict[str, int] = field(default_factory=dict)
     func_args: list[FuncArg] = field(default_factory=list)
     ptr_meta: dict[str, tuple[int, bool]] = field(default_factory=dict)
+    # inside a spin loop's body (the await shape admits no nesting)
+    in_spin: bool = False
 
 
 def _as_term(v: Any, ctx: str) -> Term:
     if isinstance(v, (int, bool)):
         return Const(int(v))
     if isinstance(
-        v, (Const, Pid, Param, Arange, LoopVar, Bin, Cmp, BoolBin, Select, DataDep)
+        v,
+        (
+            Const,
+            Pid,
+            Param,
+            Arange,
+            LoopVar,
+            Bin,
+            Cmp,
+            BoolBin,
+            Select,
+            DataDep,
+            Observed,
+        ),
     ):
         return v  # type: ignore[return-value]
     return DataDep(f"{ctx}: unmodeled value {type(v).__name__}")
@@ -379,6 +404,9 @@ def _handle_line(lines: list[str], i: int, indent: int, line: str, st: _State) -
         fm = _RE_FOR.match(line)
         if fm:
             return _handle_for(lines, i, indent, [], fm, st)
+        lm = _RE_LOOP.match(line)
+        if lm:
+            return _handle_loop(lines, i, indent, [], lm, st)
         im = _RE_IF.match(line)
         if im and st.multipath:
             return _handle_if(lines, i, indent, [], im.group(1), st)
@@ -405,11 +433,12 @@ def _handle_line(lines: list[str], i: int, indent: int, line: str, st: _State) -
     fm = _RE_FOR.match(rhs)
     if fm:
         return _handle_for(lines, i, indent, results, fm, st)
+    lm = _RE_LOOP.match(rhs)
+    if lm:
+        return _handle_loop(lines, i, indent, results, lm, st)
     if rhs.startswith("loop ") or rhs.startswith("loop("):
         raise UnsupportedTTIR(
-            f"line {i + 1}: while-form `loop` construct (carried values, "
-            "data-dependent trip) is not modeled",
-            kind="control-flow",
+            f"line {i + 1}: unrecognized loop form {rhs[:60]!r}", kind="parse"
         )
     im = _RE_IF.match(rhs)
     if im and st.multipath:
@@ -541,6 +570,264 @@ def _handle_for(
     for rname, rtyp in results:
         st.env[rname] = _TOKEN if rtyp.strip() == "Token" else DataDep("loop result")
     return j
+
+
+_WHILE_FORM_REFUSAL = (
+    "while-form `loop` construct (carried values, data-dependent trip) is not modeled"
+)
+
+
+def _handle_loop(
+    lines: list[str],
+    i: int,
+    indent: int,
+    results: list[tuple[str, str]],
+    lm: re.Match,
+    st: _State,
+) -> int:
+    """The while-form ``loop`` construct. Only the AWAIT shape is modeled
+    (the TTIR reader's scf.while contract, spec C1.1, mirrored so a
+    cuTile twin decides exactly like its Triton row): a loop whose carried
+    values and results are memory-ordering tokens only, whose body
+    re-reads ONE location without mutating it (a plain load, or an RMW
+    with an identity operand), compares the observation against a
+    loop-invariant value and breaks on that test, with nothing else in
+    the body but value bookkeeping. The loop collapses to that one access
+    stamped ``awaited`` with the EXIT predicate over its observation; the
+    encoder makes the verdict conditional on termination. A loop carrying
+    data values (a data-dependent trip count over real values: stream-K's
+    K loop, a block-sparse walk) keeps the control-flow refusal, byte for
+    byte. Applies at every ladder level: the await abstraction is a reader
+    capability, not a concretization rung.
+    """
+    line_no = i + 1
+    carried = [c for c in _split_top(lm.group(1) or "") if c.strip()]
+    for c in carried:
+        lhs_c, _, _init = c.partition(" = ")
+        tm = _RE_TYPED_NAME.match(lhs_c)
+        if not tm or tm.group(2).strip() != "Token":
+            raise UnsupportedTTIR(
+                f"line {line_no}: {_WHILE_FORM_REFUSAL}", kind="control-flow"
+            )
+    if any(rtyp.strip() != "Token" for _, rtyp in results):
+        raise UnsupportedTTIR(
+            f"line {line_no}: {_WHILE_FORM_REFUSAL}", kind="control-flow"
+        )
+    where = f"line {line_no} (loop)"
+    if st.in_spin:
+        raise UnsupportedTTIR(
+            f"{where}: nested spin loops are not the await shape",
+            kind="spin-shape",
+        )
+    n = len(lines)
+    j = i + 1
+    if j < n and lines[j].strip().startswith("do ("):
+        j += 1
+    body_indent = indent + 4
+    if j < n:
+        hdr = lines[j].strip()
+        if hdr.startswith("(") and hdr.endswith("):"):
+            for item in _split_top(hdr[1:-2]):
+                tm = _RE_TYPED_NAME.match(item)
+                if tm:
+                    st.env[_strip_prov(tm.group(1))] = _TOKEN  # tokens only
+            j += 1
+    n_before = len(st.accesses)
+    exit_pred: Term | None = None
+    st.in_spin = True
+    try:
+        closed = False
+        while j < n:
+            raw = lines[j]
+            cur = len(raw) - len(raw.lstrip())
+            if cur < body_indent:
+                break
+            line = raw.strip()
+            head = line.split(" ", 1)[0]
+            if cur > body_indent:
+                raise UnsupportedTTIR(
+                    f"line {j + 1}: spin-loop body must be the poll and its "
+                    f"bookkeeping, found nested {head!r}",
+                    kind="spin-shape",
+                )
+            if head == "continue":
+                closed = True
+                j += 1
+                break
+            im = _RE_IF.match(line)
+            if im:
+                if exit_pred is not None:
+                    raise UnsupportedTTIR(
+                        f"line {j + 1}: a spin loop has exactly one exit test",
+                        kind="spin-shape",
+                    )
+                j, exit_pred = _spin_exit_test(lines, j, body_indent, im.group(1), st)
+                continue
+            _lhs, eq, rhs = line.partition(" = ")
+            nested = (
+                not eq
+                or _RE_FOR.match(rhs)
+                or _RE_LOOP.match(rhs)
+                or rhs.startswith(("if(", "if "))
+                or line.startswith("do (")
+            )
+            if nested:
+                raise UnsupportedTTIR(
+                    f"line {j + 1}: spin-loop body must be the poll and its "
+                    f"bookkeeping, found {head!r}",
+                    kind="spin-shape",
+                )
+            if rhs.startswith(("tile_store", "store_pointer")):
+                raise UnsupportedTTIR(
+                    f"line {j + 1}: store inside a spin loop is not the await shape",
+                    kind="spin-shape",
+                )
+            before = len(st.accesses)
+            j = _handle_line(lines, j, body_indent, line, st)
+            if len(st.accesses) > before:
+                if len(st.accesses) - n_before > 1:
+                    raise UnsupportedTTIR(
+                        f"{where}: the spin condition must re-read exactly one "
+                        f"location (found {len(st.accesses) - n_before} memory "
+                        "accesses)",
+                        kind="spin-shape",
+                    )
+                # the poll's value IS an observation (the exit predicate is
+                # asserted over it, C1.2): rebind its integer result from
+                # the generic DataDep to Observed
+                idx = len(st.accesses) - 1
+                if not st.accesses[idx].elem_float:
+                    for item in _split_top(_lhs):
+                        tm = _RE_TYPED_NAME.match(item)
+                        if tm and tm.group(2).strip() != "Token":
+                            st.env[_strip_prov(tm.group(1))] = Observed(idx)
+        if not closed:
+            raise UnsupportedTTIR(
+                f"{where}: spin-loop body ended without `continue`",
+                kind="spin-shape",
+            )
+    finally:
+        st.in_spin = False
+    _finalize_await(where, n_before, exit_pred, st)
+    for rname, _ in results:
+        st.env[rname] = _TOKEN
+    return j
+
+
+def _spin_exit_test(
+    lines: list[str], j: int, indent: int, cond_token: str, st: _State
+) -> tuple[int, Term]:
+    """The spin loop's exit test: ``if(cond=$c)`` whose two arms are one
+    terminator each, ``yield`` (poll again) or ``break`` (exit). Returns
+    (index past the block, EXIT predicate): ``cond`` when the then-arm
+    breaks, ``Not(cond)`` when the else-arm does (the continue condition
+    negated, as the TTIR reader's ``scf.condition`` handling)."""
+    n = len(lines)
+    cv = _as_term(_val(st, cond_token), "spin exit test")
+    breaks: dict[str, bool] = {}
+    k = j + 1
+    for label in ("then", "else"):
+        at = (
+            k < n
+            and lines[k].strip() == label
+            and len(lines[k]) - len(lines[k].lstrip()) == indent
+        )
+        if not at:
+            if label == "then":
+                raise UnsupportedTTIR(
+                    f"line {k + 1}: expected `then` after the spin exit test",
+                    kind="spin-shape",
+                )
+            break
+        k += 1
+        arm_indent = indent + 4
+        if (
+            k < n
+            and lines[k].strip().startswith("(")
+            and lines[k].strip().endswith("):")
+        ):
+            k += 1
+        term = lines[k].strip().split(" ", 1)[0] if k < n else ""
+        if (
+            term not in ("yield", "break")
+            or len(lines[k]) - len(lines[k].lstrip()) != arm_indent
+        ):
+            raise UnsupportedTTIR(
+                f"line {k + 1}: a spin exit arm must be a bare `yield` or "
+                f"`break`, found {term!r}",
+                kind="spin-shape",
+            )
+        breaks[label] = term == "break"
+        k += 1
+    n_break = sum(breaks.values())
+    if n_break != 1:
+        raise UnsupportedTTIR(
+            f"line {j + 1}: the spin exit test must break on exactly one arm "
+            f"(found {n_break})",
+            kind="spin-shape",
+        )
+    exit_pred: Term = cv if breaks.get("then") else Not(cv)
+    return k, exit_pred
+
+
+def _finalize_await(
+    where: str, n_before: int, exit_pred: Term | None, st: _State
+) -> None:
+    """Validate the C1.1 shape contract at the loop's end and stamp the
+    poll with ``awaited`` and the exit predicate (the TTIR reader's
+    ``_finalize_await``, clause for clause). Memory order and scope stay
+    exactly as written: a relaxed spin yields no synchronizes-with edge,
+    which IS the missing-acquire bug the detector exists to find."""
+    n_new = len(st.accesses) - n_before
+    if n_new != 1:
+        raise UnsupportedTTIR(
+            f"{where}: the spin condition must re-read exactly one location "
+            f"(found {n_new} memory accesses)",
+            kind="spin-shape",
+        )
+    if exit_pred is None:
+        raise UnsupportedTTIR(
+            f"{where}: spin loop without an exit test", kind="spin-shape"
+        )
+    idx = len(st.accesses) - 1
+    acc = st.accesses[idx]
+    if acc.elem_float:
+        raise UnsupportedTTIR(
+            f"{where}: the awaited location is float-typed (the observation "
+            "model is Int-sort only)",
+            kind="spin-shape",
+        )
+    # ONE kept read stands for every dropped iteration: sound only when the
+    # re-read leaves the awaited location alone. A plain load never writes;
+    # an RMW re-read that mutates (atomic_add(flag, 1) spins) writes on
+    # every dropped iteration and could terminate on its own increments
+    # (the self-satisfying spin). Identity operands only: add/or/xor 0.
+    if acc.kind == "atomic_rmw":
+        op = ((acc.atomic.rmw_op if acc.atomic else None) or "").lower()
+        identity = op in ("add", "or", "xor") and acc.atomic_val == Const(0)
+        if not identity:
+            raise UnsupportedTTIR(
+                f"{where}: the spin re-read MUTATES the awaited location "
+                f"(atomic {op or '?'} with a non-identity operand); dropped "
+                "iterations would lose real writes",
+                kind="spin-shape",
+            )
+    cv = exit_pred.a if isinstance(exit_pred, Not) else exit_pred
+    if not isinstance(cv, Cmp):
+        raise UnsupportedTTIR(
+            f"{where}: the spin condition is not a comparison over the awaited read",
+            kind="spin-shape",
+        )
+    a_is_obs = isinstance(cv.a, Observed) and cv.a.access_index == idx
+    b_is_obs = isinstance(cv.b, Observed) and cv.b.access_index == idx
+    expected = cv.b if a_is_obs else cv.a
+    if a_is_obs == b_is_obs or idx in observed_indices(expected):
+        raise UnsupportedTTIR(
+            f"{where}: the spin condition must compare the awaited read "
+            "against a loop-invariant expected value",
+            kind="spin-shape",
+        )
+    st.accesses[idx] = replace(acc, awaited=True, exit_pred=exit_pred)
 
 
 def _conj(a: Term | None, b: Term | None) -> Term | None:

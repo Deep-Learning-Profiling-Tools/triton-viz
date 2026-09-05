@@ -44,6 +44,8 @@ def _describe_args(
     copied so this capture stays independent of the TileBench checkout.)"""
     import torch
 
+    from triton_viz.clients.race_detector.compiled.client import CompiledRaceDetector
+
     af = kernel._annotated_function
     names = list(af.pysig.parameters)
     anns = af.parameter_annotations
@@ -64,19 +66,28 @@ def _describe_args(
             sp = val.untyped_storage().data_ptr()
             alias = storage_groups.setdefault(sp, i)
             aliases[name] = alias
-            described.append(
-                {
-                    "kind": "tensor",
-                    "name": name,
-                    "dtype": str(val.dtype),
-                    "shape": list(val.shape),
-                    "strides": list(val.stride()),
-                    "contiguous": bool(val.is_contiguous()),
-                    "numel": int(val.numel()),
-                    "elem_size": int(val.element_size()),
-                    "alias": alias,
-                }
+            desc = {
+                "kind": "tensor",
+                "name": name,
+                "dtype": str(val.dtype),
+                "shape": list(val.shape),
+                "strides": list(val.stride()),
+                "contiguous": bool(val.is_contiguous()),
+                "numel": int(val.numel()),
+                "elem_size": int(val.element_size()),
+                "alias": alias,
+            }
+            # PRE-LAUNCH element values of a small integer tensor, under the
+            # Triton track's own rule (CompiledRaceDetector.pre_warmup): the
+            # static track's rf-init source for atomic observations (a spin
+            # cannot read its exit value from an unknown initial state).
+            # Described BEFORE the smoke launch mutates the storage.
+            init = CompiledRaceDetector._capture_init_values(
+                val, bool(val.is_contiguous())
             )
+            if init is not None:
+                desc["init_values"] = list(init)
+            described.append(desc)
         elif isinstance(val, (bool, int, float)):
             described.append(
                 {
@@ -208,7 +219,7 @@ def main() -> None:
         "rows": rows_out,
     }
     out = Path(ns.out) if ns.out else SPECS_PATH
-    out.write_text(json.dumps(payload, indent=1, sort_keys=True))
+    out.write_text(json.dumps(payload, indent=1, sort_keys=True) + "\n")
     print(f"wrote {out} ({len(rows_out)} rows, {len(failures)} failures)")
 
 

@@ -75,6 +75,8 @@ def _describe_args(
     tensor alias groups (name -> group id) for the shared fingerprint."""
     import torch
 
+    from triton_viz.clients.race_detector.compiled.client import CompiledRaceDetector
+
     af = kernel._annotated_function
     names = list(af.pysig.parameters)
     anns = af.parameter_annotations
@@ -95,19 +97,28 @@ def _describe_args(
             sp = val.untyped_storage().data_ptr()
             alias = storage_groups.setdefault(sp, i)
             aliases[name] = alias
-            described.append(
-                {
-                    "kind": "tensor",
-                    "name": name,
-                    "dtype": str(val.dtype),
-                    "shape": list(val.shape),
-                    "strides": list(val.stride()),
-                    "contiguous": bool(val.is_contiguous()),
-                    "numel": int(val.numel()),
-                    "elem_size": int(val.element_size()),
-                    "alias": alias,
-                }
+            desc = {
+                "kind": "tensor",
+                "name": name,
+                "dtype": str(val.dtype),
+                "shape": list(val.shape),
+                "strides": list(val.stride()),
+                "contiguous": bool(val.is_contiguous()),
+                "numel": int(val.numel()),
+                "elem_size": int(val.element_size()),
+                "alias": alias,
+            }
+            # PRE-LAUNCH element values of a small integer tensor, under the
+            # Triton track's own rule (CompiledRaceDetector.pre_warmup): the
+            # static track's rf-init source for atomic observations (a spin
+            # cannot read its exit value from an unknown initial state).
+            # Described BEFORE the smoke launch mutates the storage.
+            init = CompiledRaceDetector._capture_init_values(
+                val, bool(val.is_contiguous())
             )
+            if init is not None:
+                desc["init_values"] = list(init)
+            described.append(desc)
         elif isinstance(val, (bool, int, float)):
             described.append(
                 {
@@ -236,7 +247,7 @@ def main() -> None:
 
     if args.one:
         out = args.out.resolve()  # _run_one chdirs into the checkout
-        out.write_text(json.dumps(_run_one(args.one), indent=1))
+        out.write_text(json.dumps(_run_one(args.one), indent=1) + "\n")
         return
 
     commit = tilebench_commit()
