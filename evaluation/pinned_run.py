@@ -104,7 +104,14 @@ EXTENT_OF = {
     "proved@T1-launch+assumes-termination": "launch",
     "proved@interp": "analyzed",
     "proved@enum": "analyzed",
+    # Route 2 (L2): the proof went through a snapshot Select, so it is
+    # qualified by this launch's contents, one rung below the plain one
+    "proved@T1+content": "input+content",
+    "proved@T1+assumes-termination+content": "input+content",
+    "proved@T1-launch+content": "launch+content",
+    "proved@T1-launch+assumes-termination+content": "launch+content",
 }
+EXTENTS = ("any", "input", "input+content", "launch", "launch+content", "analyzed")
 
 
 def git_commit(root: Path) -> str:
@@ -414,10 +421,7 @@ def verdict_table(merged: list[dict]) -> dict[str, dict]:
         table[corpus] = {
             "rows": len(rows),
             "proof": c["proof"],
-            "any": c["extent_any"],
-            "input": c["extent_input"],
-            "launch": c["extent_launch"],
-            "analyzed": c["extent_analyzed"],
+            **{e: c[f"extent_{e}"] for e in EXTENTS},
             "race": c["race"],
             "abstain": c["abstain"],
             "timeout": c["timeout"],
@@ -444,40 +448,30 @@ def summary_markdown(
         "",
         "## Verdicts per corpus (evaluation.md section 12 counting)",
         "",
-        "| corpus | rows | proofs | any | input | launch | analyzed | races | abstain | T/o | median s |",
-        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
+        "| corpus | rows | proofs | any | input | input+content | launch | "
+        "launch+content | analyzed | races | abstain | T/o | median s |",
+        "|---|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|---:|",
     ]
     for corpus in list(REAL_CODE_CORPORA) + list(LITMUS_CORPORA):
         t = table.get(corpus)
         if t is None:
             continue
+        ext = " | ".join(str(t[e]) for e in EXTENTS)
         lines.append(
-            f"| {corpus} | {t['rows']} | {t['proof']} | {t['any']} | {t['input']} | "
-            f"{t['launch']} | {t['analyzed']} | {t['race']} | {t['abstain']} | "
-            f"{t['timeout']} | {t['median_s'] if t['median_s'] is not None else '-'} |"
+            f"| {corpus} | {t['rows']} | {t['proof']} | {ext} | {t['race']} | "
+            f"{t['abstain']} | {t['timeout']} | "
+            f"{t['median_s'] if t['median_s'] is not None else '-'} |"
         )
     real = [table[c] for c in REAL_CODE_CORPORA if c in table]
     if real:
-        tot = {
-            k: sum(t[k] for t in real)
-            for k in (
-                "rows",
-                "proof",
-                "any",
-                "input",
-                "launch",
-                "analyzed",
-                "race",
-                "abstain",
-                "timeout",
-            )
-        }
+        keys = ("rows", "proof", *EXTENTS, "race", "abstain", "timeout")
+        tot = {k: sum(t[k] for t in real) for k in keys}
+        ext = " / ".join(f"{tot[e]} {e}" for e in EXTENTS)
         lines += [
             "",
-            f"Real-code totals: {tot['rows']} rows, {tot['proof']} proofs "
-            f"({tot['any']} any / {tot['input']} input / {tot['launch']} launch / "
-            f"{tot['analyzed']} analyzed), {tot['race']} race rows, "
-            f"{tot['abstain']} abstentions, {tot['timeout']} timeouts.",
+            f"Real-code totals: {tot['rows']} rows, {tot['proof']} proofs ({ext}), "
+            f"{tot['race']} race rows, {tot['abstain']} abstentions, "
+            f"{tot['timeout']} timeouts.",
         ]
     lines.append("")
     return "\n".join(lines)

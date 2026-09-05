@@ -133,6 +133,17 @@ def test_verdict_table_counts_extents_including_the_l1_rung():
         dict(_row("c", "fla", "race-free", "proved@T1-launch", 0), pinned_wall_s=3.0),
         dict(_row("d", "fla", "race-free", "proved@interp", 0), pinned_wall_s=4.0),
         dict(_row("e", "fla", "race-free", "proved@enum", 0), pinned_wall_s=5.0),
+        dict(_row("j", "fla", "race-free", "proved@T1+content", 0), pinned_wall_s=9.0),
+        dict(
+            _row(
+                "k",
+                "fla",
+                "race-free",
+                "proved@T1-launch+assumes-termination+content",
+                0,
+            ),
+            pinned_wall_s=10.0,
+        ),
         dict(_row("f", "fla", "race", "race@enum", 0), pinned_wall_s=6.0),
         dict(_row("g", "fla", "abstain", "unsupported", 0), pinned_wall_s=7.0),
         dict(_row("h", "fla", "error", "compile-error", 0), pinned_wall_s=8.0),
@@ -140,14 +151,15 @@ def test_verdict_table_counts_extents_including_the_l1_rung():
     ]
     t = pr.verdict_table(merged)["fla"]
     assert (t["rows"], t["proof"], t["race"], t["abstain"], t["timeout"]) == (
-        9,
-        5,
+        11,
+        7,
         1,
         2,
         1,
     )
     assert (t["any"], t["input"], t["launch"], t["analyzed"]) == (1, 1, 1, 2)
-    assert t["median_s"] == 4.5  # over rows with a verdict: 1..8
+    assert (t["input+content"], t["launch+content"]) == (1, 1)
+    assert t["median_s"] == 5.5  # over rows with a verdict: 1..10
     md = pr.summary_markdown(
         {
             "pinned_commit": "x",
@@ -158,8 +170,8 @@ def test_verdict_table_counts_extents_including_the_l1_rung():
         },
         merged,
         {
-            "rows": 9,
-            "within_budget": 8,
+            "rows": 11,
+            "within_budget": 10,
             "timeouts": 1,
             "budget_s": 200,
             "median_s": 4.5,
@@ -168,20 +180,21 @@ def test_verdict_table_counts_extents_including_the_l1_rung():
         },
         pr.verdict_table(merged),
     )
-    assert "| fla | 9 | 5 | 1 | 1 | 1 | 2 | 1 | 2 | 1 | 4.5 |" in md
+    assert "| fla | 11 | 7 | 1 | 1 | 1 | 1 | 1 | 2 | 1 | 2 | 1 | 5.5 |" in md
 
 
 def test_rehearsal_on_golden_smoke_exercises_the_retry_pass(tmp_path, monkeypatch):
-    """End to end on the smallest corpus with a 2 s budget: every row
-    reaching the budget in the main pass is retried at the retry budget
-    and decides; the merged file is stamped and named REHEARSAL."""
+    """End to end on the smallest corpus with a 1 s budget (under the
+    per-row process start-up, so every row reaches it): every such row
+    is retried at the retry budget and decides; the merged file is
+    stamped and named REHEARSAL."""
     monkeypatch.setattr(runner_mod, "RESULTS_DIR", tmp_path)
     monkeypatch.setattr(pr, "RESULTS_DIR", tmp_path)
     out = pr.run_pinned(
         LadderLevel.L1,
         ("golden_smoke",),
         seed=0,
-        row_timeout=2,
+        row_timeout=1,  # under the per-row start-up: every row is retried
         retry_timeout=120,
         rehearsal=True,
         guard=False,
@@ -190,7 +203,7 @@ def test_rehearsal_on_golden_smoke_exercises_the_retry_pass(tmp_path, monkeypatc
     assert out.name.startswith("REHEARSAL_") and out.name.endswith("_L1.jsonl")
     lines = [json.loads(ln) for ln in out.read_text().splitlines()]
     header, rows = lines[0], lines[1:]
-    assert header["rehearsal"] is True and header["row_timeout_s"] == 2
+    assert header["rehearsal"] is True and header["row_timeout_s"] == 1
     assert header["ladder_level"] == "L1" and header["worker_reuse"] is False
     assert len(rows) == 7
     assert all(r["pinned_commit"] == header["pinned_commit"] for r in rows)
