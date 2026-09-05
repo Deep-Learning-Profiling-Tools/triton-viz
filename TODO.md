@@ -1088,7 +1088,14 @@ Open (blocking any paper use of L1; default stays L0 until done):
       classifier-pinned atomic-return / value-source classes).
 - [ ] Fresh pinned rerun at L1 (a separate stamped dataset next to
       the L0 pin), then the selective-pricing check: every L0-decided
-      row verdict-identical and wall-time-stable.
+      row verdict-identical and wall-time-stable. Time (measured
+      2026-09-04/05): the rung adds 34.6 min over the 492 L0-abstain
+      rows; the 492 rows alone take 85 min with one subprocess per
+      row, about 55 min with `--reuse-workers` (development runs
+      only: the pinned protocol keeps per-row subprocesses so wall
+      times stay comparable with the L0 pin; the paper repo's
+      `pre-submission/pinned-rerun.md` section 2 carries the full
+      estimate, about 4 h for an L1 sitting).
 - [ ] Docs when the rerun lands: SWEEP_REPORT §2/§3/§7 (terminals,
       counting by scope, the queued-lift ledger), the plan's §I.1
       five-state table and §I.2 reachable-regions table (a "nothing
