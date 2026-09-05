@@ -1106,7 +1106,8 @@ capture-artifact rows. Landed on the branch, backward compatible
 
 Open (blocking any paper use of L1; default stays L0 until done):
 
-- [ ] Change-surface diff: every currently-abstaining real-code row
+- [x] Change-surface diff (DONE 2026-09-04, see the addendum above and
+      `evaluation/CHANGE_SURFACE_L1.md`): every currently-abstaining real-code row
       (the 492) at L1 vs the pinned L0 run, jobs=1; classify the
       residual by refusal kind (the design's residual floor: 23
       cuTile + 9 spin + 4 over the ceiling = 36 rows, plus the
