@@ -694,6 +694,8 @@ class ConcreteFootprintRecorder(Client):
 
         import triton.language as tl_mod
 
+        _patch_lang_tensor._tilerace_lang_hook = True  # type: ignore[attr-defined]
+        _patch_numpy2_scalar_index._tilerace_lang_hook = True  # type: ignore[attr-defined]
         setattr(interp_mod, "_patch_lang_tensor", _patch_lang_tensor)  # noqa: B010
         setattr(  # noqa: B010
             frontend_mod.TritonFrontend,
@@ -714,10 +716,26 @@ class ConcreteFootprintRecorder(Client):
         self._lang_patch_installed = True
 
     def cleanup(self) -> None:
-        """Restore every attribute this recorder patched (idempotent)."""
+        """Restore every attribute this recorder patched (idempotent).
+
+        Only an attribute that STILL holds this recorder's wrapper is
+        restored: when the kernel raised (a named refusal mid-kernel),
+        the trace's own ``patch_run`` finally-block has already put the
+        originals back before this runs, and re-installing what the
+        wrapper had captured (the interpreter's ``_new_reduce``, the
+        builder's PatchOps) would leak interpreter state into the
+        process and break the next real compile."""
         while self._saved_attrs:
             obj, name, original, had_own = self._saved_attrs.pop()
             try:
+                current = getattr(obj, name, None)
+                mine = getattr(current, "_tilerace_taint_wrapper", False) or (
+                    name in ("_patch_lang_tensor", "_patch_numpy2_scalar_index")
+                    and current is not original
+                    and getattr(current, "_tilerace_lang_hook", False)
+                )
+                if not mine:
+                    continue
                 if had_own:
                     setattr(obj, name, original)
                 else:

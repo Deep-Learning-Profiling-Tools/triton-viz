@@ -795,3 +795,40 @@ def test_bounds_check_is_off_without_a_memory_map():
 
     assert ConcreteFootprintRecorder().check_bounds is False
     assert ConcreteFootprintRecorder(bounds=[]).check_bounds is True
+
+
+def test_a_mid_kernel_refusal_leaves_the_language_state_clean():
+    """Regression: after a refusal raised inside the kernel, the trace's
+    own restore had already put the originals back and the recorder's
+    cleanup re-installed the interpreter's reduce/scan and the builder's
+    PatchOps it had captured, breaking the next real compile in the same
+    process (seen under runner process reuse)."""
+    import triton.language as tl_mod
+    from triton.runtime.interpreter import interpreter_builder
+
+    before = {
+        n: getattr(tl_mod, n)
+        for n in ("reduce", "associative_scan", "range", "static_range")
+    }
+    before_core = {n: getattr(tl_mod.core, n) for n in ("reduce", "associative_scan")}
+    before_builder = {
+        n: getattr(interpreter_builder, n)
+        for n in ("create_addptr", "create_masked_load")
+    }
+    o = _run(_oob_store_kernel, (2,), torch.zeros(6), 6, BLOCK=4)
+    assert o.reason.startswith("out-of-bounds:")
+    for n, v in before.items():
+        assert getattr(tl_mod, n) is v, n
+    for n, v in before_core.items():
+        assert getattr(tl_mod.core, n) is v, n
+    for n, v in before_builder.items():
+        assert getattr(interpreter_builder, n) is v, n
+    # and the same after a ticket refusal (raised from a taint sink)
+    _run(
+        _ticket_kernel,
+        (4,),
+        torch.zeros(1, dtype=torch.int32),
+        torch.zeros(64, dtype=torch.int32),
+    )
+    for n, v in before.items():
+        assert getattr(tl_mod, n) is v, n

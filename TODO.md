@@ -1000,6 +1000,28 @@ L1, jobs=1, 200 s per row, 1.42 h; commit 5ba8b6a; report:
       races-unclassified) instead of corrupting the process. Cost:
       ~4 us per access on the ~2% of rows that reach replay (24 of
       1062 in the pin), under 1 ms per row. Two pins.
+- [x] Runner process reuse (Hao, 2026-09-05; opt-in `--reuse-workers`,
+      default OFF so the paper's per-row-subprocess protocol and its
+      wall_s basis are untouched): `harness --serve` is a worker that
+      runs rows requested on stdin (corpus loaded once), `runner._Worker`
+      drives it under the per-row budget with select (a silent worker
+      is killed: `timeout`; a dead one: `crash` with the stderr tail;
+      both respawned), recycles workers every `--worker-rows` (50) rows
+      or above 8 GB RSS, and stamps `worker_reuse` into the header
+      (wall_s then excludes process start-up). Row independence: the
+      worker snapshots the interpreter-patched language state before
+      its first row and restores it after every row, logging what
+      leaked. The probe of 50 rows in one process found the leak that
+      breaks the next real compile (core/trace.py's warmup-only note):
+      the L1 recorder's cleanup, running AFTER the trace's own restore
+      on the mid-kernel refusal path, re-installed the interpreter's
+      reduce/scan and the builder's PatchOps it had captured; fixed
+      (cleanup restores only attributes that still hold its wrapper)
+      and pinned. Remaining known leak: tl.core.tensor.__repr__ from the
+      symbolic frontend (harmless; the worker restores it). Saves the
+      2-3 s per-row start-up (~30 of the 85 min of the 492-row run).
+      Pins: served rows equal subprocess rows on golden_smoke, crash
+      and hang fault injection, recycling and the header stamp.
 - rope_fwd_3d budget regression (81.9 s in the first stretch, >200 s
   in the full run): DIAGNOSED AND FIXED. The memory-taint rewrite of
   the premise check scanned the whole interval buffer per

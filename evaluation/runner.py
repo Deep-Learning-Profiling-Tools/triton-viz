@@ -15,6 +15,7 @@ import sys
 import tempfile
 import time
 from pathlib import Path
+from typing import Any
 
 from triton_viz.clients.race_detector.ladder import (
     LADDER_LEVEL_NAMES,
@@ -152,6 +153,184 @@ def _versions() -> dict:
     }
 
 
+# ── process reuse (opt-in): one served worker runs many rows ─────────
+WORKER_ROWS = 50  # recycle a worker after this many rows (leak/memory bound)
+WORKER_RSS_MB = 8192  # ...or when its resident set exceeds this
+
+
+class _Worker:
+    """A ``python -m evaluation.harness --serve`` process. ``run`` sends
+    one request and waits for the sentinel line under the per-row
+    budget; a silent worker is killed (the row is a timeout), a dead
+    one is reported as a crash; both are respawned by the caller.
+    stderr goes to a log file (never a pipe: no deadlock, and the tail
+    is readable for a crash report)."""
+
+    def __init__(self, log_path: Path) -> None:
+        self.log_path = log_path
+        self.proc: subprocess.Popen | None = None
+        self.log: Any = None
+        self.rows = 0
+        self.rss_mb = 0.0
+
+    def start(self) -> None:
+        self.log = open(self.log_path, "a")
+        self.proc = subprocess.Popen(
+            [sys.executable, "-m", "evaluation.harness", "--serve"],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.PIPE,
+            stderr=self.log,
+            text=True,
+            bufsize=1,
+            cwd=Path(__file__).parent.parent,
+        )
+        self.rows = 0
+        self.rss_mb = 0.0
+
+    def alive(self) -> bool:
+        return self.proc is not None and self.proc.poll() is None
+
+    def stop(self) -> None:
+        if self.proc is not None:
+            try:
+                if self.proc.poll() is None:
+                    self.proc.kill()
+                self.proc.wait(timeout=10)
+            except Exception:  # noqa: BLE001
+                pass
+            self.proc = None
+        if self.log is not None:
+            try:
+                self.log.close()
+            except Exception:  # noqa: BLE001
+                pass
+            self.log = None
+
+    def stderr_tail(self, n: int = 500) -> str:
+        try:
+            if self.log is not None:
+                self.log.flush()
+            return self.log_path.read_text()[-n:]
+        except OSError:
+            return ""
+
+    def run(self, request: dict, timeout: float) -> tuple[str, str]:
+        """('ok', status) / ('error', message) / ('timeout', '') /
+        ('crash', stderr tail); the worker is stopped on the last two."""
+        import select
+
+        assert self.proc is not None and self.proc.stdin and self.proc.stdout
+        try:
+            self.proc.stdin.write(json.dumps(request) + "\n")
+            self.proc.stdin.flush()
+        except (BrokenPipeError, OSError):
+            tail = self.stderr_tail()
+            self.stop()
+            return ("crash", tail)
+        deadline = time.monotonic() + timeout
+        while True:
+            remaining = deadline - time.monotonic()
+            if remaining <= 0:
+                self.stop()
+                return ("timeout", "")
+            ready, _, _ = select.select([self.proc.stdout], [], [], min(remaining, 1.0))
+            if not ready:
+                if self.proc.poll() is not None:
+                    tail = self.stderr_tail()
+                    self.stop()
+                    return ("crash", tail)
+                continue
+            line = self.proc.stdout.readline()
+            if line == "":  # EOF: the worker died
+                tail = self.stderr_tail()
+                self.stop()
+                return ("crash", tail)
+            if not line.startswith("@@ROW@@"):
+                continue  # a stray print from a kernel or a client
+            self.rows += 1
+            body = line[len("@@ROW@@") :].strip()
+            if body.startswith("ok"):
+                for tok in body.split():
+                    if tok.startswith("rss_mb="):
+                        self.rss_mb = float(tok[len("rss_mb=") :])
+                return ("ok", body)
+            return ("error", body[len("error") :].strip())
+
+    def should_recycle(self, worker_rows: int, rss_limit_mb: float) -> bool:
+        return self.rows >= worker_rows or self.rss_mb > rss_limit_mb
+
+
+def _run_one_reused(
+    worker: _Worker,
+    spec,
+    corpus_name: str,
+    seed: int,
+    timeout: int,
+    mutate: bool,
+    ladder_level: LadderLevel,
+    probe: str | None = None,
+) -> dict:
+    """The served-worker counterpart of ``_run_one``: same row shapes and
+    the same terminals for a dead or silent worker (``crash`` /
+    ``timeout``); ``wall_s`` excludes process start-up by construction."""
+    t0 = time.perf_counter()
+    if not worker.alive():
+        worker.start()
+    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+        tmp = tf.name
+    request = {
+        "corpus": corpus_name,
+        "spec": spec.name,
+        "seed": seed,
+        "mutate": mutate,
+        "ladder_level": ladder_level.name,
+        "out": tmp,
+    }
+    if probe:
+        request["probe"] = probe
+    base = {
+        "name": spec.name,
+        "corpus": corpus_name,
+        "expected": spec.expected,
+        "pattern": spec.pattern,
+    }
+    try:
+        kind, detail = worker.run(request, timeout)
+        if kind == "ok" and os.path.getsize(tmp) > 0:
+            with open(tmp) as f:
+                row = json.load(f)
+        elif kind == "timeout":
+            row = {
+                **base,
+                "verdict": "error",
+                "terminal": "timeout",
+                "harness_error": f"exceeded {timeout}s",
+            }
+        elif kind == "crash":
+            row = {
+                **base,
+                "verdict": "error",
+                "terminal": "crash",
+                "harness_error": detail[-500:],
+            }
+        else:
+            row = {
+                **base,
+                "verdict": "error",
+                "terminal": "harness-error",
+                "harness_error": detail[-500:],
+            }
+    finally:
+        try:
+            os.unlink(tmp)
+        except OSError:
+            pass
+    row.setdefault("ladder_level", ladder_level.name)
+    row["wall_s"] = round(time.perf_counter() - t0, 2)
+    print(f"  {spec.name:40s} {row.get('terminal', '?'):20s} {row['wall_s']}s")
+    return row
+
+
 def _run_one(
     spec,
     corpus_name: str,
@@ -219,6 +398,7 @@ def results_header(
     provenance: dict,
     ladder_level: LadderLevel = LadderLevel.L0,
     timeout: int | None = None,
+    worker_reuse: dict | None = None,
 ) -> dict:
     """The JSONL header: detector commit, package versions, corpus
     provenance, the ladder-depth stamp and the per-row budget (no
@@ -232,6 +412,9 @@ def results_header(
         "row_timeout_s": timeout
         if timeout is not None
         else row_timeout_s(ladder_level),
+        # process reuse (opt-in): rows served by long-lived workers, whose
+        # wall_s excludes process start-up; the two protocols are stamped
+        "worker_reuse": worker_reuse or False,
         **_versions(),
         **provenance,
     }
@@ -247,6 +430,9 @@ def run_corpus(
     ladder_level: LadderLevel = LadderLevel.L0,
     only_names: "set[str] | None" = None,
     out_suffix: "str | None" = None,
+    reuse_workers: bool = False,
+    worker_rows: int = WORKER_ROWS,
+    worker_rss_mb: float = WORKER_RSS_MB,
 ) -> Path:
     from evaluation.kernels import load
 
@@ -271,25 +457,64 @@ def run_corpus(
     suffix = level_suffix + (out_suffix or "")
     out_path = RESULTS_DIR / f"{corpus_name}{suffix}.jsonl"
 
-    header = results_header(corpus_name, seed, corpus.provenance, ladder_level, timeout)
+    reuse = (
+        {"rows_per_worker": worker_rows, "rss_limit_mb": worker_rss_mb}
+        if reuse_workers
+        else None
+    )
+    header = results_header(
+        corpus_name, seed, corpus.provenance, ladder_level, timeout, reuse
+    )
     print(
         f"[runner] {corpus_name}: {len(specs)} specs -> {out_path} "
-        f"(jobs={jobs}, ladder {ladder_level.name}, {timeout}s per row)"
+        f"(jobs={jobs}, ladder {ladder_level.name}, {timeout}s per row"
+        + (f", workers reused for {worker_rows} rows)" if reuse_workers else ")")
     )
 
-    def _one(s):
-        return _run_one(s, corpus_name, seed, timeout, mutate, ladder_level)
+    workers: list[_Worker] = []
+    if reuse_workers:
+        # one served worker per job thread; recycled on the row/RSS bound
+        import threading
 
-    if jobs == 1:
-        rows = [_one(s) for s in specs]
+        local = threading.local()
+        log_path = RESULTS_DIR / f"{corpus_name}{suffix}_worker.log"
+        log_path.write_text("")
+        lock = threading.Lock()
+
+        def _worker() -> _Worker:
+            w = getattr(local, "worker", None)
+            if w is None or w.should_recycle(worker_rows, worker_rss_mb):
+                if w is not None:
+                    w.stop()
+                w = local.worker = _Worker(log_path)
+                with lock:
+                    workers.append(w)
+            return w
+
+        def _one(s):
+            return _run_one_reused(
+                _worker(), s, corpus_name, seed, timeout, mutate, ladder_level
+            )
+
     else:
-        # rows are subprocess-isolated, so concurrency only affects wall_s
-        # (near-watchdog rows can flip to timeout under load — keep the
-        # definitive paper sweeps at jobs=1); output order stays spec order
-        from concurrent.futures import ThreadPoolExecutor
 
-        with ThreadPoolExecutor(max_workers=jobs) as ex:
-            rows = list(ex.map(_one, specs))
+        def _one(s):
+            return _run_one(s, corpus_name, seed, timeout, mutate, ladder_level)
+
+    try:
+        if jobs == 1:
+            rows = [_one(s) for s in specs]
+        else:
+            # rows are process-isolated, so concurrency only affects wall_s
+            # (near-watchdog rows can flip to timeout under load — keep the
+            # definitive paper sweeps at jobs=1); output order stays spec order
+            from concurrent.futures import ThreadPoolExecutor
+
+            with ThreadPoolExecutor(max_workers=jobs) as ex:
+                rows = list(ex.map(_one, specs))
+    finally:
+        for w in workers:
+            w.stop()
 
     with open(out_path, "w") as f:
         f.write(json.dumps(header) + "\n")
@@ -338,6 +563,20 @@ def main() -> None:
         "per-instance enumeration rung, L2 = + forked capture (future). "
         "Stamped into the JSONL header and every row.",
     )
+    ap.add_argument(
+        "--reuse-workers",
+        action="store_true",
+        help="serve rows from long-lived worker processes instead of one "
+        "subprocess per row (saves the 2-3 s import + corpus load per row; "
+        "the per-row budget and crash containment are kept by the parent; "
+        "wall_s then excludes process start-up, stamped in the header)",
+    )
+    ap.add_argument(
+        "--worker-rows",
+        type=int,
+        default=WORKER_ROWS,
+        help="recycle a reused worker after this many rows",
+    )
     ns = ap.parse_args()
 
     only_names = None
@@ -368,6 +607,8 @@ def main() -> None:
         ladder_level=parse_ladder_level(ns.ladder_level),
         only_names=only_names,
         out_suffix=ns.out_suffix,
+        reuse_workers=ns.reuse_workers,
+        worker_rows=ns.worker_rows,
     )
     if not ns.no_report:
         from evaluation.report import render

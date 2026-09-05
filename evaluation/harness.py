@@ -27,6 +27,7 @@ import hashlib
 import json
 import re
 import signal
+import sys
 import threading
 import time
 from contextlib import contextmanager
@@ -846,12 +847,181 @@ def run_one(
     return row
 
 
+# ── worker mode: one process serves many rows (runner --reuse-workers) ──
+#
+# Per-row subprocesses cost 2-3 s of interpreter/torch import plus the
+# corpus load per row (half of a 492-row change-surface run). A served
+# worker keeps them; the runner still enforces the per-row budget (it
+# kills a worker that does not answer in time) and crash containment (a
+# dead worker is respawned), and recycles workers after a fixed number of
+# rows or above an RSS limit. Row independence is the load-bearing
+# property: triton's interpreter patches language state in place and a
+# leaked patch breaks the next row's real compile (core/trace.py's
+# warmup-only note), so the worker snapshots the language state before
+# its first row and restores it after every row, reporting what leaked.
+
+ROW_SENTINEL = "@@ROW@@"
+_MISSING = object()
+
+
+def _lang_state_watch() -> list[tuple[Any, str]]:
+    import triton.language as tl
+    from triton.runtime.interpreter import interpreter_builder
+
+    watch: list[tuple[Any, str]] = [
+        (tl.core.tensor, n)
+        for n in ("__bool__", "__index__", "__repr__", "__str__", "T")
+    ]
+    watch += [
+        (tl, n)
+        for n in (
+            "range",
+            "static_range",
+            "static_assert",
+            "static_print",
+            "multiple_of",
+            "max_contiguous",
+            "max_constancy",
+            "reduce",
+            "associative_scan",
+        )
+    ]
+    watch += [(tl.core, n) for n in ("reduce", "associative_scan")]
+    watch += [(tl.core.dtype, "to_ir")]
+    watch += [
+        (interpreter_builder, n)
+        for n in dir(interpreter_builder)
+        if not n.startswith("_") and callable(getattr(interpreter_builder, n, None))
+    ]
+    return watch
+
+
+def _lang_state_snapshot(
+    watch: list[tuple[Any, str]],
+) -> list[tuple[Any, str, Any]]:
+    return [(obj, n, vars(obj).get(n, _MISSING)) for obj, n in watch]
+
+
+def _same_attr(a: Any, b: Any) -> bool:
+    """Identity, or the same bound method (unpatch_op restores a builder
+    op by setattr, which turns the class attribute into an equal
+    instance-dict entry: not a leak)."""
+    if a is b:
+        return True
+    fa, fb = getattr(a, "__func__", None), getattr(b, "__func__", None)
+    return (
+        fa is not None
+        and fa is fb
+        and getattr(a, "__self__", None) is getattr(b, "__self__", None)
+    )
+
+
+def _lang_state_restore(snapshot: list[tuple[Any, str, Any]]) -> list[str]:
+    """Put every watched attribute back to its pristine value; returns the
+    names that had leaked (for the worker's log)."""
+    import triton
+
+    leaked: list[str] = []
+    for obj, n, orig in snapshot:
+        cur = vars(obj).get(n, _MISSING)
+        if cur is orig:
+            continue
+        if orig is _MISSING and _same_attr(
+            cur, getattr(type(obj), n, None) and getattr(obj, n)
+        ):
+            # an instance-dict entry equal to the inherited attribute
+            try:
+                delattr(obj, n)
+            except Exception:  # noqa: BLE001
+                pass
+            continue
+        leaked.append(f"{getattr(obj, '__name__', type(obj).__name__)}.{n}")
+        try:
+            if orig is _MISSING:
+                delattr(obj, n)
+            else:
+                setattr(obj, n, orig)
+        except Exception:  # noqa: BLE001
+            pass
+    if triton.knobs.runtime.interpret:
+        triton.knobs.runtime.interpret = False
+        leaked.append("knobs.runtime.interpret")
+    return leaked
+
+
+def _rss_mb() -> float:
+    try:
+        with open("/proc/self/status") as f:
+            for line in f:
+                if line.startswith("VmRSS:"):
+                    return int(line.split()[1]) / 1024.0
+    except OSError:
+        pass
+    return 0.0
+
+
+def serve(stdin: Any, stdout: Any) -> None:
+    """The worker loop: one JSON request per line on stdin
+    ``{"corpus", "spec", "seed", "mutate", "ladder_level", "out"}``;
+    the row is written to ``out`` and one ``@@ROW@@ ok rss_mb=<n>`` (or
+    ``@@ROW@@ error <message>``) line is printed. EOF ends the worker.
+    ``probe`` is fault injection for the runner's tests (``crash``,
+    ``hang``)."""
+    import gc
+    import os
+    import signal as _signal
+
+    from evaluation.kernels import load
+
+    snapshot = _lang_state_snapshot(_lang_state_watch())
+    corpora: dict[str, Any] = {}
+    for line in stdin:
+        line = line.strip()
+        if not line:
+            continue
+        req = json.loads(line)
+        probe = req.get("probe")
+        if probe == "crash":
+            os.kill(os.getpid(), _signal.SIGSEGV)
+        if probe == "hang":
+            time.sleep(3600)
+        try:
+            corpus = corpora.get(req["corpus"])
+            if corpus is None:
+                corpus = corpora[req["corpus"]] = load(req["corpus"])
+            spec = next(s for s in corpus.specs if s.name == req["spec"])
+            row = run_one(
+                spec,
+                int(req.get("seed", 0)),
+                mutate=bool(req.get("mutate", False)),
+                ladder_level=parse_ladder_level(req.get("ladder_level", "L0")),
+            )
+            row["corpus"] = req["corpus"]
+            with open(req["out"], "w") as f:
+                json.dump(row, f)
+            status = "ok"
+        except Exception as e:  # noqa: BLE001
+            status = f"error {type(e).__name__}: {e}".replace("\n", " ")[:400]
+        leaked = _lang_state_restore(snapshot)
+        if leaked:
+            print(
+                f"[serve] restored {len(leaked)} leaked attribute(s) after "
+                f"{req.get('spec')}: {', '.join(leaked[:8])}",
+                file=sys.stderr,
+                flush=True,
+            )
+        gc.collect()
+        print(
+            f"{ROW_SENTINEL} {status} rss_mb={_rss_mb():.0f}", file=stdout, flush=True
+        )
+
+
 def main() -> None:
     ap = argparse.ArgumentParser()
-    ap.add_argument("--corpus", required=True)
-    ap.add_argument("--spec", required=True)
+    ap.add_argument("--corpus")
+    ap.add_argument("--spec")
     ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument("--out", required=True)
+    ap.add_argument("--out")
     ap.add_argument("--mutate", action="store_true")
     ap.add_argument(
         "--ladder-level",
@@ -860,7 +1030,18 @@ def main() -> None:
         help="ladder depth: L0 = shipped rungs only (default), L1 = + the "
         "concrete per-instance enumeration rung, L2 = + forked capture",
     )
+    ap.add_argument(
+        "--serve",
+        action="store_true",
+        help="worker mode: serve rows requested on stdin (runner --reuse-workers)",
+    )
     ns = ap.parse_args()
+
+    if ns.serve:
+        serve(sys.stdin, sys.stdout)
+        return
+    if not (ns.corpus and ns.spec and ns.out):
+        ap.error("--corpus, --spec and --out are required (or --serve)")
 
     from evaluation.kernels import load
 
