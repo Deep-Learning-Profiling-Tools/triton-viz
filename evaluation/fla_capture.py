@@ -26,7 +26,6 @@ Usage (GPU machine):
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from pathlib import Path
 
@@ -1870,7 +1869,11 @@ CASES: dict = {
 
 
 def main() -> None:
-    from evaluation.capture_common import capture_one_case, run_case_capture
+    from evaluation.capture_common import (
+        capture_one_case,
+        run_case_capture,
+        write_case_result,
+    )
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--one")
@@ -1880,7 +1883,7 @@ def main() -> None:
     if args.one:
         os.environ.setdefault("FLA_USE_TMA", "0")  # sm90-only path, keep off
         result = capture_one_case(CASES, args.one, dtype_name="float32")
-        args.out.write_text(json.dumps(result, indent=1))
+        write_case_result(result, args.out)
         return
 
     from evaluation.runner import _fla_provenance

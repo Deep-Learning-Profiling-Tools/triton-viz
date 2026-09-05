@@ -54,7 +54,6 @@ Usage (GPU machine):
 from __future__ import annotations
 
 import argparse
-import json
 from pathlib import Path
 
 SPECS_PATH = Path(__file__).parent / "kernels" / "tritonbench_meta_specs.json"
@@ -157,7 +156,11 @@ CASES: dict = {
 
 
 def main() -> None:
-    from evaluation.capture_common import capture_one_case, run_case_capture
+    from evaluation.capture_common import (
+        capture_one_case,
+        run_case_capture,
+        write_case_result,
+    )
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--one")
@@ -168,7 +171,7 @@ def main() -> None:
         result = capture_one_case(
             CASES, args.one, dtype_name="bfloat16", module_prefix="tritonbench."
         )
-        args.out.write_text(json.dumps(result, indent=1))
+        write_case_result(result, args.out)
         return
 
     from evaluation.runner import _tritonbench_meta_provenance

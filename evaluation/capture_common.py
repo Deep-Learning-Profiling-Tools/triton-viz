@@ -6,22 +6,33 @@ the full name→value binding split into runtime args and constexprs,
 tensor descriptors (shape / dtype / init class / contiguity / alias
 group), exact scalars, and the resolved grid.
 
-Small integer and bool tensors additionally carry a VALUE SNAPSHOT (the
-exact flattened values): by-range ``randint`` rebuilds fabricate invalid
-inputs for value-coupled tensors — non-monotone ``cu_seqlens``,
-repeated entries in permutation/index tables, masks that no longer keep
-stores disjoint — which is exactly the TritonBench interp-disagreement
-class. Float tensors stay by-descriptor (their values only reach
-addresses through comparisons, and seeded randn keeps them generic).
+EVERY integer and bool tensor carries a VALUE SNAPSHOT (the exact
+values): by-range ``randint`` rebuilds fabricate invalid inputs for
+value-coupled tensors — non-monotone ``cu_seqlens``, repeated entries
+in permutation/index tables, masks that no longer keep stores disjoint,
+a snapshotted prefix sum next to a randomly rebuilt mask — which is
+exactly the TritonBench interp-disagreement class and, at ladder level
+L1, the capture-artifact class of the change-surface run (Hao,
+2026-09-04: snapshot all int/bool, rebuild only floats). Small
+snapshots (up to VALUE_SNAPSHOT_CAP elements) stay INLINE in the specs
+JSON as before; larger ones live in a content-addressed sidecar
+(``<specs stem>_values.npz`` next to the specs file, one compressed
+array per SHA-256 of the raw bytes) and the descriptor carries
+``values_ref`` (the hash). Float tensors stay by-descriptor (their
+values only reach addresses through comparisons, and seeded randn keeps
+them generic).
 
 Rebuild side (any machine, CPU-only): ``make_tensor`` / ``make_args_fn``
 reconstruct launch args from the descriptors, values-exact when a
-snapshot is present.
+snapshot is present. A ``values_ref`` whose sidecar or entry is missing
+is a HARD error (``MissingValueSnapshot``), never a silent fall-back to
+a random rebuild: that fall-back is the artifact this design removes.
 """
 
 from __future__ import annotations
 
 import json
+import hashlib
 import os
 import subprocess
 import sys
@@ -30,10 +41,108 @@ from contextlib import contextmanager
 from pathlib import Path
 from typing import Any, Callable
 
+import numpy as np
 import torch
 
-# int/bool tensors up to this many elements are snapshotted exactly
+# int/bool snapshots up to this many elements are stored INLINE in the
+# specs JSON; larger ones go to the content-addressed sidecar (every
+# int/bool tensor is snapshotted either way)
 VALUE_SNAPSHOT_CAP = 8192
+VALUES_SIDECAR_SUFFIX = "_values.npz"
+
+
+class MissingValueSnapshot(RuntimeError):
+    """A descriptor references a value snapshot the sidecar does not
+    provide. Fail-loud by design: rebuilding such a tensor at random
+    would silently reintroduce the capture-artifact class."""
+
+
+def _sha256_bytes(arr: np.ndarray) -> str:
+    return hashlib.sha256(np.ascontiguousarray(arr).tobytes()).hexdigest()
+
+
+class ValueStore:
+    """Content-addressed store of value snapshots: SHA-256 of the raw
+    bytes -> flat numpy array. Capture side: ``put`` returns the key the
+    descriptor records. Rebuild side: ``get`` verifies the hash on read.
+    Persisted as one compressed ``.npz`` (``save``/``load``); ``beside``
+    names the sidecar that belongs to a specs file (loaded lazily, so a
+    corpus whose descriptors need no sidecar never touches the disk)."""
+
+    def __init__(self, path: Path | None = None) -> None:
+        self.path = Path(path) if path is not None else None
+        self._arrays: dict[str, np.ndarray] = {}
+        self._loaded = path is None
+
+    @classmethod
+    def beside(cls, specs_path: Path) -> "ValueStore":
+        specs_path = Path(specs_path)
+        stem = specs_path.name
+        if stem.endswith("_specs.json"):
+            stem = stem[: -len("_specs.json")]
+        else:
+            stem = specs_path.stem
+        return cls(specs_path.parent / f"{stem}{VALUES_SIDECAR_SUFFIX}")
+
+    # ── capture side ──
+    def put(self, arr: np.ndarray) -> str:
+        flat = np.ascontiguousarray(arr).reshape(-1)
+        key = _sha256_bytes(flat)
+        self._arrays.setdefault(key, flat)
+        return key
+
+    def merge(self, other: "ValueStore") -> None:
+        other._ensure_loaded()
+        for k, v in other._arrays.items():
+            self._arrays.setdefault(k, v)
+
+    def save(self, path: Path | None = None) -> Path | None:
+        target = Path(path) if path is not None else self.path
+        if target is None:
+            raise ValueError("ValueStore.save needs a path")
+        self._ensure_loaded()
+        if not self._arrays:
+            target.unlink(missing_ok=True)  # nothing referenced: no sidecar
+            return None
+        np.savez_compressed(target, **self._arrays)
+        return target
+
+    # ── rebuild side ──
+    def _ensure_loaded(self) -> None:
+        if self._loaded:
+            return
+        self._loaded = True
+        if self.path is None or not self.path.exists():
+            return
+        with np.load(self.path) as z:
+            for k in z.files:
+                self._arrays[k] = np.asarray(z[k])
+
+    def __contains__(self, key: str) -> bool:
+        self._ensure_loaded()
+        return key in self._arrays
+
+    def __len__(self) -> int:
+        self._ensure_loaded()
+        return len(self._arrays)
+
+    def get(self, key: str, *, what: str = "") -> np.ndarray:
+        self._ensure_loaded()
+        arr = self._arrays.get(key)
+        where = str(self.path) if self.path is not None else "<in-memory store>"
+        if arr is None:
+            raise MissingValueSnapshot(
+                f"value snapshot {key[:12]}... {what}is not in {where}: the sidecar "
+                "was not produced by the capture that wrote these specs (re-run "
+                "the capture driver on the GPU machine) or is missing from this "
+                "checkout; rebuilding the tensor at random is refused"
+            )
+        if _sha256_bytes(arr) != key:
+            raise MissingValueSnapshot(
+                f"value snapshot {key[:12]}... {what}in {where} fails its hash check"
+            )
+        return arr
+
 
 # launch-config kwargs that are not kernel parameters
 LAUNCH_OPTS = {
@@ -75,7 +184,7 @@ TORCH_DTYPE = {name: getattr(torch, name.split(".", 1)[1]) for name in SIG_FOR_D
 # ── capture side ─────────────────────────────────────────────────
 
 
-def describe_tensor(t: torch.Tensor) -> dict:
+def describe_tensor(t: torch.Tensor, store: "ValueStore | None" = None) -> dict:
     d = {
         "kind": "tensor",
         "shape": list(t.shape),
@@ -94,21 +203,36 @@ def describe_tensor(t: torch.Tensor) -> dict:
         d["init"] = "zeros" if bool((z == 0).all()) else "randn"
     elif t.dtype == torch.bool:
         d["init"] = "randbool"
-        if t.numel() <= VALUE_SNAPSHOT_CAP:
-            d["values"] = [int(x) for x in t.flatten().tolist()]
+        _snapshot_values(d, t, store)
     else:
         lo = int(t.min().item())
         hi = int(t.max().item())
         d["init"] = "randint"
         d["low"], d["high"] = lo, hi + 1
-        if t.numel() <= VALUE_SNAPSHOT_CAP:
-            d["values"] = t.flatten().tolist()
+        _snapshot_values(d, t, store)
     return d
 
 
-def describe(v: Any) -> dict:
+def _snapshot_values(d: dict, t: torch.Tensor, store: "ValueStore | None") -> None:
+    """Every int/bool tensor is snapshotted: inline up to the cap,
+    otherwise into the content-addressed sidecar. Without a store a
+    large tensor keeps the by-descriptor rebuild and says so
+    (``values_dropped``), so a capture run without a sidecar cannot
+    pass for a full snapshot."""
+    flat = t.detach().flatten().cpu()
+    if t.numel() <= VALUE_SNAPSHOT_CAP:
+        d["values"] = [int(x) for x in flat.tolist()]
+        return
+    if store is None:
+        d["values_dropped"] = True
+        return
+    arr = flat.numpy() if t.dtype != torch.bool else flat.numpy().astype(np.bool_)
+    d["values_ref"] = store.put(arr)
+
+
+def describe(v: Any, store: "ValueStore | None" = None) -> dict:
     if isinstance(v, torch.Tensor):
-        return describe_tensor(v)
+        return describe_tensor(v, store)
     if isinstance(v, bool):
         return {"kind": "scalar", "sig": "i1", "value": v}
     if isinstance(v, int):
@@ -149,10 +273,17 @@ class LaunchRecorder:
     capture error never breaks the hooked run.
     """
 
-    def __init__(self, key: Callable[[Any], str] | None = None):
+    def __init__(
+        self,
+        key: Callable[[Any], str] | None = None,
+        values: "ValueStore | None" = None,
+    ):
         self.captured: dict[str, dict] = {}
         self.skipped: dict[str, str] = {}
         self._key = key or (lambda fn: fn.__name__)
+        # the value snapshots of every int/bool tensor above the inline
+        # cap; the capture driver persists it as the specs' sidecar
+        self.values = values if values is not None else ValueStore()
 
     @contextmanager
     def hooked(self):
@@ -224,7 +355,7 @@ class LaunchRecorder:
                     return
                 constexprs[name] = enc
                 continue
-            d = describe(v)
+            d = describe(v, self.values)
             if d["kind"] == "unsupported":
                 self.skipped[slot] = f"arg {name}: {d['type']}"
                 return
@@ -261,10 +392,12 @@ class LaunchRecorder:
 # ── rebuild side ─────────────────────────────────────────────────
 
 
-def make_tensor(desc: dict, gen: torch.Generator) -> torch.Tensor:
+def make_tensor(
+    desc: dict, gen: torch.Generator, store: "ValueStore | None" = None
+) -> torch.Tensor:
     shape = tuple(desc["shape"])
     dtype = TORCH_DTYPE[desc["dtype"]]
-    t = _make_contiguous(desc, shape, dtype, gen)
+    t = _make_contiguous(desc, shape, dtype, gen, store)
     strides = desc.get("strides")
     if strides is not None:
         out = torch.empty_strided(shape, tuple(strides), dtype=dtype)
@@ -281,10 +414,23 @@ def make_tensor(desc: dict, gen: torch.Generator) -> torch.Tensor:
 
 
 def _make_contiguous(
-    desc: dict, shape: tuple, dtype: torch.dtype, gen: torch.Generator
+    desc: dict,
+    shape: tuple,
+    dtype: torch.dtype,
+    gen: torch.Generator,
+    store: "ValueStore | None" = None,
 ) -> torch.Tensor:
     if "values" in desc:  # exact snapshot beats any by-descriptor init
         return torch.tensor(desc["values"], dtype=dtype).reshape(shape)
+    if "values_ref" in desc:
+        what = f"for {desc.get('name', '?')} {tuple(shape)} {desc['dtype']} "
+        if store is None:
+            raise MissingValueSnapshot(
+                f"value snapshot {what}is referenced but no sidecar store was "
+                "given to the rebuild"
+            )
+        arr = store.get(desc["values_ref"], what=what)
+        return torch.from_numpy(np.array(arr)).to(dtype).reshape(shape)
     if desc["init"] == "zeros":
         return torch.zeros(shape, dtype=dtype)
     if desc["init"] == "randn":
@@ -297,10 +443,15 @@ def _make_contiguous(
     raise ValueError(f"unknown init {desc['init']!r}")
 
 
-def make_args_fn(arg_descs: list[dict], aliases: dict[str, str]):
+def make_args_fn(
+    arg_descs: list[dict],
+    aliases: dict[str, str],
+    store: "ValueStore | None" = None,
+):
     """None-valued args are NOT emitted — they live in ``constexprs``
     (triton specializes them away) and the harness launches all-kwargs,
-    so declaration slots never shift."""
+    so declaration slots never shift. ``store`` resolves ``values_ref``
+    snapshots (``ValueStore.beside(specs_path)``)."""
 
     def make_args(seed: int) -> tuple:
         gen = torch.Generator().manual_seed(seed)
@@ -313,7 +464,7 @@ def make_args_fn(arg_descs: list[dict], aliases: dict[str, str]):
                 v: Any = d["value"]
             else:  # tensor
                 src = aliases.get(d["name"])
-                v = by_name[src] if src is not None else make_tensor(d, gen)
+                v = by_name[src] if src is not None else make_tensor(d, gen, store)
             by_name[d["name"]] = v
             out.append(v)
         return tuple(out)
@@ -378,7 +529,23 @@ def capture_one_case(
         "kernels": captured,
         "skipped_kernels": skipped,
         "triton": triton.__version__,
+        # not JSON: the driver writes it beside the JSON (write_case_result)
+        "_values": recorder.values,
     }
+
+
+def write_case_result(result: dict, out: Path) -> None:
+    """Write a per-case capture result: the JSON at ``out`` and the value
+    snapshots at ``out`` + ``_values.npz`` (only when any exist)."""
+    values = result.pop("_values", None)
+    out.write_text(json.dumps(result, indent=1))
+    if values is not None:
+        values.save(values_sidecar_of(out))
+
+
+def values_sidecar_of(json_path: Path) -> Path:
+    json_path = Path(json_path)
+    return json_path.with_name(json_path.name + VALUES_SIDECAR_SUFFIX)
 
 
 def fingerprint(rec: dict) -> str:
@@ -415,6 +582,7 @@ def run_case_capture(
     merged: dict[str, dict] = {}
     failures: dict[str, str] = {}
     seen: dict[str, str] = {}  # specialization fingerprint -> first case
+    values = ValueStore()  # the corpus sidecar, merged from the children
     for i, case in enumerate(sorted(cases), 1):
         # private per-run temp file: /tmp is shared and sticky, a fixed
         # path can collide with a concurrent sweep or another user's stale
@@ -435,6 +603,9 @@ def run_case_capture(
                 print(f"[{i}/{len(cases)}] {case}: CRASH")
                 continue
             result = json.loads(out.read_text())
+            child_values = values_sidecar_of(out)
+            if child_values.exists():
+                values.merge(ValueStore(child_values))
         except subprocess.TimeoutExpired:
             failures[case] = f"timeout after {per_case_timeout_s}s"
             print(f"[{i}/{len(cases)}] {case}: TIMEOUT")
@@ -445,6 +616,7 @@ def run_case_capture(
             continue
         finally:
             out.unlink(missing_ok=True)
+            values_sidecar_of(out).unlink(missing_ok=True)
         if result["error"] and not result["kernels"]:
             failures[case] = result["error"][:300]
             print(f"[{i}/{len(cases)}] {case}: ERROR ({result['error'][:80]})")
@@ -474,9 +646,51 @@ def run_case_capture(
     specs_path.write_text(
         json.dumps(payload, separators=(",", ":"), sort_keys=True) + "\n"
     )
+    sidecar = prune_and_save_sidecar(
+        values, payload, ValueStore.beside(specs_path).path
+    )
     total = sum(len(r["kernels"]) for r in merged.values())
     print(
         f"\ncaptured {total} kernel specializations from "
         f"{len(merged)}/{len(cases)} cases ({len(failures)} failures) "
         f"-> {specs_path}"
+        + (f" (+ {len(values)} value snapshots -> {sidecar})" if sidecar else "")
     )
+
+
+def referenced_values(payload: Any) -> set[str]:
+    """Every ``values_ref`` a specs payload mentions (any nesting)."""
+    refs: set[str] = set()
+
+    def walk(o: Any) -> None:
+        if isinstance(o, dict):
+            ref = o.get("values_ref")
+            if isinstance(ref, str):
+                refs.add(ref)
+            for v in o.values():
+                walk(v)
+        elif isinstance(o, list):
+            for v in o:
+                walk(v)
+
+    walk(payload)
+    return refs
+
+
+def prune_and_save_sidecar(
+    values: "ValueStore", payload: Any, sidecar_path: Path | None
+) -> Path | None:
+    """Keep only the snapshots the written specs reference (dedup dropped
+    launches, skipped kernels) and persist them beside the specs; a
+    reference without a snapshot is a capture bug and raises."""
+    refs = referenced_values(payload)
+    missing = [r for r in refs if r not in values]
+    if missing:
+        raise MissingValueSnapshot(
+            f"{len(missing)} value snapshot(s) referenced by the specs were "
+            f"not captured (first: {missing[0][:12]}...)"
+        )
+    pruned = ValueStore()
+    for r in refs:
+        pruned._arrays[r] = values.get(r)
+    return pruned.save(sidecar_path)

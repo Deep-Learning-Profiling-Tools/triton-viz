@@ -29,7 +29,6 @@ Usage:
 from __future__ import annotations
 
 import argparse
-import json
 import sys
 from pathlib import Path
 
@@ -37,6 +36,7 @@ from evaluation.capture_common import (
     SIG_FOR_DTYPE,
     LaunchRecorder,
     run_case_capture,
+    write_case_result,
 )
 from evaluation.kernels._aiter_loader import (
     AITER_ROOT,
@@ -104,17 +104,17 @@ def _capture_one(case: str, out: Path) -> None:
             continue
         kept[slot] = rec
 
-    out.write_text(
-        json.dumps(
-            {
-                "case": case,
-                "family": case.removeprefix("test_"),
-                "error": error,
-                "kernels": kept,
-                "skipped_kernels": skipped,
-                "triton": triton.__version__,
-            }
-        )
+    write_case_result(
+        {
+            "case": case,
+            "family": case.removeprefix("test_"),
+            "error": error,
+            "kernels": kept,
+            "skipped_kernels": skipped,
+            "triton": triton.__version__,
+            "_values": recorder.values,  # the int/bool snapshots, beside the JSON
+        },
+        out,
     )
 
 

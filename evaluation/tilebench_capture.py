@@ -33,7 +33,6 @@ Usage (GPU machine):
 from __future__ import annotations
 
 import argparse
-import json
 import os
 from pathlib import Path
 
@@ -151,7 +150,11 @@ CASES: dict = {op: (op, False, _tb_case(op)) for op in OPS}
 
 
 def main() -> None:
-    from evaluation.capture_common import capture_one_case, run_case_capture
+    from evaluation.capture_common import (
+        capture_one_case,
+        run_case_capture,
+        write_case_result,
+    )
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--one")
@@ -166,7 +169,7 @@ def main() -> None:
             dtype_name="float32",
             module_prefix="benchmarks.operators.",
         )
-        out.write_text(json.dumps(result, indent=1))
+        write_case_result(result, out)
         return
 
     commit = tilebench_commit()

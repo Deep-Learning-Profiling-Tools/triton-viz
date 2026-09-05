@@ -5,7 +5,8 @@ A specs JSON produced by a case-driven capture driver
 machine: each kernel is resolved by importing its recorded ``module``
 and unwrapping the @triton.autotune/@triton.heuristics stack to the
 JITFunction; args come from the captured descriptors with small
-int/bool tensors value-exact.
+int/bool tensors value-exact (inline up to the cap, else from the
+``<corpus>_values.npz`` sidecar beside the specs).
 
 Fail-loud invariants: the specs bind by module path + kernel name into
 the INSTALLED package — on version drift kernels move/rename and rows
@@ -20,7 +21,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from evaluation.capture_common import SIG_FOR_DTYPE, make_args_fn
+from evaluation.capture_common import SIG_FOR_DTYPE, ValueStore, make_args_fn
 from evaluation.spec import Corpus, LaunchSpec
 
 
@@ -118,6 +119,9 @@ def build_captured_corpus(
 
     corpus = Corpus(corpus_name)
     payload = json.loads(specs_path.read_text())
+    # the value snapshots above the inline cap (lazy: read on first use;
+    # a referenced-but-missing snapshot is a hard error at make_args time)
+    values = ValueStore.beside(specs_path)
     corpus.provenance = {
         f"{corpus_name}_upstream": payload["upstream"],
         f"{corpus_name}_captured_version": payload[version_field],
@@ -186,7 +190,7 @@ def build_captured_corpus(
                     kernel_fn=kernel,
                     signature=signature,
                     constexprs=constexprs,
-                    make_args=make_args_fn(spec["args"], spec["aliases"]),
+                    make_args=make_args_fn(spec["args"], spec["aliases"], values),
                     grid=tuple(spec["grid"]),
                     expected="race-free",
                     pattern=f"{corpus_name}_{entry['family']}",

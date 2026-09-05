@@ -24,7 +24,7 @@ import json
 from pathlib import Path
 from typing import Any
 
-from evaluation.capture_common import SIG_FOR_DTYPE, make_args_fn
+from evaluation.capture_common import ValueStore, SIG_FOR_DTYPE, make_args_fn
 from evaluation.spec import Corpus, LaunchSpec
 
 VENDOR_DIR = Path(__file__).parent / "tritonbench_g_v1"
@@ -61,6 +61,7 @@ def _build() -> Corpus:
         "tritonbench_upstream": payload["upstream"],
         "tritonbench_commit": payload["upstream_commit"],
     }
+    values = ValueStore.beside(SPECS_PATH)  # int/bool snapshots above the cap
     section_cache: dict[str, dict] = {}
 
     for fname, entry in sorted(payload["files"].items()):
@@ -119,7 +120,7 @@ def _build() -> Corpus:
                     kernel_fn=kernel,
                     signature=signature,
                     constexprs=constexprs,
-                    make_args=make_args_fn(spec["args"], spec["aliases"]),
+                    make_args=make_args_fn(spec["args"], spec["aliases"], values),
                     grid=tuple(spec["grid"]),
                     expected="race-free",
                     pattern="tritonbench_g",

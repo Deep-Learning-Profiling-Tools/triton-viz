@@ -46,7 +46,7 @@ def _capture_one(path: Path) -> dict:
 
     from evaluation.capture_common import LaunchRecorder
 
-    recorder = LaunchRecorder()
+    recorder = LaunchRecorder()  # owns the int/bool value snapshots
     src = path.read_text()
     error = None
     with recorder.hooked():
@@ -63,6 +63,7 @@ def _capture_one(path: Path) -> dict:
         "kernels": recorder.captured,
         "skipped_kernels": recorder.skipped,
         "triton": triton.__version__,
+        "_values": recorder.values,  # written beside the JSON, not into it
     }
 
 
@@ -72,14 +73,22 @@ def main() -> None:
     ap.add_argument("--out", type=Path)
     args = ap.parse_args()
 
+    from evaluation.capture_common import (
+        ValueStore,
+        prune_and_save_sidecar,
+        values_sidecar_of,
+        write_case_result,
+    )
+
     if args.one:
         result = _capture_one(args.one)
-        args.out.write_text(json.dumps(result, indent=1))
+        write_case_result(result, args.out)
         return
 
     files = sorted(VENDOR_DIR.glob("*.py"))
     merged: dict[str, dict] = {}
     failures: dict[str, str] = {}
+    values = ValueStore()
     for i, f in enumerate(files, 1):
         # private per-run temp file: /tmp is shared and sticky, a fixed
         # path can collide with a concurrent sweep or another user's
@@ -108,6 +117,9 @@ def main() -> None:
                 print(f"[{i}/{len(files)}] {f.name}: CRASH")
                 continue
             result = json.loads(out.read_text())
+            child_values = values_sidecar_of(out)
+            if child_values.exists():
+                values.merge(ValueStore(child_values))
         except subprocess.TimeoutExpired:
             failures[f.name] = f"timeout after {PER_FILE_TIMEOUT_S}s"
             print(f"[{i}/{len(files)}] {f.name}: TIMEOUT")
@@ -118,6 +130,7 @@ def main() -> None:
             continue
         finally:
             out.unlink(missing_ok=True)
+            values_sidecar_of(out).unlink(missing_ok=True)
         if result["error"] and not result["kernels"]:
             failures[f.name] = result["error"][:300]
             print(f"[{i}/{len(files)}] {f.name}: ERROR ({result['error'][:80]})")
@@ -138,10 +151,14 @@ def main() -> None:
         "capture_failures": failures,
     }
     SPECS_PATH.write_text(json.dumps(payload, indent=1) + "\n")
+    sidecar = prune_and_save_sidecar(
+        values, payload, ValueStore.beside(SPECS_PATH).path
+    )
     total = sum(len(r["kernels"]) for r in merged.values())
     print(
         f"\ncaptured {total} launches from {len(merged)}/{len(files)} files "
         f"({len(failures)} failures) -> {SPECS_PATH}"
+        + (f" (+ {len(values)} value snapshots -> {sidecar})" if sidecar else "")
     )
 
 
