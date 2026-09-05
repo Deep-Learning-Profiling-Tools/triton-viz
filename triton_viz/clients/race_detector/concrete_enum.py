@@ -991,6 +991,10 @@ class _Analyzer:
         order = np.argsort(ws, kind="stable")
         ws, we, wo = ws[order], we[order], wo[order]
         prefix_max_end = np.maximum.accumulate(we)
+        # intervals are appended per operation in op-id order, so an op's
+        # intervals are one contiguous slice of the buffer: locate them by
+        # bisection instead of a full scan per load (the scan made the
+        # check quadratic in the number of value-source loads)
         processed: set[int] = set()
         while worklist:
             load = worklist.pop()
@@ -998,9 +1002,10 @@ class _Analyzer:
                 continue
             processed.add(load)
             rec.op_value_source[load] = True
-            load_mask = self.ops == load
+            lo = int(np.searchsorted(self.ops, load, side="left"))
+            hi = int(np.searchsorted(self.ops, load, side="right"))
             lpid, lseq = rec.op_pid_index[load], rec.op_seq[load]
-            for s, e in zip(self.starts[load_mask], self.ends[load_mask]):
+            for s, e in zip(self.starts[lo:hi], self.ends[lo:hi]):
                 hi = int(np.searchsorted(ws, e, side="left"))  # writes with start < e
                 j = hi - 1
                 while j >= 0 and prefix_max_end[j] > s:
@@ -1364,6 +1369,23 @@ def enumerate_launch(
         recorder.cleanup()
         cfg.num_sms = saved_num_sms
 
+    if reason is None:
+        # the analysis runs under the remaining budget too: a slow sweep
+        # must end in a named refusal, never in a row-level timeout
+        try:
+            remaining = None if timeout_s is None else max(1.0, timeout_s - run_s)
+            if remaining is not None:
+                with _replay_watchdog(remaining):
+                    outcome = analyze(recorder, max_reports=max_reports)
+            else:
+                outcome = analyze(recorder, max_reports=max_reports)
+            outcome.reports = [
+                _translate_report(r, clone_spans) for r in outcome.reports
+            ]
+        except TimeoutError as e:
+            reason = f"timeout: footprint analysis exceeded the budget ({e})"
+        except Exception as e:  # noqa: BLE001
+            reason = f"analysis-error: {type(e).__name__}: {e}"
     if reason is not None:
         outcome = EnumOutcome(
             "unsupported",
@@ -1372,9 +1394,6 @@ def enumerate_launch(
             n_instances=len(recorder.pids),
             n_ops=len(recorder.op_kind),
         )
-    else:
-        outcome = analyze(recorder, max_reports=max_reports)
-        outcome.reports = [_translate_report(r, clone_spans) for r in outcome.reports]
     if recorder.instance_times:
         outcome.instance_s = statistics.median(recorder.instance_times)
         outcome.max_instance_s = max(recorder.instance_times)

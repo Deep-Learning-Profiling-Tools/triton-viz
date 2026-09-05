@@ -379,3 +379,21 @@ def test_projection_refuses_only_beyond_the_factor():
     assert projected_cost_refusal(60.0, [5.0] * 10, 10, 20.0) is None
     # the factor is a parameter
     assert projected_cost_refusal(6.0, [0.5] * 10, 100, 30.0, factor=1.0) is not None
+
+
+def test_value_source_check_scales_to_many_loads():
+    """Regression: the premise check located each value-source load's
+    intervals by a full scan, making it quadratic (rope_fwd_3d: 11840
+    instances x 7 ops took minutes after an 81 s run). Now bisection."""
+    import time
+
+    rec = _rec()
+    n = 6000
+    for p in range(n):
+        pid = _pid(rec, p)
+        _op(rec, pid, _KIND_LOAD, [BASE + 4 * p], value_source=True)
+        _op(rec, pid, _KIND_STORE, [BASE + (1 << 24) + 4 * p])
+    t0 = time.perf_counter()
+    out = analyze(rec)
+    assert out.status == "ok"
+    assert time.perf_counter() - t0 < 5.0

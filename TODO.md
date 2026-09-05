@@ -955,6 +955,94 @@ aiter_ops rows at L1, jobs=1: 36 proved@enum, 16 residual):
   calls, an `Assume failed` on rebuilt inputs, a `to_tensor` on None;
   all reproduced with the plain C2 replay recorder).
 
+Change-surface run DONE (2026-09-04, all 492 pinned-abstain rows at
+L1, jobs=1, 200 s per row, 1.42 h; commit 5ba8b6a; report:
+`evaluation/CHANGE_SURFACE_L1.md`, dataset
+`evaluation/results/change_surface_L1.jsonl`):
+
+- 407 decided (391 proved@enum, 16 race@enum), 1 decided by commits
+  since the pin, 84 residual = 7.9% of 1062 (from 46.3%). Residual by
+  kind: 29 interpreter-error, 23 cuTile, 12 row-crash, 7
+  atomic-return, 6 projected-cost, 4 instance-ceiling, 3 row-timeout.
+- The 16 race@enum rows, triaged: 11 capture-rebuild artifacts
+  (index tensors above the 8192-element snapshot cap rebuilt at
+  random, sometimes next to a snapshotted tensor derived from the
+  real one: masked_select's part_sums vs its mask), 2 A8-class
+  out-of-bounds (iplr varlen bwd; chunk_gla merge whose A is captured
+  8x too small), 3 model races with identical values (unique_dup's
+  duplicate lanes, ttt layer_norm_bwd's overlapping dx tiles x2).
+  None counted (Leads-30 discipline). The design's 7.3 expectation
+  (permutation-scatter rows prove clean) failed for the capture
+  reason, not a rung reason.
+- The 12 crashes are deterministic, all inside the rung, all
+  SIGSEGV/SIGABRT from out-of-bounds stores on raw host pointers
+  (L0 abstains cleanly in 3 s); subprocess isolation contained them,
+  but two rows emitted output before dying, so an OOB kernel's
+  verdict is not trustworthy. The in-bounds premise is enforced by
+  fail-stop on the symbolic frontends and NOT yet by the rung.
+- [ ] Enforce the in-bounds premise in the rung: check every
+      access's active-lane byte range against the cloned tensors'
+      spans in the before-callback, refuse by name (`out-of-bounds`)
+      before the interpreter dereferences (turns the 12 crashes into
+      named abstentions and the 2 OOB race@enum rows into refusals).
+      A semantic change: rerun the affected rows after. Awaiting Hao.
+- rope_fwd_3d budget regression (81.9 s in the first stretch, >200 s
+  in the full run): DIAGNOSED AND FIXED. The memory-taint rewrite of
+  the premise check scanned the whole interval buffer per
+  value-source load (quadratic; 35520 loads x 97.6M intervals) and
+  ran outside the watchdog. Now bisection over the op-sorted buffer,
+  and the analysis phase runs under the remaining budget (a slow
+  sweep ends in a named `timeout:` refusal, never a row-level
+  timeout); pinned by a 6000-load scaling test. The row decides
+  proved@enum in 157 s through the harness (85 s run, 68 s sweep).
+- [ ] Strided footprints: rope's accesses do not coalesce (916
+      intervals per op, 97.6M intervals, 2.3 GB for 11840 instances;
+      a 65536-instance row of this shape needs ~12 GB and the sweep
+      ~6 min). Design sketch: per-op footprint = bounding box +
+      uniform-stride run (base, stride, count, segment length) with
+      raw intervals as the fallback; sweep boxes; same-stride runs
+      compare as rectangles (row range x column residue) in O(1);
+      materialize lanes only where boxes of distinct instances
+      overlap; atomic compatibility by lane alignment. A rewrite of
+      the soundness-critical sweep: do it as its own step with the
+      synthetic pins, the kernel-level tests, and the
+      cross-validation rerun.
+
+## 3p. Corpus capture: every int/bool tensor value-snapshotted (branch `route1-concrete-enumeration`, 2026-09-04; recapture awaits Hao's go)
+
+Decision (Hao, 2026-09-04): capture and STORE the real values of
+every integer and bool tensor (floats stay by-descriptor), replacing
+the 8192-element inline cap that made the L1 rung's 11
+capture-artifact rows. Landed on the branch, backward compatible
+(every existing spec rebuilds unchanged, verified over all 1060 rows):
+
+- `capture_common.ValueStore`: content-addressed (SHA-256 of the raw
+  bytes) compressed `.npz` sidecar, `<corpus>_values.npz` beside the
+  specs JSON (gitignored: ~200 MB raw across the corpora, tens of MB
+  compressed; the hashes live in the JSON, so integrity is checked on
+  read; git LFS is the alternative if Hao wants it tracked). Small
+  int/bool snapshots (<= 8192) stay INLINE as before; larger ones
+  carry `values_ref`. A referenced-but-missing snapshot is a HARD
+  error (`MissingValueSnapshot`), never a random rebuild. A capture
+  without a store marks `values_dropped` instead of pretending.
+- `LaunchRecorder` owns a store; the per-case child processes write
+  it beside their JSON (`write_case_result`), `run_case_capture` and
+  `tritonbench_capture` merge the children's stores, prune to the
+  referenced hashes and save the corpus sidecar; both loaders
+  (`kernels/_captured.py`, `kernels/tritonbench_g.py`) pass
+  `ValueStore.beside(specs)` to `make_args_fn`. Fingerprints include
+  the reference, so dedup stays content-based.
+- Tests: `tests/unit/test_capture_values.py` (10).
+- [ ] Recapture all 8 Triton corpora on the GPU machine (this one:
+      the upstream environments are in the venv), then the pinned
+      rerun at L0 AND L1 on the new contents (Hao: together). Contents
+      change every analyzed-launch verdict's basis, so the paper's
+      66 proved@interp and the L1 numbers move; a fresh pin.
+- Note: destindex-class rows (upstream tests that draw duplicate
+  indices with randint, casebook A6) will still say race@enum on the
+  real snapshot; that is the honest analyzed-launch reading of the
+  upstream test's inputs.
+
 Open (blocking any paper use of L1; default stays L0 until done):
 
 - [ ] Change-surface diff: every currently-abstaining real-code row
