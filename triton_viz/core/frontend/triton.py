@@ -903,6 +903,28 @@ class TritonFrontend(Frontend):
         self._loop_ast_methods = {}
         self._loop_ast_patched = False
 
+    @staticmethod
+    def _patch_numpy2_scalar_index(scope: _LangPatchScope) -> None:
+        """numpy-2 shim over triton's interpreter patch: _patch_lang_tensor
+        installs ``__index__ = int(self.handle.data)``, and numpy 2 refuses
+        ``int()`` on the shape-(1,) arrays the interpreter wraps scalar
+        kernel args in — ``range(0, n_scalar, BLOCK)`` inside a kernel dies
+        with "only 0-dimensional arrays can be converted to Python scalars"
+        (and the C2/C3 replay of scalar-bound loop kernels degraded to
+        unavailable). Re-install a size-1-safe version AFTER triton's
+        patch; multi-element tensors keep the original error shape."""
+
+        def _index(self: Any) -> int:
+            data = self.handle.data
+            if getattr(data, "size", None) == 1 and hasattr(data, "item"):
+                return int(data.item())
+            return int(data)
+
+        # tl.tensor and tl.core.tensor alias the same class; the set() keeps
+        # the patch single-shot if they ever diverge.
+        for tensor_cls in {tl.tensor, tl.core.tensor}:
+            scope.set_attr(tensor_cls, "__index__", _index)
+
     def patch_lang(self, fn, client_manager=None) -> _LangPatchScope:
         # Snapshot before calling Triton's patcher because Triton mutates many
         # attributes in-place and older Triton versions do not retain enough
@@ -913,6 +935,7 @@ class TritonFrontend(Frontend):
             _patch_builtin(module, interpreter_builder, scope)
         self._patch_triton_inline_asm(scope)
         self._patch_triton_semantic_to_tensor(scope)
+        self._patch_numpy2_scalar_index(scope)
         scope.set_attr(knobs.runtime, "interpret", True)
         return scope
 

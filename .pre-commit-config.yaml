@@ -12,8 +12,8 @@
 #
 # See https://github.com/pre-commit/pre-commit
 
-# extern content
-exclude: extern
+# extern content + vendored corpora (byte-identical to upstream)
+exclude: (extern|evaluation/kernels/tritonbench_g_v1/)
 
 repos:
 
@@ -60,6 +60,9 @@ repos:
   rev: "v4.5.0"
   hooks:
   - id: check-added-large-files
+    # captured-launch spec JSONs (evaluation/kernels/*_specs.json) carry
+    # exact int/bool value snapshots and legitimately exceed 500 KB
+    args: ["--maxkb=1500"]
   - id: check-case-conflict
   - id: check-docstring-first
   - id: check-merge-conflict
@@ -117,6 +120,9 @@ repos:
   rev: "v2.2.6"
   hooks:
   - id: codespell
+    # machine-generated capture payloads (embedded IR text carries SSA
+    # names codespell misreads as typos)
+    exclude: ^evaluation/kernels/.*_specs\.json$
 
 # Check for common shell mistakes
 - repo: https://github.com/shellcheck-py/shellcheck-py

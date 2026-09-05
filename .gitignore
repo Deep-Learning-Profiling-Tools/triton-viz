@@ -172,3 +172,7 @@ benchmarks/*.json
 triton_viz/version.py
 .subagents/
 subagent*.txt
+evaluation/results/
+# int/bool value-snapshot sidecars of the captured corpora (content-addressed,
+# hashes live in the specs JSON; regenerate with the capture drivers)
+evaluation/kernels/*_values.npz
