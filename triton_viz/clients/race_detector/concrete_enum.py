@@ -77,6 +77,13 @@ silently:
                     modest over-estimates running; never a verdict, and
                     the watchdog stays the bound when the projection
                     under-estimates.
+  out-of-bounds     an access's active lanes fall outside every tensor
+                    argument's storage (the paper's in-bounds premise,
+                    which the symbolic frontends enforce by fail-stop):
+                    refused BEFORE the interpreter dereferences, so an
+                    out-of-bounds kernel can neither corrupt the process
+                    nor produce a verdict. Masked-off lanes are free to
+                    point anywhere (the tail-guard idiom).
   instance-ceiling  the grid has more than ``ENUM_MAX_INSTANCES``
                     instances (refused before executing anything: per-
                     instance execution cannot be vectorized across
@@ -417,11 +424,24 @@ class ConcreteFootprintRecorder(Client):
 
     NAME = "concrete_footprint_recorder"
 
-    def __init__(self, budget_s: float | None = None) -> None:
+    def __init__(
+        self,
+        budget_s: float | None = None,
+        bounds: list[tuple[int, int]] | None = None,
+    ) -> None:
         super().__init__()
         # the caller's wall-clock budget for the run (the watchdog's
         # value); drives the projected-cost refusal, None disables it
         self.budget_s = budget_s
+        # the in-bounds premise: the byte spans [lo, hi) of the tensor
+        # arguments' storages (the clones the run executes on); every
+        # active lane of every access must fall inside one span, checked
+        # BEFORE the interpreter dereferences. None disables the check
+        # (standalone recorders without a known memory map).
+        spans = sorted(bounds or [])
+        self._span_lo = np.asarray([lo for lo, _ in spans], dtype=np.int64)
+        self._span_hi = np.asarray([hi for _, hi in spans], dtype=np.int64)
+        self.check_bounds = bounds is not None
         # per-op metadata, parallel lists indexed by op id
         self.op_pid_index: list[int] = []
         self.op_seq: list[int] = []
@@ -798,6 +818,8 @@ class ConcreteFootprintRecorder(Client):
             ).reshape(-1)
             data = data[m]
         elem = max(1, int(ptr.get_element_ty().primitive_bitwidth) // 8)
+        if self.check_bounds and data.size:
+            self._check_bounds(kind, data, elem)
         scope_code = (
             self._normalize_scope(scope) if kind in (_KIND_RMW, _KIND_CAS) else 0
         )
@@ -847,6 +869,29 @@ class ConcreteFootprintRecorder(Client):
                 starts = uniq[np.concatenate(([0], brk + 1))]
                 ends = uniq[np.concatenate((brk, [uniq.size - 1]))] + elem
             self.intervals.append(starts, ends, op_id)
+
+    def _check_bounds(self, kind: int, data: np.ndarray, elem: int) -> None:
+        """Refuse by name when an active lane lies outside every tensor
+        argument's storage. Cheap: min/max over the lanes plus one
+        bisection (a few microseconds per access)."""
+        lo = int(data.min())
+        hi = int(data.max()) + elem
+        i = int(np.searchsorted(self._span_lo, lo, side="right")) - 1
+        if i >= 0 and hi <= self._span_hi[i]:
+            return
+        if i < 0 or lo >= self._span_hi[i]:
+            bad = lo  # the lowest lane is below or past every span
+        else:
+            past = data + elem > self._span_hi[i]
+            bad = int(data[past].min()) if past.any() else lo
+        site = capture_current_source_location()
+        raise ConcreteEnumRefusal(
+            "out-of-bounds",
+            f"the {_KIND_NAMES[kind]} at {_fmt_site(site)} (instance "
+            f"{self._current_pid()}) touches byte {bad:#x} outside every tensor "
+            f"argument ({len(self._span_lo)} storages): the in-bounds premise "
+            "fails and the access is not executed",
+        )
 
     def _pre_load(
         self, ptr: Any, mask: Any, keys: Any = None, *a: Any, **k: Any
@@ -1340,7 +1385,9 @@ def enumerate_launch(
     cloned_args = tuple(_clone(a) for a in args)
     cloned_kwargs = {k: _clone(v) for k, v in kwargs.items()}
 
-    recorder = ConcreteFootprintRecorder(budget_s=timeout_s)
+    recorder = ConcreteFootprintRecorder(
+        budget_s=timeout_s, bounds=[(lo, hi) for lo, hi, _ in clone_spans]
+    )
     saved_num_sms = cfg.num_sms
     cfg.num_sms = 1
     n_before = len(trace_mod.launches)

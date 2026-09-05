@@ -980,12 +980,17 @@ L1, jobs=1, 200 s per row, 1.42 h; commit 5ba8b6a; report:
   but two rows emitted output before dying, so an OOB kernel's
   verdict is not trustworthy. The in-bounds premise is enforced by
   fail-stop on the symbolic frontends and NOT yet by the rung.
-- [ ] Enforce the in-bounds premise in the rung: check every
-      access's active-lane byte range against the cloned tensors'
-      spans in the before-callback, refuse by name (`out-of-bounds`)
-      before the interpreter dereferences (turns the 12 crashes into
-      named abstentions and the 2 OOB race@enum rows into refusals).
-      A semantic change: rerun the affected rows after. Awaiting Hao.
+- [x] In-bounds premise enforced in the rung (Hao, 2026-09-05):
+      `ConcreteFootprintRecorder(bounds=...)` checks every access's
+      active lanes against the cloned storages' spans in the
+      before-callback and refuses `out-of-bounds` by name before the
+      interpreter dereferences (masked-off lanes exempt; the storage,
+      not the view, is the bound; ~4 us per access, 1-4% end to end).
+      All 14 affected rows (12 crashes, 2 OOB race@enum) re-run as
+      named refusals in 2.6-6.5 s with no signal; cross-validation
+      unchanged (35/16/0); 5 new kernel-level pins; report addendum in
+      `evaluation/CHANGE_SURFACE_L1.md`. Restated: 391 proved@enum,
+      14 race@enum, 86 residual (8.1%).
 - rope_fwd_3d budget regression (81.9 s in the first stretch, >200 s
   in the full run): DIAGNOSED AND FIXED. The memory-taint rewrite of
   the premise check scanned the whole interval buffer per

@@ -726,3 +726,72 @@ def test_projection_leaves_a_launch_that_fits_alone():
     )
     assert o.status == "ok"
     assert o.n_instances == 8
+
+
+# ── the in-bounds premise ──────────────────────────────────────────
+
+
+@triton.jit
+def _oob_store_kernel(out_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    tl.store(out_ptr + offs, 1.0)  # no mask: the last instance runs past n
+
+
+def test_out_of_bounds_store_refuses_by_name_before_executing():
+    out = torch.zeros(6)
+    o = _run(_oob_store_kernel, (2,), out, 6, BLOCK=4)
+    assert o.status == "unsupported"
+    assert o.reason.startswith("out-of-bounds:")
+    assert "store" in o.reason and "instance (1, 0, 0)" in o.reason
+    # instance 0 executed, instance 1 was refused at its first access
+    assert o.n_instances == 2
+    assert o.n_ops == 1
+
+
+@triton.jit
+def _oob_load_kernel(x_ptr, out_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    v = tl.load(x_ptr + offs)  # unmasked read past x
+    tl.store(out_ptr + offs, v, mask=offs < n)
+
+
+def test_out_of_bounds_load_refuses_too():
+    o = _run(_oob_load_kernel, (2,), torch.zeros(6), torch.zeros(8), 6, BLOCK=4)
+    assert o.status == "unsupported"
+    assert o.reason.startswith("out-of-bounds:")
+    assert "load" in o.reason
+
+
+def test_masked_off_lanes_may_point_anywhere():
+    # the tail-guard idiom: lanes past n exist as pointers but are masked
+    o = _run(_masked_tail_kernel, (3,), torch.zeros(10), 10, BLOCK=4)
+    assert o.status == "ok"
+
+
+@triton.jit
+def _view_kernel(x_ptr, BLOCK: tl.constexpr):
+    offs = tl.arange(0, BLOCK)
+    tl.store(x_ptr + offs, 1.0)
+
+
+def test_bounds_are_the_storage_not_the_view():
+    # a view into the middle of a storage: writing past the view's end but
+    # inside the storage is in bounds for the premise (the model's bound is
+    # the allocation); writing past the storage is not
+    base = torch.zeros(16)
+    o = _run(_view_kernel, (1,), base[4:8], BLOCK=8)  # [4, 12) of 16: inside
+    assert o.status == "ok"
+    o = _run(_view_kernel, (1,), base[12:16], BLOCK=8)  # [12, 20): past
+    assert o.status == "unsupported"
+    assert o.reason.startswith("out-of-bounds:")
+
+
+def test_bounds_check_is_off_without_a_memory_map():
+    from triton_viz.clients.race_detector.concrete_enum import (
+        ConcreteFootprintRecorder,
+    )
+
+    assert ConcreteFootprintRecorder().check_bounds is False
+    assert ConcreteFootprintRecorder(bounds=[]).check_bounds is True
