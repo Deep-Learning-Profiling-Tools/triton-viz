@@ -84,8 +84,10 @@ def _lbd_ttir(sem, gate="num_programs"):
         "%pid = tt.get_program_id x : i32",
         "%p = tt.addptr %partial_ptr, %pid : !tt.ptr<f32>, i32",
         "tt.store %p, %cst : !tt.ptr<f32>",
+        "gpu.barrier",  # the guarded idiom's fences (design-fence-order.md)
         f"%old = tt.atomic_rmw add, {sem}, gpu, %counter_ptr, %c1, %true : "
         "(!tt.ptr<i32>, i32, i1) -> i32",
+        "gpu.barrier",
         *gate_lines,
         "%v = tt.load %partial_ptr, %done : !tt.ptr<f32>",
         "tt.store %out_ptr, %v, %done : !tt.ptr<f32>",

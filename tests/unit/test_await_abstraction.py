@@ -200,6 +200,7 @@ def _prod_cons_ttir(*, writer_sem="release", spin_sem="acquire", scope="gpu"):
         "%isp = arith.cmpi eq, %pid, %c0 : i32",
         "scf.if %isp {",
         "tt.store %data_ptr, %c1 : !tt.ptr<i32>",
+        "gpu.barrier",  # the guarded idiom's fences (design-fence-order.md)
         f"%x = tt.atomic_rmw exch, {writer_sem}, {scope}, %flag_ptr, %c1, %true : "
         "(!tt.ptr<i32>, i32, i1) -> i32",
         "} else {",
@@ -211,6 +212,7 @@ def _prod_cons_ttir(*, writer_sem="release", spin_sem="acquire", scope="gpu"):
         "} do {",
         "scf.yield",
         "}",
+        "gpu.barrier",
         "%v = tt.load %data_ptr : !tt.ptr<i32>",
         "%op = tt.addptr %out_ptr, %pid : !tt.ptr<i32>, i32",
         "tt.store %op, %v : !tt.ptr<i32>",

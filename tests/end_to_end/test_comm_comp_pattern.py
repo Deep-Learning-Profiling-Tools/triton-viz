@@ -41,10 +41,12 @@ def _comm_comp_kernel(
     if pid < N_COMM:
         offs = pid * BLOCK + tl.arange(0, BLOCK)
         tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))
+        tl.debug_barrier()  # the guarded idiom's fences (design-fence-order.md)
         tl.atomic_xchg(sem_ptr, 1, sem="release")
     else:
         while tl.atomic_add(sem_ptr, 0, sem="acquire") != N_COMM:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(payload_ptr + offs)
         tl.store(out_ptr + (pid - N_COMM) * BLOCK + tl.arange(0, BLOCK), v)
@@ -58,10 +60,12 @@ def _relaxed_poll_kernel(
     if pid < N_COMM:
         offs = pid * BLOCK + tl.arange(0, BLOCK)
         tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))
+        tl.debug_barrier()  # the guarded idiom's fences (design-fence-order.md)
         tl.atomic_xchg(sem_ptr, 1, sem="release")
     else:
         while tl.atomic_add(sem_ptr, 0, sem="relaxed") != N_COMM:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(payload_ptr + offs)
         tl.store(out_ptr + (pid - N_COMM) * BLOCK + tl.arange(0, BLOCK), v)
@@ -75,10 +79,12 @@ def _poll_initial_kernel(
     if pid < N_COMM:
         offs = pid * BLOCK + tl.arange(0, BLOCK)
         tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))
+        tl.debug_barrier()  # the guarded idiom's fences (design-fence-order.md)
         tl.atomic_xchg(sem_ptr, 1, sem="release")
     else:
         while tl.atomic_add(sem_ptr, 0, sem="acquire") != 0:
             pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(payload_ptr + offs)
         tl.store(out_ptr + (pid - N_COMM) * BLOCK + tl.arange(0, BLOCK), v)
@@ -92,11 +98,13 @@ def _role_skip_kernel(
     if pid < N_COMM:
         offs = pid * BLOCK + tl.arange(0, BLOCK)
         tl.store(payload_ptr + offs, (offs + 1).to(tl.float32))
+        tl.debug_barrier()  # the guarded idiom's fences (design-fence-order.md)
         tl.atomic_xchg(sem_ptr, 1, sem="release")
     else:
         if pid == N_COMM:
             while tl.atomic_add(sem_ptr, 0, sem="acquire") != N_COMM:
                 pass
+        tl.debug_barrier()
         offs = tl.arange(0, BLOCK)
         v = tl.load(payload_ptr + offs)
         tl.store(out_ptr + (pid - N_COMM) * BLOCK + tl.arange(0, BLOCK), v)

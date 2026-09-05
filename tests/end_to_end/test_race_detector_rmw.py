@@ -60,7 +60,9 @@ def _line_no(kernel, needle: str) -> int:
 def _lbd_acq_rel_kernel(partial_ptr, counter_ptr, out_ptr):
     pid = tl.program_id(0)
     tl.store(partial_ptr + pid, 1)
+    tl.debug_barrier()
     old = tl.atomic_add(counter_ptr, 1, sem="acq_rel")
+    tl.debug_barrier()
     done = old == 3
     p = tl.load(partial_ptr + 0, mask=done, other=0)
     tl.store(out_ptr, p, mask=done)
@@ -70,7 +72,9 @@ def _lbd_acq_rel_kernel(partial_ptr, counter_ptr, out_ptr):
 def _lbd_relaxed_kernel(partial_ptr, counter_ptr, out_ptr):
     pid = tl.program_id(0)
     tl.store(partial_ptr + pid, 1)
+    tl.debug_barrier()
     old = tl.atomic_add(counter_ptr, 1, sem="relaxed")
+    tl.debug_barrier()
     done = old == 3
     p = tl.load(partial_ptr + 0, mask=done, other=0)
     tl.store(out_ptr, p, mask=done)

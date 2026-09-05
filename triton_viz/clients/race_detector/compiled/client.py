@@ -106,6 +106,12 @@ class CompiledRaceDetector(Client):
         # every level. Stamped into the verdict attributes so a row records
         # the depth it was run at.
         self.ladder_level = parse_ladder_level(ladder_level)
+        # Route 2's "+content" qualifier: finalize() resets it per launch
+        # and _solve_one_graph accumulates it; initialized here as well
+        # because the evaluation's cuTile track drives _solve_one_graph on
+        # a fresh client without finalize() (the 2026-09-05 regression:
+        # every solved cuTile row died with an AttributeError).
+        self.last_global_content_qualified = False
         # C2: replay SAT witnesses under the interpreter to classify them
         # confirmed/unconfirmed. Costs a pre-launch tensor snapshot (capped)
         # and, only when a SAT exists, an interpreter run of two blocks.
@@ -857,6 +863,9 @@ class CompiledRaceDetector(Client):
         # the ladder-depth stamp (ladder.py): every verdict records the
         # depth it was produced at, so datasets cannot mix levels unnoticed
         v["ladder_level"] = self.ladder_level.name
+        # the memory-model switch (config.race_detector_fence_order): the
+        # verdict says which intra-instance order it was produced under
+        v["fence_order"] = bool(cfg.race_detector_fence_order)
         self.last_global_verdict = v
 
     def _run_differential(

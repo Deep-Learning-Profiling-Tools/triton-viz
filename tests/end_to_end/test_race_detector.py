@@ -829,8 +829,10 @@ def _cas_acq_rel_guarded_kernel(flag_ptr, data_ptr, out_ptr):
     is_cons = pid == 1
 
     tl.store(data_ptr, 1, mask=is_prod)
+    tl.debug_barrier()
     cmp = tl.where(is_prod, 0, 1)
     old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acq_rel", scope="gpu")
+    tl.debug_barrier()
     cons_mask = is_cons & (old == 1)
     x = tl.load(data_ptr, mask=cons_mask, other=0)
     tl.store(out_ptr + pid, x, mask=cons_mask)
@@ -866,8 +868,14 @@ def _cas_cta_guarded_kernel(flag_ptr, data_ptr, out_ptr):
 
 @triton.jit
 def _cas_single_program_order_kernel(flag_ptr, data_ptr, out_ptr):
+    # The fenced half of the intra-instance pair (design-fence-order.md
+    # stage 3): under fence order a store and a later load of one instance
+    # are ordered only across tl.debug_barrier; the unfenced half is
+    # test_fence_order.py's store-then-load litmus.
     tl.store(data_ptr, 1)
+    tl.debug_barrier()
     _old = tl.atomic_cas(flag_ptr, 0, 1, sem="acq_rel", scope="gpu")
+    tl.debug_barrier()
     x = tl.load(data_ptr)
     tl.store(out_ptr, x)
 
@@ -1221,12 +1229,14 @@ def _flag_array_cas_acq_rel_guarded_kernel(flag_ptr, data_ptr, out_ptr):
     is_cons = pid == 1
 
     tl.store(data_ptr, 1, mask=is_prod)
+    tl.debug_barrier()
     cmp = tl.where(is_prod, 0, 1)
     # flag_ptr is the START of an 8-element contiguous array. After Patch 2,
     # _initial_atomic_source enumerates per-element initial values up to
     # _MAX_INITIAL_ATOMIC_ELEMENTS (=1024), so this CAS uses rf_init and the
     # closed-world model can build a synchronizes-with edge.
     old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acq_rel", scope="gpu")
+    tl.debug_barrier()
     cons_mask = is_cons & (old == 1)
     x = tl.load(data_ptr, mask=cons_mask, other=0)
     tl.store(out_ptr + pid, x, mask=cons_mask)
@@ -2402,11 +2412,13 @@ def _cas_acquire_on_failure_kernel(flag_ptr, data_ptr, out_ptr):
     is_cons = pid == 1
 
     tl.store(data_ptr, 1, mask=is_prod)
+    tl.debug_barrier()
     # The consumer's cmp=7 can never match (flag stays in {0,1}): its CAS
     # always FAILS — but a failed acquire-CAS still READS the location,
     # and reading the released value is what establishes the sw edge.
     cmp = tl.where(is_prod, 0, 7)
     old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acq_rel", scope="gpu")
+    tl.debug_barrier()
     cons_mask = is_cons & (old == 1)
     x = tl.load(data_ptr, mask=cons_mask, other=0)
     tl.store(out_ptr + pid, x, mask=cons_mask)
@@ -2419,8 +2431,10 @@ def _cas_acquire_on_failure_relaxed_kernel(flag_ptr, data_ptr, out_ptr):
     is_cons = pid == 1
 
     tl.store(data_ptr, 1, mask=is_prod)
+    tl.debug_barrier()
     cmp = tl.where(is_prod, 0, 7)
     old = tl.atomic_cas(flag_ptr, cmp, 1, sem="relaxed", scope="gpu")
+    tl.debug_barrier()
     cons_mask = is_cons & (old == 1)
     x = tl.load(data_ptr, mask=cons_mask, other=0)
     tl.store(out_ptr + pid, x, mask=cons_mask)

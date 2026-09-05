@@ -62,9 +62,12 @@ class Config:
         # Fence-ordered intra-instance semantics (paper design-fence-order.md,
         # option A): program order between DISTINCT tile operations of one
         # instance is a happens-before edge only across a tile-level fence
-        # (tl.debug_barrier). Off = legacy full program order. Staged: the
-        # default flips once the benchmark's guarded kernels carry fences.
-        self.race_detector_fence_order: bool = _is_one("TRITON_VIZ_FENCE_ORDER")
+        # (tl.debug_barrier). ON by default since the stage 5 flip (the
+        # benchmark's guarded kernels carry fences; every pinned run is
+        # fence-ordered). TRITON_VIZ_FENCE_ORDER=0 restores the legacy full
+        # program order for attribution runs; the evaluation stamps the
+        # effective value into every dataset header and row.
+        self.race_detector_fence_order: bool = _is_one("TRITON_VIZ_FENCE_ORDER", "1")
         self.enable_timing: bool = _is_one("ENABLE_TIMING")
         self.report_grid_execution_progress: bool = _is_one(
             "REPORT_GRID_EXECUTION_PROGRESS"

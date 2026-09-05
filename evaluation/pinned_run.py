@@ -9,7 +9,14 @@ committed so the run is reproducible from the repo alone. Protocol:
   1. preconditions: a clean tracked tree (the commit hash is the
      dataset's identity), the level decided, the row budget the level's
      (180 s at L0, 200 s at L1+; ``runner.row_timeout_s``), never the
-     debugging-only process reuse;
+     debugging-only process reuse, and the memory-model switch ON: a
+     pinned run is fence-ordered (paper repo ``design-fence-order.md``,
+     stage 5; ``config.race_detector_fence_order`` defaults to True since
+     the flip commit, so the pinned hash itself carries the semantics),
+     the driver refuses ``TRITON_VIZ_FENCE_ORDER=0`` outside
+     ``--rehearsal``, and the header and every row stamp ``fence_order``
+     (the runner and harness stamp the value their own process ran
+     under; the merge cross-checks every stamp against the run's);
   2. main pass: every corpus through ``runner.run_corpus`` at jobs=1,
      seed 0, one subprocess per row, under a LOAD GUARD (no other
      evaluation process of ours running, load average below a bound)
@@ -37,8 +44,8 @@ per-corpus files ``<corpus>[_L<n>]_pinned.jsonl`` the runner wrote.
 overridden (to exercise the retry pass) or the tree may be dirty.
 
 Usage:
+    python -m evaluation.pinned_run --ladder-level L2
     python -m evaluation.pinned_run --ladder-level L0
-    python -m evaluation.pinned_run --ladder-level L1
     python -m evaluation.pinned_run --rehearsal --corpora golden_smoke --row-timeout 2
 """
 
@@ -63,6 +70,7 @@ from evaluation.runner import (
     row_timeout_s,
     run_corpus,
 )
+from triton_viz.core.config import config as cfg
 from triton_viz.clients.race_detector.ladder import (
     LADDER_LEVEL_NAMES,
     LadderLevel,
@@ -85,7 +93,13 @@ REAL_CODE_CORPORA = (
     "tutorials",
     "aiter_originals",
 )
-LITMUS_CORPORA = ("tritonracebench", "await_sync", "rmw_sync", "golden_smoke")
+LITMUS_CORPORA = (
+    "tritonracebench",
+    "tritonracebench_cutile",  # the cuda.tile twins (results.md E9)
+    "await_sync",
+    "rmw_sync",
+    "golden_smoke",
+)
 ALL_CORPORA = REAL_CODE_CORPORA + LITMUS_CORPORA
 
 RETRY_TIMEOUT_S = 320
@@ -292,9 +306,11 @@ def merge(
     row_timeout: int,
     retry_timeout: int,
     seed: int,
+    fence_order: bool = True,
 ) -> tuple[dict, list[dict]]:
     """The merged, stamped dataset. Every per-corpus file must be a
-    protocol dataset (never the debugging worker-reuse kind)."""
+    protocol dataset (never the debugging worker-reuse kind) produced
+    under the run's memory-model switch (``fence_order``)."""
     header: dict = {
         "header": True,
         "pinned_commit": commit,
@@ -305,6 +321,11 @@ def merge(
         "seed": seed,
         "jobs": 1,
         "worker_reuse": False,
+        # the memory model the run was produced under (design-fence-order.md
+        # stage 5: a pinned run is fence-ordered; the commit's config default
+        # says so, and the header and every row repeat it)
+        "fence_order": fence_order,
+        "fence_order_env": os.environ.get("TRITON_VIZ_FENCE_ORDER"),
         "corpora": {},
     }
     merged: list[dict] = []
@@ -315,6 +336,11 @@ def merge(
                 f"{path}: ladder level {per_corpus_header.get('ladder_level')} "
                 f"in a {level.name} pinned run"
             )
+        if per_corpus_header.get("fence_order") is not fence_order:
+            raise ValueError(
+                f"{path}: fence_order={per_corpus_header.get('fence_order')!r} "
+                f"in a fence_order={fence_order} pinned run"
+            )
         header["corpora"][corpus] = {
             k: v
             for k, v in per_corpus_header.items()
@@ -324,6 +350,12 @@ def merge(
         for row in rows:
             row = dict(row)
             row["corpus"] = corpus
+            if row.get("fence_order") is not fence_order:
+                raise ValueError(
+                    f"{path}: row {row.get('name')!r} ran under "
+                    f"fence_order={row.get('fence_order')!r} in a "
+                    f"fence_order={fence_order} pinned run"
+                )
             retry = retried.get((corpus, row["name"]))
             if retry is not None and retry.get("verdict") not in (None, "error"):
                 row = dict(retry)
@@ -438,6 +470,7 @@ def summary_markdown(
         "",
         f"Rows {len(merged)}, seed {header['seed']}, jobs 1, row budget "
         f"{header['row_timeout_s']} s, retry budget {header['retry_timeout_s']} s, "
+        f"fence order {'ON' if header.get('fence_order', True) else 'OFF (legacy)'}, "
         "one subprocess per row (no worker reuse).",
         "",
         "## Overhead (evaluation.md section 6 recipe, real-code corpora)",
@@ -506,6 +539,13 @@ def run_pinned(
                 "the tracked tree is dirty: a pinned run's identity is its "
                 "commit hash (commit or stash first, or use --rehearsal)"
             )
+        if not cfg.race_detector_fence_order:
+            raise SystemExit(
+                "a pinned run is fence-ordered (design-fence-order.md stage 5): "
+                "TRITON_VIZ_FENCE_ORDER=0 is set in this environment; unset it "
+                "(legacy-order attribution runs are --rehearsal only)"
+            )
+    fence_order = bool(cfg.race_detector_fence_order)
     commit = git_commit(root)
     tag = "REHEARSAL" if rehearsal else "PINNED"
     level_suffix = "" if level == LadderLevel.L0 else f"_{level.name}"
@@ -514,6 +554,7 @@ def run_pinned(
     print(
         f"[pinned] {tag} run at commit {commit}, level {level.name}, "
         f"{len(corpora)} corpora, row budget {row_timeout} s, retry {retry_timeout} s"
+        + (", fence order ON" if fence_order else ", fence order OFF (legacy)")
         + ("" if guard else ", load guard OFF"),
         file=log,
         flush=True,
@@ -522,7 +563,7 @@ def run_pinned(
     files = main_pass(corpora, level, seed, row_timeout, guard, log, suffix)
     retried = retry_pass(files, level, seed, row_timeout, retry_timeout, guard, log)
     header, merged = merge(
-        files, retried, commit, level, row_timeout, retry_timeout, seed
+        files, retried, commit, level, row_timeout, retry_timeout, seed, fence_order
     )
     header["rehearsal"] = rehearsal
     header["retried_rows"] = len(retried)

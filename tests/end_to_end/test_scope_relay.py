@@ -72,12 +72,14 @@ def _scope_relay_cta_kernel(data_ptr, flag_ptr, out_ptr):
     prod = pid == 0
     cons = pid == 1
     tl.store(data_ptr, 1, mask=prod)
+    tl.debug_barrier()
     w_cmp = tl.where(prod, 0, -1)
     tl.atomic_cas(flag_ptr, w_cmp, 1, sem="release", scope="gpu")
     a_cmp = tl.where(cons, 1, -1)
     tl.atomic_cas(flag_ptr, a_cmp, 1, sem="relaxed", scope="cta")
     r_cmp = tl.where(cons, 1, -1)
     r = tl.atomic_cas(flag_ptr, r_cmp, 1, sem="acquire", scope="gpu")
+    tl.debug_barrier()
     ok = cons & (r == 1)
     x = tl.load(data_ptr, mask=ok, other=0)
     tl.store(out_ptr, x, mask=ok)
@@ -89,12 +91,14 @@ def _scope_relay_gpu_kernel(data_ptr, flag_ptr, out_ptr):
     prod = pid == 0
     cons = pid == 1
     tl.store(data_ptr, 1, mask=prod)
+    tl.debug_barrier()
     w_cmp = tl.where(prod, 0, -1)
     tl.atomic_cas(flag_ptr, w_cmp, 1, sem="release", scope="gpu")
     a_cmp = tl.where(cons, 1, -1)
     tl.atomic_cas(flag_ptr, a_cmp, 1, sem="relaxed", scope="gpu")
     r_cmp = tl.where(cons, 1, -1)
     r = tl.atomic_cas(flag_ptr, r_cmp, 1, sem="acquire", scope="gpu")
+    tl.debug_barrier()
     ok = cons & (r == 1)
     x = tl.load(data_ptr, mask=ok, other=0)
     tl.store(out_ptr, x, mask=ok)

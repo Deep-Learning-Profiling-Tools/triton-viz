@@ -3,12 +3,16 @@ merge rules (a retry that decided replaces the main row; one that did not
 leaves a budget timeout with ``pinned_error`` and no verdict; every row
 stamped), the section 6 overhead recipe, the section 12 counting (the L1
 rung's proved@enum is an analyzed-launch proof), the refusal of a
-debugging (worker-reuse) per-corpus file, the rehearsal naming, and an
+debugging (worker-reuse) per-corpus file, the memory-model provenance (a
+pinned run is fence-ordered: the header and every row say so, a
+legacy-order file or row is refused, and a non-rehearsal run under
+``TRITON_VIZ_FENCE_ORDER=0`` is refused), the rehearsal naming, and an
 end-to-end rehearsal on golden_smoke with a budget small enough to
 exercise the retry pass.
 """
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -20,6 +24,16 @@ from evaluation import pinned_run as pr  # noqa: E402
 from evaluation import runner as runner_mod  # noqa: E402
 from evaluation.runner import results_header  # noqa: E402
 from triton_viz.clients.race_detector.ladder import LadderLevel  # noqa: E402
+from triton_viz.core.config import config as cfg  # noqa: E402
+
+
+@pytest.fixture(autouse=True)
+def _fence_order_on(monkeypatch):
+    """The merge pins below build their per-corpus files in-process under
+    the protocol's switch setting, whatever TRITON_VIZ_FENCE_ORDER the
+    test session inherited (the rehearsal's subprocesses inherit it too
+    and are merged under it)."""
+    monkeypatch.setattr(cfg, "race_detector_fence_order", True)
 
 
 def _row(name, corpus, verdict, terminal, wall, **extra):
@@ -29,6 +43,7 @@ def _row(name, corpus, verdict, terminal, wall, **extra):
         "verdict": verdict,
         "terminal": terminal,
         "wall_s": wall,
+        "fence_order": True,  # what the harness stamps since the flip
     }
     d.update(extra)
     return d
@@ -61,6 +76,7 @@ def test_merge_rules_and_stamps(tmp_path):
     }
     hdr, merged = pr.merge(files, retried, "abc1234", LadderLevel.L0, 180, 320, 0)
     assert hdr["pinned_commit"] == "abc1234" and hdr["worker_reuse"] is False
+    assert hdr["fence_order"] is True and "fence_order_env" in hdr
     assert hdr["corpora"]["c"]["c_upstream"] == "u"
     by = {r["name"]: r for r in merged}
     assert all("wall_s" not in r and r["pinned_commit"] == "abc1234" for r in merged)
@@ -98,6 +114,49 @@ def test_merge_refuses_a_debugging_file_and_a_level_mismatch(tmp_path):
     }
     with pytest.raises(ValueError, match="ladder level"):
         pr.merge(files, {}, "abc", LadderLevel.L0, 180, 320, 0)
+
+
+def test_merge_refuses_a_legacy_order_file_or_row(tmp_path):
+    """A pinned run is fence-ordered; a per-corpus file produced under
+    the legacy full program order (TRITON_VIZ_FENCE_ORDER=0), or a row
+    whose own process ran under it, cannot enter the merged dataset."""
+    legacy = dict(results_header("c", 0, {}), fence_order=False)
+    files = {
+        "c": _write(
+            tmp_path / "c_legacy.jsonl",
+            legacy,
+            [_row("a", "c", "race-free", "proved@T1", 1.0, fence_order=False)],
+        )
+    }
+    with pytest.raises(ValueError, match="fence_order=False"):
+        pr.merge(files, {}, "abc", LadderLevel.L0, 180, 320, 0)
+    # a fence-ordered header over a legacy row: the row is what ran
+    mixed = results_header("c", 0, {})
+    assert mixed["fence_order"] is True
+    files = {
+        "c": _write(
+            tmp_path / "c_mixed.jsonl",
+            mixed,
+            [_row("a", "c", "race-free", "proved@T1", 1.0, fence_order=False)],
+        )
+    }
+    with pytest.raises(ValueError, match="row 'a' ran under fence_order=False"):
+        pr.merge(files, {}, "abc", LadderLevel.L0, 180, 320, 0)
+    # ...and a legacy-order attribution run (header and rows agree on
+    # False) merges only as such
+    files = {
+        "c": _write(
+            tmp_path / "c_legacy2.jsonl",
+            legacy,
+            [_row("a", "c", "race-free", "proved@T1", 1.0, fence_order=False)],
+        )
+    }
+    with pytest.raises(ValueError, match="fence_order=False"):
+        pr.merge(files, {}, "abc", LadderLevel.L0, 180, 320, 0)
+    hdr, merged = pr.merge(
+        files, {}, "abc", LadderLevel.L0, 180, 320, 0, fence_order=False
+    )
+    assert hdr["fence_order"] is False and merged[0]["fence_order"] is False
 
 
 def test_overhead_stats_follow_the_section_6_recipe(tmp_path):
@@ -190,6 +249,12 @@ def test_rehearsal_on_golden_smoke_exercises_the_retry_pass(tmp_path, monkeypatc
     stamped and named REHEARSAL."""
     monkeypatch.setattr(runner_mod, "RESULTS_DIR", tmp_path)
     monkeypatch.setattr(pr, "RESULTS_DIR", tmp_path)
+    # the rows' subprocesses inherit the environment: merge under it
+    monkeypatch.setattr(
+        cfg,
+        "race_detector_fence_order",
+        os.environ.get("TRITON_VIZ_FENCE_ORDER", "1") == "1",
+    )
     out = pr.run_pinned(
         LadderLevel.L1,
         ("golden_smoke",),
@@ -218,6 +283,19 @@ def test_rehearsal_on_golden_smoke_exercises_the_retry_pass(tmp_path, monkeypatc
     # the per-corpus file the runner wrote is a protocol dataset
     per_corpus = tmp_path / "golden_smoke_L1_pinned-rehearsal.jsonl"
     assert runner_mod.assert_protocol_dataset(per_corpus)["ladder_level"] == "L1"
+
+
+def test_pinned_mode_refuses_the_legacy_order(tmp_path, monkeypatch):
+    """The stage 5 flip: a pinned run cannot be produced under the legacy
+    full program order (design-fence-order.md); only --rehearsal may."""
+    from triton_viz.core.config import config as cfg
+
+    monkeypatch.setattr(runner_mod, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(pr, "RESULTS_DIR", tmp_path)
+    monkeypatch.setattr(pr, "tree_is_clean", lambda root: True)
+    monkeypatch.setattr(cfg, "race_detector_fence_order", False)
+    with pytest.raises(SystemExit, match="fence-ordered"):
+        pr.run_pinned(LadderLevel.L0, ("golden_smoke",), rehearsal=False, guard=False)
 
 
 def test_pinned_mode_refuses_a_budget_override(tmp_path, monkeypatch):

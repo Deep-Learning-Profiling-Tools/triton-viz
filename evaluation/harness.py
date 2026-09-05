@@ -34,6 +34,7 @@ from contextlib import contextmanager
 from typing import Any
 
 from evaluation.spec import LaunchSpec
+from triton_viz.core.config import config as cfg
 from triton_viz.clients.race_detector.ladder import (
     LADDER_LEVEL_NAMES,
     LadderLevel,
@@ -354,6 +355,11 @@ def _run_one_cutile(
         # cuda.tile has no interpreter, so the L1 rung can never run on
         # these rows; the level is still stamped (provenance discipline).
         "ladder_level": ladder_level.name,
+        # the memory-model switch this process ran under; cuTile graphs keep
+        # the legacy reading regardless (the reader does not yet turn tokens
+        # into fences, design-fence-order.md stage 1d), stamped explicitly
+        "fence_order": bool(cfg.race_detector_fence_order),
+        "fence_order_applies": False,
     }
     try:
         row["static"] = _static_track_cutile(spec, seed, ladder_level)
@@ -751,6 +757,10 @@ def run_one(
         # mix levels unnoticed); also carried in verdict_attrs by the
         # clients, which receive the same level.
         "ladder_level": ladder_level.name,
+        # The memory-model switch this row's process ran under (fence-
+        # ordered intra-instance semantics, design-fence-order.md; False
+        # only for TRITON_VIZ_FENCE_ORDER=0 attribution runs).
+        "fence_order": bool(cfg.race_detector_fence_order),
         # Kernel identity: the ladder audit groups rows of one
         # SPECIALIZATION (kernel, constexprs) to derive the kernel-level
         # "∃ racy input" truth that proved@T0 claims are checked against.

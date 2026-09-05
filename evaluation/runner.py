@@ -17,6 +17,7 @@ import time
 from pathlib import Path
 from typing import Any
 
+from triton_viz.core.config import config as cfg
 from triton_viz.clients.race_detector.ladder import (
     LADDER_LEVEL_NAMES,
     LadderLevel,
@@ -365,6 +366,9 @@ def _run_one_reused(
         except OSError:
             pass
     row.setdefault("ladder_level", ladder_level.name)
+    # a row the runner synthesized (timeout, crash) carries the switch the
+    # parent ran under: the child inherited this environment
+    row.setdefault("fence_order", bool(cfg.race_detector_fence_order))
     row["wall_s"] = round(time.perf_counter() - t0, 2)
     print(f"  {spec.name:40s} {row.get('terminal', '?'):20s} {row['wall_s']}s")
     return row
@@ -426,6 +430,9 @@ def _run_one(
     finally:
         os.unlink(tmp)
     row.setdefault("ladder_level", ladder_level.name)
+    # a row the runner synthesized (timeout, crash) carries the switch the
+    # parent ran under: the child inherited this environment
+    row.setdefault("fence_order", bool(cfg.race_detector_fence_order))
     row["wall_s"] = round(time.perf_counter() - t0, 2)
     print(f"  {spec.name:40s} {row.get('terminal', '?'):20s} {row['wall_s']}s")
     return row
@@ -454,6 +461,11 @@ def results_header(
         # process reuse (opt-in): rows served by long-lived workers, whose
         # wall_s excludes process start-up; the two protocols are stamped
         "worker_reuse": worker_reuse or False,
+        # the memory-model switch (design-fence-order.md): fence-ordered
+        # intra-instance semantics (True, the paper's model) or the legacy
+        # full program order (TRITON_VIZ_FENCE_ORDER=0, attribution runs
+        # only); the rows carry the value their own process ran under
+        "fence_order": bool(cfg.race_detector_fence_order),
         **_versions(),
         **provenance,
     }

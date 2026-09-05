@@ -57,6 +57,25 @@ def test_tile_store_partitioned_by_bid_proves_clean():
     assert found == []
 
 
+def test_fresh_client_solves_a_cutile_graph_without_finalize():
+    """The evaluation's cuTile track drives ``_solve_one_graph`` on a fresh
+    client (cuda.tile has no interpreter, so the launch callbacks and
+    finalize() never run). Regression (2026-09-05, after Route 2): the
+    "+content" qualifier was initialized only in finalize(), so every
+    solved cuTile row died with an AttributeError and refused."""
+    from triton_viz.clients.race_detector.compiled.client import CompiledRaceDetector
+
+    det = CompiledRaceDetector(confirm_races=False, differential_check=False)
+    assert det.last_global_content_qualified is False
+    g = parse_cutile_ir(_STORE_IR.replace("INDEX", "$1"), "t")
+    tensors = {
+        "x": GlobalTensor(data_ptr=1 << 40, numel=256, elem_size=4, contiguous=True)
+    }
+    outcome = det._solve_one_graph(g, {"x_1": 256, "x_2": 1}, tensors, (4, 1, 1))
+    assert outcome[0] == "proved", outcome
+    assert det.last_global_content_qualified is False
+
+
 def test_tile_store_constant_index_races():
     # every program writes tile 0 — the detection direction must fire
     _, found = _solve(_STORE_IR.replace("INDEX", "0"))
