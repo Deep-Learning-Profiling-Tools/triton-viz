@@ -1154,3 +1154,121 @@ CORPUS.add(
         "comp pid reads the payload with no synchronization at all",
     )
 )
+
+
+# ── trb026: the tile-level fence itself (paper design-fence-order.md, ──
+# stage 4, part 2). Keren's two Section 2 examples as benchmark rows: an
+# INTRA-instance pair (an instance stores its own tile and reads one slot
+# of it back: different hardware threads own the stored slot and the
+# reading position, so without a fence the two operations are unordered
+# at the tile level) and a CROSS-instance pair (the guarded idiom with the
+# producer's fence dropped: its release no longer covers the data store).
+# The fenced re-read is the race-free twin of the first; the fully fenced
+# trb021_guarded_acq_rel_no is the race-free twin of the second. cuTile
+# twins exist only for the fenced row (the cuTile compiler's token pass
+# inserts the ordering itself, so "fence dropped" cannot be written).
+
+
+@triton.jit
+def trb026_reread_unfenced_kernel(
+    x_ptr, out_ptr, SLOT: tl.constexpr, BLOCK: tl.constexpr
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    tl.store(x_ptr + offs, offs)
+    n = tl.load(x_ptr + pid * BLOCK + SLOT)
+    tl.store(out_ptr + pid, n)
+
+
+@triton.jit
+def trb026_reread_fenced_kernel(
+    x_ptr, out_ptr, SLOT: tl.constexpr, BLOCK: tl.constexpr
+):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    tl.store(x_ptr + offs, offs)
+    tl.debug_barrier()
+    n = tl.load(x_ptr + pid * BLOCK + SLOT)
+    tl.store(out_ptr + pid, n)
+
+
+@triton.jit
+def trb026_guarded_no_producer_fence_kernel(flag_ptr, data_ptr, out_ptr):
+    pid = tl.program_id(0)
+    is_prod = pid == 0
+    is_cons = pid == 1
+    tl.store(data_ptr, 1, mask=is_prod)
+    # no fence here: the release does not cover the producer's data store
+    cmp = tl.where(is_prod, 0, 1)
+    old = tl.atomic_cas(flag_ptr, cmp, 1, sem="acq_rel", scope="gpu")
+    tl.debug_barrier()
+    cons_mask = is_cons & (old == 1)
+    x = tl.load(data_ptr, mask=cons_mask, other=0)
+    tl.store(out_ptr + pid, x, mask=cons_mask)
+
+
+_TRB026_SIG = {
+    "x_ptr": "*i32",
+    "out_ptr": "*i32",
+    "SLOT": "constexpr",
+    "BLOCK": "constexpr",
+}
+
+
+def _trb026_args(seed: int) -> tuple:
+    return (
+        torch.zeros(4 * BLOCK, dtype=torch.int32),
+        torch.zeros(4, dtype=torch.int32),
+    )
+
+
+CORPUS.add(
+    LaunchSpec(
+        name="trb026_reread_unfenced_yes",
+        kernel_fn=trb026_reread_unfenced_kernel,
+        signature=_TRB026_SIG,
+        constexprs={"SLOT": BLOCK // 2 + 1, "BLOCK": BLOCK},
+        make_args=_trb026_args,
+        grid=GRID,
+        expected="race",
+        race_pair=(
+            "tl.store(x_ptr + offs, offs)",
+            "n = tl.load(x_ptr + pid * BLOCK + SLOT)",
+        ),
+        pattern="tile-level-fence",
+        params_note="store own tile, read one slot back, no fence: the two "
+        "operations of one instance are unordered at the tile level (the "
+        "fence-ordered model; under the legacy full program order this row "
+        "proves, a label the switch flip retires)",
+    )
+)
+CORPUS.add(
+    LaunchSpec(
+        name="trb026_reread_fenced_no",
+        kernel_fn=trb026_reread_fenced_kernel,
+        signature=_TRB026_SIG,
+        constexprs={"SLOT": BLOCK // 2 + 1, "BLOCK": BLOCK},
+        make_args=_trb026_args,
+        grid=GRID,
+        expected="race-free",
+        pattern="tile-level-fence",
+        params_note="tl.debug_barrier between the store and the read-back "
+        "orders them; per-pid tiles are disjoint across instances",
+    )
+)
+CORPUS.add(
+    LaunchSpec(
+        name="trb026_guarded_no_producer_fence_yes",
+        kernel_fn=trb026_guarded_no_producer_fence_kernel,
+        signature=_TRB021_SIG,
+        constexprs={},
+        make_args=_trb021_args,
+        grid=(2,),
+        expected="race",
+        race_pair=_TRB021_PAIR,
+        pattern="tile-level-fence",
+        params_note="the guarded idiom without the producer's fence: the "
+        "release-CAS no longer covers the data store, so the consumer's "
+        "guarded load is unordered against it (twin: trb021_guarded_acq_rel_no)",
+    )
+)
