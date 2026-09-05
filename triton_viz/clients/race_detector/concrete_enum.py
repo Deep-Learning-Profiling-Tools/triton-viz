@@ -121,6 +121,7 @@ from ...utils.traceback_utils import (
     _is_framework_frame,
     capture_current_source_location,
 )
+from .bounds import StorageBounds
 from .data import RaceType
 
 # Structural instance ceiling (paper repo design doc section 4): 488 of the
@@ -438,9 +439,7 @@ class ConcreteFootprintRecorder(Client):
         # active lane of every access must fall inside one span, checked
         # BEFORE the interpreter dereferences. None disables the check
         # (standalone recorders without a known memory map).
-        spans = sorted(bounds or [])
-        self._span_lo = np.asarray([lo for lo, _ in spans], dtype=np.int64)
-        self._span_hi = np.asarray([hi for _, hi in spans], dtype=np.int64)
+        self._bounds = StorageBounds(bounds or [])
         self.check_bounds = bounds is not None
         # per-op metadata, parallel lists indexed by op id
         self.op_pid_index: list[int] = []
@@ -872,24 +871,16 @@ class ConcreteFootprintRecorder(Client):
 
     def _check_bounds(self, kind: int, data: np.ndarray, elem: int) -> None:
         """Refuse by name when an active lane lies outside every tensor
-        argument's storage. Cheap: min/max over the lanes plus one
-        bisection (a few microseconds per access)."""
-        lo = int(data.min())
-        hi = int(data.max()) + elem
-        i = int(np.searchsorted(self._span_lo, lo, side="right")) - 1
-        if i >= 0 and hi <= self._span_hi[i]:
+        argument's storage (``StorageBounds``, shared with the C2 replay)."""
+        bad = self._bounds.violation(data.astype(np.int64, copy=False), elem)
+        if bad is None:
             return
-        if i < 0 or lo >= self._span_hi[i]:
-            bad = lo  # the lowest lane is below or past every span
-        else:
-            past = data + elem > self._span_hi[i]
-            bad = int(data[past].min()) if past.any() else lo
         site = capture_current_source_location()
         raise ConcreteEnumRefusal(
             "out-of-bounds",
             f"the {_KIND_NAMES[kind]} at {_fmt_site(site)} (instance "
             f"{self._current_pid()}) touches byte {bad:#x} outside every tensor "
-            f"argument ({len(self._span_lo)} storages): the in-bounds premise "
+            f"argument ({len(self._bounds)} storages): the in-bounds premise "
             "fails and the access is not executed",
         )
 

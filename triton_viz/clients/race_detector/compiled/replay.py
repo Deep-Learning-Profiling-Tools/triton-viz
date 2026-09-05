@@ -48,6 +48,7 @@ import numpy as np
 from ....core.callbacks import ForLoopCallbacks, OpCallbacks
 from ....utils.traceback_utils import _is_framework_frame
 from ....core.client import Client
+from ..bounds import StorageBounds
 from ....core.data import (
     AtomicCas,
     AtomicRMW,
@@ -64,19 +65,33 @@ _WRITES = ("store",)
 _RMW = ("atomic_rmw", "atomic_cas")
 
 
+class ReplayOutOfBounds(Exception):
+    """An access of a replayed block lies outside every tensor argument's
+    storage: the in-bounds premise fails. Raised in the before-callback,
+    so the interpreter never executes the access (it would dereference a
+    raw host pointer and could corrupt the process)."""
+
+
 class FootprintRecorder(Client):
     """Interpreter client recording per-block concrete byte footprints.
 
     ``target_pids=None`` records every block; otherwise only the given
     pids execute (other blocks are skipped via ``pre_run_callback``,
     which is safe because this client runs in its OWN trace).
+    ``bounds`` (the storages' byte spans) enables the in-bounds check
+    before every access (``StorageBounds``, shared with the L1 rung).
     """
 
     NAME = "footprint_recorder"
 
-    def __init__(self, target_pids: set[tuple[int, int, int]] | None = None) -> None:
+    def __init__(
+        self,
+        target_pids: set[tuple[int, int, int]] | None = None,
+        bounds: list[tuple[int, int]] | None = None,
+    ) -> None:
         super().__init__()
         self.target_pids = target_pids
+        self._bounds = StorageBounds(bounds) if bounds is not None else None
         self._current_pid: tuple[int, int, int] = (0, 0, 0)
         self._active = True
         # pid -> (base data_ptr, kind, user line) -> set of byte addresses
@@ -129,7 +144,13 @@ class FootprintRecorder(Client):
             base = b
         return base
 
-    def _record(self, kind: str, addrs: np.ndarray, mask: np.ndarray | None) -> None:
+    def _record(
+        self,
+        kind: str,
+        addrs: np.ndarray,
+        mask: np.ndarray | None,
+        elem: int = 1,
+    ) -> None:
         if not self._active:
             return
         flat = np.asarray(addrs).reshape(-1)
@@ -138,6 +159,15 @@ class FootprintRecorder(Client):
             flat = flat[m.astype(bool)]
         if flat.size == 0:
             return
+        if self._bounds is not None:
+            bad = self._bounds.violation(flat.astype(np.int64, copy=False), elem)
+            if bad is not None:
+                raise ReplayOutOfBounds(
+                    f"out-of-bounds: the {kind} at line {self._user_site_line()} "
+                    f"(block {self._current_pid}) touches byte {bad:#x} outside "
+                    f"every tensor argument ({len(self._bounds)} storages); the "
+                    "in-bounds premise fails and the access is not executed"
+                )
         per_pid = self.footprints.setdefault(self._current_pid, {})
         base = self._base_of(int(flat[0]))
         line = self._user_site_line()
@@ -162,27 +192,44 @@ class FootprintRecorder(Client):
             frame = frame.f_back
         return None
 
+    @staticmethod
+    def _elem(ptr: Any) -> int:
+        try:
+            return max(1, int(ptr.get_element_ty().primitive_bitwidth) // 8)
+        except Exception:  # noqa: BLE001
+            return 1
+
     def register_op_callback(self, op_type: type[Op]) -> OpCallbacks:
         def pre_load(ptr, mask, keys):
             if keys is None:  # triton path: ptr.data = absolute addresses
-                self._record("load", ptr.data, mask.data if mask is not None else None)
+                self._record(
+                    "load",
+                    ptr.data,
+                    mask.data if mask is not None else None,
+                    self._elem(ptr),
+                )
 
         def pre_store(ptr, mask, keys):
             if keys is None:
-                self._record("store", ptr.data, mask.data if mask is not None else None)
+                self._record(
+                    "store",
+                    ptr.data,
+                    mask.data if mask is not None else None,
+                    self._elem(ptr),
+                )
 
         def pre_raw_load(ptr):
-            self._record("load", ptr.data, None)
+            self._record("load", ptr.data, None, self._elem(ptr))
 
         def pre_raw_store(ptr, value):
-            self._record("store", ptr.data, None)
+            self._record("store", ptr.data, None, self._elem(ptr))
 
         def pre_atomic_rmw(rmw_op, ptr, val, mask, sem=None, scope=None, *a, **k):
             m = getattr(mask, "data", mask) if mask is not None else None
-            self._record("atomic_rmw", ptr.data, m)
+            self._record("atomic_rmw", ptr.data, m, self._elem(ptr))
 
         def pre_atomic_cas(ptr, cmp, val, sem=None, scope=None, *a, **k):
-            self._record("atomic_cas", ptr.data, None)
+            self._record("atomic_cas", ptr.data, None, self._elem(ptr))
 
         table = {
             Load: OpCallbacks(before_callback=pre_load),
@@ -264,26 +311,36 @@ def run_replay(
 
     trace_mod = importlib.import_module("triton_viz.core.trace")
 
-    recorder = FootprintRecorder(target_pids)
     base_map: dict[int, int] = {}
+    spans: list[tuple[int, int]] = []  # the clones' storages: the in-bounds premise
+
+    def _clone(v: Any) -> Any:
+        c = v.detach().clone()
+        base_map[int(v.data_ptr())] = int(c.data_ptr())
+        try:
+            st = c.untyped_storage()
+            spans.append((int(st.data_ptr()), int(st.data_ptr()) + int(st.nbytes())))
+        except Exception:  # noqa: BLE001
+            spans.append(
+                (int(c.data_ptr()), int(c.data_ptr()) + c.numel() * c.element_size())
+            )
+        return c
+
     try:
         cloned_args = []
         for a in args:
             if hasattr(a, "data_ptr") and hasattr(a, "clone"):
-                c = a.detach().clone()
-                base_map[int(a.data_ptr())] = int(c.data_ptr())
-                cloned_args.append(c)
+                cloned_args.append(_clone(a))
             else:
                 cloned_args.append(a)
         cloned_kwargs = {}
         for k, v in kwargs.items():
             if hasattr(v, "data_ptr") and hasattr(v, "clone"):
-                c = v.detach().clone()
-                base_map[int(v.data_ptr())] = int(c.data_ptr())
-                cloned_kwargs[k] = c
+                cloned_kwargs[k] = _clone(v)
             else:
                 cloned_kwargs[k] = v
 
+        recorder = FootprintRecorder(target_pids, bounds=spans)
         traced = trace_mod.TritonTrace(jit_fn, recorder)
         n_before = len(trace_mod.launches)
         try:
@@ -293,6 +350,8 @@ def run_replay(
             # The replay is internal bookkeeping, not a user launch.
             del trace_mod.launches[n_before:]
         return ReplayResult(footprints=recorder.footprints, base_map=base_map)
+    except ReplayOutOfBounds as e:
+        return ReplayResult(footprints={}, base_map=base_map, error=str(e))
     except Exception as e:  # noqa: BLE001
         return ReplayResult(
             footprints={}, base_map=base_map, error=f"{type(e).__name__}: {e}"

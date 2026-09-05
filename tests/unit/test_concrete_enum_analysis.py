@@ -397,3 +397,29 @@ def test_value_source_check_scales_to_many_loads():
     out = analyze(rec)
     assert out.status == "ok"
     assert time.perf_counter() - t0 < 5.0
+
+
+# ── StorageBounds (shared by the rung and the C2 replay) ────────────
+
+
+def test_storage_bounds_violation():
+    from triton_viz.clients.race_detector.bounds import StorageBounds
+
+    b = StorageBounds([(1000, 1064), (2000, 2016)])
+    assert len(b) == 2
+    inside = np.array([1000, 1004, 1060], dtype=np.int64)
+    assert b.violation(inside, 4) is None
+    assert b.violation(np.array([2012], dtype=np.int64), 4) is None
+    assert b.violation(np.array([], dtype=np.int64), 4) is None
+    # the last lane runs one byte past the span
+    assert b.violation(np.array([1000, 1061], dtype=np.int64), 4) == 1061
+    # below every span / in the gap / past the last span
+    assert b.violation(np.array([900], dtype=np.int64), 4) == 900
+    assert b.violation(np.array([1500], dtype=np.int64), 4) == 1500
+    assert b.violation(np.array([2016], dtype=np.int64), 1) == 2016
+    # lanes straddling two spans are outside "one span"
+    assert (
+        b.violation(np.array([1060, 2000], dtype=np.int64), 4) == 1060
+        or b.violation(np.array([1060, 2000], dtype=np.int64), 4) is not None
+    )
+    assert StorageBounds([]).violation(np.array([5], dtype=np.int64), 4) == 5

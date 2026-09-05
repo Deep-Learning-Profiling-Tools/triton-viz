@@ -637,3 +637,50 @@ def test_c3_client_off_by_default():
     x, y, out = torch.randn(n), torch.randn(n), torch.zeros(n)
     _launch(det, add_kernel, (x, y, out, n), {"grid": (3,), "BLOCK": 1024}, ttir)
     assert det.last_differential is None
+
+
+# ── the in-bounds premise in the replay channel ────────────────────
+
+
+@triton.jit
+def _oob_waw_kernel(out_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    tl.store(out_ptr + offs % 4, 1.0)  # every block writes out[0:4] (a WAW)
+    tl.store(out_ptr + offs, 2.0)  # ...and, unmasked, past n for the last block
+
+
+def test_c2_out_of_bounds_replay_is_unavailable_not_a_crash():
+    """A witness kernel whose replayed block also stores past its tensor:
+    the replay declines by name BEFORE the interpreter dereferences (an
+    out-of-bounds store on a raw host pointer corrupts the process), and
+    the report keeps its fail-closed classification."""
+    out = torch.zeros(6)
+    focus = (int(out.data_ptr()), "store", _store_line(_oob_waw_kernel))
+    v, why = confirm_witness(
+        _oob_waw_kernel, (out, 6), {"BLOCK": 4}, (0, 0, 0), (1, 0, 0), (2,),
+        focus_a=focus, focus_b=focus,
+    )  # fmt: skip
+    assert v == "unavailable"
+    assert "replay failed: out-of-bounds" in why
+    assert "block (1, 0, 0)" in why
+    assert bool((out == 0).all())  # the caller's tensor is untouched
+
+
+@triton.jit
+def _masked_tail_waw_kernel(out_ptr, n, BLOCK: tl.constexpr):
+    pid = tl.program_id(0)
+    offs = pid * BLOCK + tl.arange(0, BLOCK)
+    tl.store(out_ptr + offs % 4, 1.0)
+    tl.store(out_ptr + offs, 2.0, mask=offs < n)  # masked-off lanes point past n
+
+
+def test_c2_masked_off_lanes_past_the_tensor_still_confirm():
+    out = torch.zeros(6)
+    line = _store_line(_masked_tail_waw_kernel)
+    focus = (int(out.data_ptr()), "store", line)
+    v, _ = confirm_witness(
+        _masked_tail_waw_kernel, (out, 6), {"BLOCK": 4}, (0, 0, 0), (1, 0, 0), (2,),
+        focus_a=focus, focus_b=focus,
+    )  # fmt: skip
+    assert v == "confirmed"

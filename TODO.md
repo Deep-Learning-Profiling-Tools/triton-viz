@@ -991,6 +991,15 @@ L1, jobs=1, 200 s per row, 1.42 h; commit 5ba8b6a; report:
       unchanged (35/16/0); 5 new kernel-level pins; report addendum in
       `evaluation/CHANGE_SURFACE_L1.md`. Restated: 391 proved@enum,
       14 race@enum, 86 residual (8.1%).
+- [x] The same check in the C2/C3 replay channel (Hao, 2026-09-05):
+      `bounds.StorageBounds` is shared; `run_replay` builds the spans
+      from its clones and `FootprintRecorder` checks every access
+      before the interpreter executes it; an out-of-bounds replay
+      declines as `unavailable: replay failed: out-of-bounds ...`
+      (the existing fail-closed path, the report stays
+      races-unclassified) instead of corrupting the process. Cost:
+      ~4 us per access on the ~2% of rows that reach replay (24 of
+      1062 in the pin), under 1 ms per row. Two pins.
 - rope_fwd_3d budget regression (81.9 s in the first stretch, >200 s
   in the full run): DIAGNOSED AND FIXED. The memory-taint rewrite of
   the premise check scanned the whole interval buffer per
