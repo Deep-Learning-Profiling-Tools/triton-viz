@@ -857,25 +857,25 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
     env: dict[str, object] = {}
     accesses: list[AccessEvent] = []
     fences: list[float] = []
-    # Dependency provenance: SSA name -> (access indices it derives from,
-    # still position-preserving?). Loads and atomics seed it; element-wise
-    # ops propagate it; position-changing ops clear the flag.
-    prov: dict[str, tuple[frozenset[int], bool]] = {}
+    # Dependency provenance: SSA name -> {access index it derives from:
+    # still position-preserving?}. Loads and atomics seed it; element-wise
+    # ops propagate it; position-changing ops clear the flag. The flag is
+    # kept PER SOURCE so a scalar operand that arrived through tt.splat
+    # does not strip the positional flag off the tile operand next to it.
+    prov: dict[str, dict[int, bool]] = {}
 
-    def _prov_of(ssa_names):
-        idxs: set[int] = set()
-        elementwise = True
+    def _prov_of(ssa_names, position_preserving=True) -> dict[int, bool]:
+        merged: dict[int, bool] = {}
         for name in ssa_names:
             got = prov.get(name)
-            if got is None:
+            if not got:
                 continue
-            idxs |= set(got[0])
-            elementwise = elementwise and got[1]
-        return frozenset(idxs), elementwise
+            for idx, flag in got.items():
+                merged[idx] = merged.get(idx, True) and flag and position_preserving
+        return merged
 
     def _deps_of(*ssa_names) -> tuple[int, ...]:
-        idxs, elementwise = _prov_of(ssa_names)
-        return tuple(sorted(idxs)) if elementwise else ()
+        return tuple(sorted(idx for idx, flag in _prov_of(ssa_names).items() if flag))
 
     loop: LoopInfo | None = None
     loops: list[tuple[int, LoopInfo]] = []  # (opening order, loop)
@@ -1412,22 +1412,22 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
             ("tt.load", "tt.store", "tt.atomic_")
         ):
             operands = [t for t in re.findall(_SSA, body)]
-            idxs, elementwise = _prov_of(operands)
-            if idxs:
-                position_preserving = body.startswith(
-                    (
-                        "arith.",
-                        "math.",
-                        "tt.addptr",
-                        "tt.bitcast",
-                        "tt.fp_to_fp",
-                        "tt.int_to_ptr",
-                        "tt.ptr_to_int",
-                        "tt.clampf",
-                        "tt.precise_",
-                    )
+            position_preserving = body.startswith(
+                (
+                    "arith.",
+                    "math.",
+                    "tt.addptr",
+                    "tt.bitcast",
+                    "tt.fp_to_fp",
+                    "tt.int_to_ptr",
+                    "tt.ptr_to_int",
+                    "tt.clampf",
+                    "tt.precise_",
                 )
-                prov[res] = (idxs, elementwise and position_preserving)
+            )
+            merged = _prov_of(operands, position_preserving)
+            if merged:
+                prov[res] = merged
 
         # ---- tile-level fence ----
         if body.startswith("gpu.barrier"):
@@ -1481,7 +1481,7 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                 else:
                     env[res] = DataDep("loaded value")
             if res is not None:
-                prov[res] = (frozenset({len(accesses) - 1}), True)
+                prov[res] = {len(accesses) - 1: True}
             continue
         sm = _RE_STORE.match(body)
         if sm:
@@ -1540,7 +1540,7 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                 env[res] = observed_result_binding()
             object.__setattr__(accesses[-1], "deps", _deps_of(am.group(5), am.group(6)))
             if res is not None:
-                prov[res] = (frozenset({len(accesses) - 1}), True)
+                prov[res] = {len(accesses) - 1: True}
             continue
         am = _RE_ATOMIC_CAS.match(body)
         if am:
@@ -1569,7 +1569,7 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                 env[res] = observed_result_binding()
             object.__setattr__(accesses[-1], "deps", _deps_of(am.group(4), am.group(5)))
             if res is not None:
-                prov[res] = (frozenset({len(accesses) - 1}), True)
+                prov[res] = {len(accesses) - 1: True}
             continue
 
         # ---- fail closed on unrecognized memory ops ----

@@ -360,3 +360,37 @@ def test_static_dependency_through_reshape_is_not_positional(fence_order_on):
         _inplace_rotate_kernel, (4,), _X_SIG, {"BLOCK": N}, lambda seed: _x_args(4 * N)
     )
     assert res["status"] == "races", res
+
+
+# A scalar operand (a loaded scalar, or a kernel scalar) reaches the tile
+# through a splat; that must not strip the positional dependence of the tile
+# operand next to it (liger's element_mul shape: X *= *grad_output).
+
+
+@triton.jit
+def _inplace_scaled_kernel(x_ptr, g_ptr, BLOCK: tl.constexpr):
+    offs = tl.program_id(0) * BLOCK + tl.arange(0, BLOCK)
+    g = tl.load(g_ptr)
+    v = tl.load(x_ptr + offs)
+    tl.store(x_ptr + offs, v * g)
+
+
+def _xg_args(seed=0):
+    return (torch.zeros(4 * N, dtype=torch.int32), torch.ones(1, dtype=torch.int32))
+
+
+def test_scalar_splat_keeps_the_tile_operand_dependence(fence_order_on):
+    detector = _run(_inplace_scaled_kernel, (4,), *_xg_args(), N)
+    assert detector.last_status == "ok"
+    assert detector.last_reports == []
+
+
+def test_static_scalar_splat_keeps_the_tile_operand_dependence(fence_order_on):
+    res = _static(
+        _inplace_scaled_kernel,
+        (4,),
+        {"x_ptr": "*i32", "g_ptr": "*i32", "BLOCK": "constexpr"},
+        {"BLOCK": N},
+        _xg_args,
+    )
+    assert res["status"] == "ok", res
