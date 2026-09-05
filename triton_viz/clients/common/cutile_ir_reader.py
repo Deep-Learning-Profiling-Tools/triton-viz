@@ -253,7 +253,13 @@ def parse_cutile_ir(
         raise UnsupportedTTIR("empty CuTile IR", kind="parse")
     st = _State(kernel_name=kernel_name, multipath=multipath)
     _parse_header(lines[0], st)
-    _walk(lines, 1, 0, st)
+    end = _walk(lines, 1, 0, st)
+    if end < len(lines):
+        raise UnsupportedTTIR(
+            f"line {end + 1}: unexpected {lines[end].strip()[:40]!r} after the "
+            "function body",
+            kind="parse",
+        )
     if multipath:
         return AccessGraph(
             kernel_name=kernel_name,
@@ -342,11 +348,14 @@ def _walk(lines: list[str], i: int, indent: int, st: _State) -> int:
         if cur_indent < indent:
             return i
         line = raw.strip()
+        head = line.split(" ", 1)[0]
         if line == "return":
             return i + 1
-        if line.startswith("continue"):
+        if head == "continue":
+            # whole-token match: a value named after a parameter such as
+            # `continued{...}: Array = make_tensor_view(...)` is an op line
             return i + 1
-        if line.startswith(("yield", "break")):
+        if st.multipath and head in ("yield", "break"):
             # an if-arm terminator (multipath) or a while-form construct
             # (refused before its body is walked): hand it to the caller
             return i
@@ -516,7 +525,12 @@ def _handle_for(
     st.loop_stack.pop()
     st.path, st.guarded = saved_path, saved_guarded
     st.in_loop = bool(st.loop_stack)
-    if j < len(lines) and lines[j].strip().startswith(("yield", "break")):
+    if (
+        st.multipath
+        and j < len(lines)
+        and len(lines[j]) - len(lines[j].lstrip()) == body_indent
+        and lines[j].strip().split(" ", 1)[0] in ("yield", "break")
+    ):
         raise UnsupportedTTIR(
             f"line {j + 1}: `{lines[j].strip().split(' ')[0]}` inside a `for` "
             "body is not modeled",
@@ -535,6 +549,15 @@ def _conj(a: Term | None, b: Term | None) -> Term | None:
     return BoolBin("and", a, b)
 
 
+def _disj(a: Term | None, b: Term | None) -> Term | None:
+    if a is None or b is None:
+        return None
+    return BoolBin("or", a, b)
+
+
+_FALSE: Term = Cmp("ne", Const(0), Const(0))
+
+
 def _walk_arm(
     lines: list[str], j: int, indent: int, st: _State
 ) -> tuple[int, str, list[str]]:
@@ -549,10 +572,11 @@ def _walk_arm(
     if k < len(lines):
         t = lines[k].strip()
         cur = len(lines[k]) - len(lines[k].lstrip())
-        if cur == indent and t.startswith("yield"):
+        head = t.split(" ", 1)[0]
+        if cur == indent and head == "yield":
             toks = [x for x in _split_top(t[len("yield") :].strip()) if x]
             return k + 1, "yield", toks
-        if cur == indent and t.startswith("break"):
+        if cur == indent and head == "break":
             raise UnsupportedTTIR(
                 f"line {k + 1}: `break` inside an `if` arm is not modeled",
                 kind="control-flow",
@@ -582,10 +606,23 @@ def _handle_if(
     n = len(lines)
     j = i + 1
     arms: dict[str, tuple[str, list[Any]]] = {}
+    # per arm: (path and guarded flag AT ITS END, falls through). A nested
+    # if whose arm returns narrows the path for the rest of the arm, and
+    # that narrowing must survive into the code after THIS if.
+    ends: dict[str, tuple[Term | None, bool, bool]] = {}
+    arm_conds: dict[str, Term | None] = {
+        "then": cond,
+        "else": None if cond is None else Not(cond),
+    }
     for label in ("then", "else"):
-        if j >= n or lines[j].strip() != label:
+        at_indent = (
+            j < n
+            and lines[j].strip() == label
+            and len(lines[j]) - len(lines[j].lstrip()) == indent
+        )
+        if not at_indent:
             if label == "else":
-                break  # an if without an else arm
+                break  # an if without an else arm (that line is not OUR else)
             raise UnsupportedTTIR(
                 f"line {j + 1}: expected `{label}` after `if`", kind="parse"
             )
@@ -597,30 +634,48 @@ def _handle_if(
             and lines[j].strip().endswith("):")
         ):
             j += 1  # the arm's (empty) parameter header
-        if cond is None:
-            st.guarded = True
-        else:
-            st.path = _conj(saved_path, cond if label == "then" else Not(cond))
+        st.guarded = saved_guarded or cond is None
+        st.path = _conj(saved_path, arm_conds[label])
         j, term, toks = _walk_arm(lines, j, body_indent, st)
         vals = [_val(st, t) for t in toks]  # resolved inside the arm's scope
         arms[label] = (term, vals)
+        ends[label] = (st.path, st.guarded, term != "return")
         st.path, st.guarded = saved_path, saved_guarded
-    then_term = arms.get("then", ("dedent", []))[0]
-    else_term = arms.get("else", ("yield", []))[0]
-    # the continuation: an arm that returns never reaches the code after
-    # the if, so that code runs under the OTHER arm's condition
-    if then_term == "return" and else_term == "return":
-        st.path = _conj(saved_path, Cmp("ne", Const(0), Const(0)))  # unreachable
-    elif then_term == "return":
-        if cond is None:
-            st.guarded = True
+    if "else" not in ends:
+        # a missing else arm falls through under Not(cond) unchanged
+        ends["else"] = (
+            _conj(saved_path, arm_conds["else"]),
+            saved_guarded or cond is None,
+            True,
+        )
+    # The continuation: the code after the if runs under the disjunction
+    # of the end paths of the arms that fall through; an arm that returns
+    # (directly, or through a nested if that narrowed its end path)
+    # contributes nothing.
+    through = [lbl for lbl in ("then", "else") if ends[lbl][2]]
+    if not through:
+        st.path = _conj(saved_path, _FALSE)  # unreachable
+        st.guarded = saved_guarded
+    else:
+        untouched = all(
+            ends[lbl][0] == _conj(saved_path, arm_conds[lbl])
+            and ends[lbl][1] == (saved_guarded or cond is None)
+            for lbl in through
+        )
+        if len(through) == 2 and untouched:
+            # both arms fall through with nothing narrowed inside: the
+            # continuation is the entry path itself (keep the term small)
+            st.path = saved_path
+        elif cond is None:
+            st.path = saved_path
         else:
-            st.path = _conj(saved_path, Not(cond))
-    elif else_term == "return":
-        if cond is None:
-            st.guarded = True
-        else:
-            st.path = _conj(saved_path, cond)
+            cont: Term | None = None
+            for k, lbl in enumerate(through):
+                cont = ends[lbl][0] if k == 0 else _disj(cont, ends[lbl][0])
+            st.path = cont
+        st.guarded = (
+            saved_guarded or cond is None or any(ends[lbl][1] for lbl in through)
+        )
     # results: a Select over the two yields when everything is modelable
     then_vals = arms.get("then", ("", []))[1]
     else_vals = arms.get("else", ("", []))[1]
