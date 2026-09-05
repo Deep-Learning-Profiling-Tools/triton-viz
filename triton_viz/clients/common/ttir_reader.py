@@ -1603,6 +1603,15 @@ def _set_arange_dim(v: object, dim: int) -> object:
         # dimension like any other lane term, or its Arange would name a
         # lane variable the address never uses (a vacuous mask).
         return DataDep(v.why, keep=_set_arange_dim(v.keep, dim))  # type: ignore[arg-type]
+    if isinstance(v, PtrValue):
+        # A POINTER tile expanded (``base[None, :] + off[:, None]``): its
+        # offset's lanes follow the new dimension exactly like an integer
+        # tile's. Left untagged, the address kept the 1-D variable while
+        # the mask (an i1 tile expanded the same way) got the 2-D one, so
+        # the two copies could differ in a lane the address never reads:
+        # a phantom intra-instance WAW (aiter's causal_conv1d update
+        # kernels, found by Route 2's change surface).
+        return PtrValue(v.base_param, _set_arange_dim(v.offset, dim))  # type: ignore[arg-type]
     return v
 
 

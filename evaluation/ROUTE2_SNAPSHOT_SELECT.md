@@ -297,18 +297,26 @@ expression), 1 exceeds the row budget (`flash_kda_seg_scan`: it
 proved `proved@T1-launch+content` in 195 s of static time at f76fb53,
 and the content-free attempt of c7d99d1 adds a second solve on top;
 the pinned driver's 320 s retry budget is the place it decides), and 3
-are NEW RACE REPORTS: aiter's three causal_conv1d update kernels
-(`_causal_conv1d_update_kernel`, `_causal_conv1d_update_single_token_
-kernel`, its reshape variant), exact and content-qualified, an
-intra-instance WAW on the conv-state store for the first two and
-cross-instance WAR/WAW pairs on the reshape variant, `races-
-unclassified` because the interpreter frontend abstains on these
-kernels (host-side control flow on loaded data) so C2 cannot replay
-them. Their labels say race-free; they are untriaged (the conv-state
-store's 2-D tile addresses through captured strides and a loaded batch
-coordinate), and the pinned rerun's race-row triage is where they get
-a casebook entry or a modeling fix, before any number quotes them.
-Static solve time of the 27 rows: median 0.6 s, p90 18 s, max 56 s.
+came back as NEW RACE REPORTS at c7d99d1: aiter's three causal_conv1d
+update kernels, exact and content-qualified, an intra-instance WAW on
+the conv-state store, `races-unclassified` because the interpreter
+frontend abstains on these kernels (host-side control flow on loaded
+data). Triaged the same afternoon from the witness model: the two
+program copies differed only in a lane variable the store's MASK used
+and its ADDRESS did not, for the same `tl.arange` (`idx_feats`). The
+reader tags an arange with the tile dimension it varies along when an
+integer or boolean tile goes through `tt.expand_dims`, but a POINTER
+tile expanded the same way (`conv_state_base[None, :] + (idx_tokens *
+stride)[:, None]`) kept its 1-D tag, so the address named one lane
+variable and the mask another: a phantom intra-instance WAW, the
+static frontend's twin of the interpreter frontend's same-axis arange
+coupling defect (paper-repo casebook D5). Fixed in the commit after
+the record (`_set_arange_dim` retags `PtrValue` offsets;
+`tests/unit/test_pointer_expand_dims.py`), an ungated single-path fix
+in the sound direction; the three rows then prove `proved@T1+content`
+(0.6 s, 0.8 s, 6.9 s), and the benchmark and the 20 decided rows are
+unchanged by it (`.r2ptr` datasets). Static solve time of the 27 rows:
+median 0.6 s, p90 18 s, max 56 s.
 
 Raw data: the main worktree's
 `evaluation/results/route2-change-surface/` (gitignored like the pinned
