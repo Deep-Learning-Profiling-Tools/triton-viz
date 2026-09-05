@@ -1098,7 +1098,14 @@ capture-artifact rows. Landed on the branch, backward compatible
 - [ ] Pinned rerun at L0 AND L1 on the new contents (Hao: together,
       after the recapture). Contents change every analyzed-launch
       verdict's basis, so the paper's 66 proved@interp and the L1
-      numbers move; a fresh pin.
+      numbers move; a fresh pin. The driver exists (2026-09-05):
+      `python -m evaluation.pinned_run --ladder-level L0|L1`
+      (`evaluation/pinned_run.py`: clean-tree and budget checks, load
+      guard, 320 s retry, merge with `pinned_commit`/`pinned_wall_s`/
+      `pinned_pass`, section-6 overhead and section-12 verdict
+      summary, `assert_protocol_dataset` on every input; rehearsed on
+      golden_smoke + rmw_sync with a 2 s budget; 7 unit pins). Awaits
+      Hao's go.
 - Note: destindex-class rows (upstream tests that draw duplicate
   indices with randint, casebook A6) will still say race@enum on the
   real snapshot; that is the honest analyzed-launch reading of the
