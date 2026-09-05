@@ -554,33 +554,11 @@ class CompiledRaceDetector(Client):
                     f"verified ({obligations} obligation(s))"
                 )
 
-    def _analyze_global(self) -> None:
-        """Global-memory race verdict over this launch's parsed TTIR.
-
-        One solver, second capture front-end: graphs lower to the same
-        record shape the dynamic mode produces; pid/grid/arange/loop stay
-        symbolic. The tier selector (_solve_one_graph) picks the least
-        concretization per kernel: T0 (params symbolic too — race-free for
-        ANY input) behind the linearity gate, else T1 (this launch's
-        params); the rung lands in last_global_provenance. Nothing raised
-        in here may escape (finalize runs in the launch teardown). Consumes
-        and resets the per-launch capture state.
-        """
-        params, tensors = self._launch_params, self._launch_tensors
-        warmups, capture_error = self._warmup_count, self._capture_error
-        replay_jit_fn = self._replay_jit_fn
-        snapshot_args, snapshot_kwargs = self._snapshot_args, self._snapshot_kwargs
-        snapshot_skipped = self._snapshot_skipped
-        snapshot_tensors = self._snapshot_tensors
-        launch_grid = self._launch_grid
-        self._launch_params, self._launch_tensors = {}, {}
-        self._launch_grid = None
-        self._warmup_count, self._capture_error = 0, None
-        self._replay_jit_fn = None
-        self._snapshot_args, self._snapshot_kwargs = None, None
-        self._snapshot_skipped = None
-        self._snapshot_tensors = None
-
+    def _reset_launch_state(self) -> None:
+        """Every per-launch global-verdict field back to its blank value.
+        Called at the top of _analyze_global and of analyze_graph, so a
+        client driven either way never carries a previous launch's
+        verdict, evidence or qualifier into the next one."""
         self.last_global_reports = []
         self.last_global_status = "ok"
         self.last_global_reason = None
@@ -591,48 +569,28 @@ class CompiledRaceDetector(Client):
         self.last_global_verdict = None
         self.last_grid_fragile = []
         self.last_content_hazard = []
-        if not self.last_ttir_graphs:
-            self.last_global_status = "no_ttir"
-            self.last_global_reason = "no TTIR captured from warmup"
-            self._emit_verdict_attributes([])
-            return
-        if warmups > 1:
-            self.last_global_status = "unsupported"
-            self.last_global_reason = (
-                f"{warmups} warmups in one launch: parameter capture is " "ambiguous"
-            )
-            self._emit_verdict_attributes([])
-            return
-        if capture_error is not None:
-            self.last_global_status = "unsupported"
-            self.last_global_reason = f"launch capture failed: {capture_error}"
-            self._emit_verdict_attributes([])
-            return
-
-        # The await abstraction (spec C1): sequential concrete replay of a
-        # spin loop could never terminate (the producer block runs after
-        # the spinning consumer), so BOTH interpreter-backed channels are
-        # guarded up front — C2 classifies unavailable before any replay
-        # execution, C3 is excluded symmetrically. The verdict itself is
-        # conditional on termination (assumes_termination).
-        awaited_present = any(
-            a.awaited
-            for g in self.last_ttir_graphs
-            if g is not None
-            for a in g.accesses
-        )
-        self.last_global_assumes_termination = awaited_present
         # Route 2: set by _solve_one_graph when an encoding went through a
         # snapshot Select; the rung then carries "+content"
         self.last_global_content_qualified = False
 
+    def _solve_graphs(
+        self,
+        graphs: list[tuple[AccessGraph | None, str | None]],
+        params: dict,
+        tensors: dict,
+        launch_grid: Any,
+    ) -> tuple[str, str | None, list[str], list[Any], list[Any]]:
+        """The tier selector over every graph of a launch: (status, reason,
+        rungs, exact reports, widened reports). A graph that did not parse
+        arrives as (None, reason) and makes the launch unsupported; a
+        launch-scoped proof records its any-grid SAT evidence as
+        grid-fragile; every other outcome folds as _solve_one_graph
+        documents."""
         reports: list[Any] = []
         widened_all: list[Any] = []
         status, reason = "ok", None
         rungs: list[str] = []
-        for graph, parse_reason in zip(
-            self.last_ttir_graphs, self.last_ttir_unsupported
-        ):
+        for graph, parse_reason in graphs:
             if graph is None:
                 status, reason = "unsupported", parse_reason
                 continue
@@ -654,40 +612,23 @@ class CompiledRaceDetector(Client):
                 status, reason = "vacuous", outcome[1]
             else:
                 status, reason = "unsupported", outcome[1]
+        return status, reason, rungs, reports, widened_all
 
-        # ── C2: replay SAT witnesses under the interpreter ──
-        confirmation: str | None = None
-        replay_note: str | None = None
-        if (reports or widened_all) and self.confirm_races:
-            if awaited_present:
-                # MANDATORY pre-guard (C1.3.4): classified unavailable
-                # BEFORE any replay execution is attempted.
-                replay_note = (
-                    "await-bearing kernel: the sequential interpreter replay "
-                    "could spin forever — unavailable"
-                )
-            elif snapshot_args is None:
-                replay_note = snapshot_skipped or "replay snapshot unavailable"
-            else:
-                # Foci resolve against the SNAPSHOT clones' bases: the
-                # replay's base_map is keyed by them (originals were cloned
-                # at pre_warmup, and run_replay clones once more).
-                confirmation, upgraded, widened_unclassified = self._confirm_reports(
-                    replay_jit_fn,
-                    snapshot_args,
-                    snapshot_kwargs or {},
-                    reports,
-                    widened_all,
-                    snapshot_tensors or {},
-                    launch_grid,
-                    self._ambiguous_focus_buckets(),
-                )
-                # A CONFIRMED widened report is a real race on this launch's
-                # data: it graduates from the uncertain channel.
-                reports = reports + upgraded
-                upgraded_ids = {id(r) for r in upgraded}
-                widened_all = [w for w in widened_all if id(w) not in upgraded_ids]
-
+    def _settle_verdict(
+        self,
+        status: str,
+        reason: str | None,
+        rungs: list[str],
+        reports: list[Any],
+        widened_all: list[Any],
+        confirmation: str | None,
+        replay_note: str | None,
+        widened_unclassified: int | None,
+        awaited_present: bool,
+    ) -> None:
+        """The launch's verdict from the solved graphs (and, when C2 ran,
+        the replay's confirmation): status, reason, confirmation and the
+        provenance rung with its qualifiers, on the last_global_* fields."""
         self.last_global_reports = reports
         if reports:
             self.last_global_status = "races"
@@ -747,6 +688,166 @@ class CompiledRaceDetector(Client):
             if self.last_global_content_qualified:
                 rung += "+content"
             self.last_global_provenance = rung
+
+    def analyze_graph(
+        self,
+        graph: AccessGraph | None,
+        params: dict,
+        tensors: dict,
+        launch_grid: Any,
+        *,
+        parse_reason: str | None = None,
+        replay_note: str | None = None,
+    ) -> dict[str, Any]:
+        """The public entry for a front-end WITHOUT launch callbacks (the
+        evaluation's cuTile track: cuda.tile has no interpreter, so the
+        warmup hooks and finalize() never run). One parsed access graph
+        (or None with the parse refusal's reason) plus its launch binding
+        produce exactly what finalize() produces for a Triton launch, on
+        the same fields and through the same code: the per-launch reset,
+        the tier selector, the verdict settlement (rung qualifiers
+        included: "+assumes-termination" for an await-bearing graph,
+        "+content" for a snapshot Select) and the verdict attributes. No
+        C2 replay and no C3 differential exist for such a front-end;
+        ``replay_note`` names why in the reason of a withheld widened SAT
+        (and of a race report, as the Triton path notes an unavailable
+        replay). Returns the verdict attributes."""
+        self._reset_launch_state()
+        if graph is None:
+            self.last_global_status = "unsupported"
+            self.last_global_reason = parse_reason or "no access graph"
+            self._emit_verdict_attributes([])
+            return self.last_global_verdict or {}
+        awaited_present = any(a.awaited for a in graph.accesses)
+        self.last_global_assumes_termination = awaited_present
+        status, reason, rungs, reports, widened_all = self._solve_graphs(
+            [(graph, None)], params, tensors, launch_grid
+        )
+        self._settle_verdict(
+            status,
+            reason,
+            rungs,
+            reports,
+            widened_all,
+            None,
+            replay_note if (reports or widened_all) else None,
+            None,
+            awaited_present,
+        )
+        self._emit_verdict_attributes(widened_all)
+        return self.last_global_verdict or {}
+
+    def _analyze_global(self) -> None:
+        """Global-memory race verdict over this launch's parsed TTIR.
+
+        One solver, second capture front-end: graphs lower to the same
+        record shape the dynamic mode produces; pid/grid/arange/loop stay
+        symbolic. The tier selector (_solve_one_graph) picks the least
+        concretization per kernel: T0 (params symbolic too — race-free for
+        ANY input) behind the linearity gate, else T1 (this launch's
+        params); the rung lands in last_global_provenance. Nothing raised
+        in here may escape (finalize runs in the launch teardown). Consumes
+        and resets the per-launch capture state.
+        """
+        params, tensors = self._launch_params, self._launch_tensors
+        warmups, capture_error = self._warmup_count, self._capture_error
+        replay_jit_fn = self._replay_jit_fn
+        snapshot_args, snapshot_kwargs = self._snapshot_args, self._snapshot_kwargs
+        snapshot_skipped = self._snapshot_skipped
+        snapshot_tensors = self._snapshot_tensors
+        launch_grid = self._launch_grid
+        self._launch_params, self._launch_tensors = {}, {}
+        self._launch_grid = None
+        self._warmup_count, self._capture_error = 0, None
+        self._replay_jit_fn = None
+        self._snapshot_args, self._snapshot_kwargs = None, None
+        self._snapshot_skipped = None
+        self._snapshot_tensors = None
+
+        self._reset_launch_state()
+        if not self.last_ttir_graphs:
+            self.last_global_status = "no_ttir"
+            self.last_global_reason = "no TTIR captured from warmup"
+            self._emit_verdict_attributes([])
+            return
+        if warmups > 1:
+            self.last_global_status = "unsupported"
+            self.last_global_reason = (
+                f"{warmups} warmups in one launch: parameter capture is " "ambiguous"
+            )
+            self._emit_verdict_attributes([])
+            return
+        if capture_error is not None:
+            self.last_global_status = "unsupported"
+            self.last_global_reason = f"launch capture failed: {capture_error}"
+            self._emit_verdict_attributes([])
+            return
+
+        # The await abstraction (spec C1): sequential concrete replay of a
+        # spin loop could never terminate (the producer block runs after
+        # the spinning consumer), so BOTH interpreter-backed channels are
+        # guarded up front — C2 classifies unavailable before any replay
+        # execution, C3 is excluded symmetrically. The verdict itself is
+        # conditional on termination (assumes_termination).
+        awaited_present = any(
+            a.awaited
+            for g in self.last_ttir_graphs
+            if g is not None
+            for a in g.accesses
+        )
+        self.last_global_assumes_termination = awaited_present
+        status, reason, rungs, reports, widened_all = self._solve_graphs(
+            list(zip(self.last_ttir_graphs, self.last_ttir_unsupported)),
+            params,
+            tensors,
+            launch_grid,
+        )
+
+        # ── C2: replay SAT witnesses under the interpreter ──
+        confirmation: str | None = None
+        replay_note: str | None = None
+        widened_unclassified: int | None = None
+        if (reports or widened_all) and self.confirm_races:
+            if awaited_present:
+                # MANDATORY pre-guard (C1.3.4): classified unavailable
+                # BEFORE any replay execution is attempted.
+                replay_note = (
+                    "await-bearing kernel: the sequential interpreter replay "
+                    "could spin forever — unavailable"
+                )
+            elif snapshot_args is None:
+                replay_note = snapshot_skipped or "replay snapshot unavailable"
+            else:
+                # Foci resolve against the SNAPSHOT clones' bases: the
+                # replay's base_map is keyed by them (originals were cloned
+                # at pre_warmup, and run_replay clones once more).
+                confirmation, upgraded, widened_unclassified = self._confirm_reports(
+                    replay_jit_fn,
+                    snapshot_args,
+                    snapshot_kwargs or {},
+                    reports,
+                    widened_all,
+                    snapshot_tensors or {},
+                    launch_grid,
+                    self._ambiguous_focus_buckets(),
+                )
+                # A CONFIRMED widened report is a real race on this launch's
+                # data: it graduates from the uncertain channel.
+                reports = reports + upgraded
+                upgraded_ids = {id(r) for r in upgraded}
+                widened_all = [w for w in widened_all if id(w) not in upgraded_ids]
+
+        self._settle_verdict(
+            status,
+            reason,
+            rungs,
+            reports,
+            widened_all,
+            confirmation,
+            replay_note,
+            widened_unclassified,
+            awaited_present,
+        )
 
         # ── C3: opt-in differential cross-check ──
         if self.differential_check and not awaited_present:

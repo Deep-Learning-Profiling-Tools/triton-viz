@@ -74,6 +74,19 @@ def test_fresh_client_solves_a_cutile_graph_without_finalize():
     outcome = det._solve_one_graph(g, {"x_1": 256, "x_2": 1}, tensors, (4, 1, 1))
     assert outcome[0] == "proved", outcome
     assert det.last_global_content_qualified is False
+    # the public entry: the same outcome settled into a verdict, with the
+    # attributes stamped, on a client that never saw a launch callback
+    det2 = CompiledRaceDetector(confirm_races=False, differential_check=False)
+    v = det2.analyze_graph(g, {"x_1": 256, "x_2": 1}, tensors, (4, 1, 1))
+    assert det2.last_global_status == "ok"
+    assert det2.last_global_provenance in ("proved@T0", "proved@T1")
+    assert v["verdict"] == "race-free" and v["ladder_level"] == "L0"
+    assert v["conditional"] == () and v["content_qualified"] is False
+    # a parse refusal settles as an abstention with the reason and kind
+    v3 = CompiledRaceDetector(confirm_races=False).analyze_graph(
+        None, {}, {}, (1, 1, 1), parse_reason="nested-loop: line 3: nested"
+    )
+    assert v3["verdict"] == "abstain" and v3["unsupported_kind"] == "nested-loop"
 
 
 def test_tile_store_constant_index_races():

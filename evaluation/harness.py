@@ -104,15 +104,6 @@ def _static_track(
     det.finalize()
     elapsed = time.perf_counter() - t0
 
-    witnesses = [
-        {
-            "first": rep.first_record.source_location,
-            "second": rep.second_record.source_location,
-            "race_type": rep.race_type.name,
-            "pids": [list(rep.witness_grid_a or ()), list(rep.witness_grid_b or ())],
-        }
-        for rep in det.last_global_reports
-    ]
     # tier-selector detail, recomputed via the public gate (the client does
     # not publish it): lets the T0 stretch show up as a re-run diff.
     t0_gate = None
@@ -126,16 +117,27 @@ def _static_track(
     except Exception:  # noqa: BLE001
         pass
 
+    return _static_result(det, elapsed, t0_gate)
+
+
+def _static_result(det: Any, elapsed: float, t0_gate: bool | None) -> dict[str, Any]:
+    """The static track's row fragment from a client that has settled a
+    launch (finalize() for the Triton track, analyze_graph() for the
+    cuTile track): verdict, provenance and evidence, read from the same
+    fields either way."""
+
+    def _pair(rep: Any, kind_key: str) -> dict:
+        return {
+            "first": rep.first_record.source_location,
+            "second": rep.second_record.source_location,
+            kind_key: rep.race_type.name,
+            "pids": [list(rep.witness_grid_a or ()), list(rep.witness_grid_b or ())],
+        }
+
     # §3c guardrail 1: fragility evidence is carried as its own attribute
     # next to the launch-scoped proof — hazard wording, never "race"
     grid_fragile = [
-        {
-            "first": rep.first_record.source_location,
-            "second": rep.second_record.source_location,
-            "hazard": rep.race_type.name,
-            "pids": [list(rep.witness_grid_a or ()), list(rep.witness_grid_b or ())],
-        }
-        for rep in (getattr(det, "last_grid_fragile", []) or [])
+        _pair(rep, "hazard") for rep in (getattr(det, "last_grid_fragile", []) or [])
     ]
     # §3n: the faithfully-refuted widened hazard's site pairs — evidence
     # for the composed dispatcher's content-fragile upgrade
@@ -147,14 +149,13 @@ def _static_track(
         }
         for rep in (getattr(det, "last_content_hazard", []) or [])
     ]
-
     return {
         "status": det.last_global_status,
         "provenance": det.last_global_provenance,
         "confirmation": det.last_global_confirmation,
         "reason": det.last_global_reason,
         "n_reports": len(det.last_global_reports),
-        "witnesses": witnesses,
+        "witnesses": [_pair(rep, "race_type") for rep in det.last_global_reports],
         "grid_fragile": grid_fragile,
         "content_fragile": content_fragile,
         "parse_unsupported": [r for r in det.last_ttir_unsupported if r],
@@ -250,10 +251,11 @@ def _static_track_cutile(
     spec: LaunchSpec, seed: int, ladder_level: LadderLevel = LadderLevel.L0
 ) -> dict[str, Any]:
     """The compiled static track over the captured CuTile IR: the same
-    tier selector (T0 gate → T1 → §3c launch-scoped rung) via
-    ``_solve_one_graph``, with NO confirmation channel — cuda.tile has no
-    interpreter, so race SATs terminate at races-unclassified and proofs
-    carry their scope rungs exactly like the Triton track."""
+    tier selector and verdict settlement as the Triton track, through the
+    client's public ``analyze_graph`` (cuda.tile has no interpreter, so
+    there are no launch callbacks, no C2 replay and no C3 differential:
+    race SATs terminate at races-unclassified, proofs carry their scope
+    rungs and qualifiers exactly like the Triton track)."""
     from triton_viz.clients.common.cutile_ir_reader import parse_cutile_ir
     from triton_viz.clients.common.ttir_reader import UnsupportedTTIR
     from triton_viz.clients.race_detector.compiled.client import CompiledRaceDetector
@@ -264,76 +266,26 @@ def _static_track_cutile(
         confirm_races=False, differential_check=False, ladder_level=ladder_level
     )
     t0 = time.perf_counter()
-    status, reason, prov = "ok", None, None
-    reports: list[Any] = []
-    widened: list[Any] = []
-    fragile: list[Any] = []
+    graph, parse_reason = None, None
     try:
         graph = parse_cutile_ir(
             info["ir"], kname, multipath=ladder_level >= LadderLevel.L2
         )
     except UnsupportedTTIR as e:
-        graph, status, reason = None, "unsupported", f"{e.kind}: {e}"
+        parse_reason = f"{e.kind}: {e}"
+    params: dict = {}
+    tensors: dict = {}
     if graph is not None:
         params, tensors, _ = _cutile_bindings(info["args"])
-        outcome = det._solve_one_graph(graph, params, tensors, tuple(spec.grid))
-        if outcome[0] == "proved":
-            prov = f"proved@{outcome[1]}"
-        elif outcome[0] == "proved-launch":
-            prov = "proved@T1-launch"
-            fragile = list(outcome[1])
-        elif outcome[0] == "races":
-            _, exact, widened = outcome
-            reports = list(exact)
-            if reports:
-                status = "races"
-                if widened:
-                    reason = (
-                        "additional possible races under over-approximation "
-                        "were withheld"
-                    )
-            elif widened:
-                status = "unsupported"
-                reason = (
-                    "possible race under over-approximation (data-dependent "
-                    "mask / unmodeled branch) — not a certifiable witness "
-                    "(no cuTile replay channel)"
-                )
-        else:
-            status, reason = "unsupported", outcome[1]
-    det.last_global_status = status
-    det.last_global_reason = reason
-    det.last_global_provenance = prov
-    det.last_global_reports = reports
-    det.last_grid_fragile = fragile
-    det.last_global_confirmation = None
-    det.last_global_assumes_termination = False
-    det._emit_verdict_attributes(list(widened))
-    elapsed = time.perf_counter() - t0
-
-    def _witness(rep: Any) -> dict:
-        return {
-            "first": rep.first_record.source_location,
-            "second": rep.second_record.source_location,
-            "pids": [list(rep.witness_grid_a or ()), list(rep.witness_grid_b or ())],
-        }
-
-    return {
-        "status": status,
-        "provenance": prov,
-        "confirmation": None,
-        "reason": reason,
-        "n_reports": len(reports),
-        "witnesses": [dict(_witness(r), race_type=r.race_type.name) for r in reports],
-        "grid_fragile": [dict(_witness(r), hazard=r.race_type.name) for r in fragile],
-        "content_fragile": [],  # no replay channel: the demotion never fires
-        "parse_unsupported": [],
-        "differential": None,
-        "t0_gate": None,
-        "assumes_termination": False,
-        "verdict_attrs": det.last_global_verdict,
-        "time_s": round(elapsed, 4),
-    }
+    det.analyze_graph(
+        graph,
+        params,
+        tensors,
+        tuple(spec.grid),
+        parse_reason=parse_reason,
+        replay_note="no cuTile replay channel",
+    )
+    return _static_result(det, time.perf_counter() - t0, None)
 
 
 def _run_one_cutile(
