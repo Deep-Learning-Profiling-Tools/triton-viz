@@ -268,7 +268,9 @@ def _static_track_cutile(
     widened: list[Any] = []
     fragile: list[Any] = []
     try:
-        graph = parse_cutile_ir(info["ir"], kname)
+        graph = parse_cutile_ir(
+            info["ir"], kname, multipath=ladder_level >= LadderLevel.L2
+        )
     except UnsupportedTTIR as e:
         graph, status, reason = None, "unsupported", f"{e.kind}: {e}"
     if graph is not None:
@@ -731,7 +733,7 @@ def run_one(
 ) -> dict[str, Any]:
     # ladder_level: the detector's L0/L1/L2 switch (design §4b), stamped
     # into the results header by the runner. The cuTile track has no
-    # multipath reader yet and ignores it.
+    # interpreter (so no L1 rung); at L2 its reader runs in multipath mode.
     if spec.frontend == "cutile":
         return _run_one_cutile(spec, seed, ladder_level)
     row_started = time.perf_counter()

@@ -38,6 +38,23 @@ address raises :class:`UnsupportedTTIR` (kind="indirect-address"),
 reaching a mask drops it and flags ``mask_dropped`` (widened, proof-only),
 reaching an atomic update clears ``atomic_val``. Unknown BLOCK structure
 fails closed (kind="control-flow").
+
+``parse_cutile_ir(..., multipath=True)`` (Route 3, the ladder's L2) lifts
+the two structural boundaries of the single-path model exactly as the
+TTIR reader's multipath mode does, and is byte-identical otherwise:
+
+- several ``for`` loops (nested or sequential) each get their own
+  :class:`LoopInfo` (``AccessGraph.loops``) and induction variable; an
+  access carries its enclosing loops in ``AccessEvent.loops``;
+- structured ``if(cond=...)`` blocks contribute BOTH arms under path
+  predicates (``then`` under ``cond``, ``else`` under ``Not(cond)``); an
+  arm that ends in ``return`` is an early-exit guard, so the code after
+  the ``if`` carries the other arm's condition; an ``if`` with results
+  binds them to a Select over the two ``yield``s. An unmodelable
+  condition (loaded data) widens: both arms stay reachable, their
+  accesses are ``guarded``, results bind to :class:`DataDep`.
+The while-form ``loop`` (carried values, data-dependent trip) and
+``break`` stay refused by name.
 """
 
 from __future__ import annotations
@@ -125,6 +142,7 @@ _NAME = r"[$\w.]+"
 _RE_TYPED_NAME = re.compile(rf"^\s*({_NAME})(?:\{{[^}}]*\}})?\s*:\s*(.*)$")
 _RE_OP = re.compile(r"^(\w+)\((.*)\)$")
 _RE_FOR = re.compile(rf"^for ({_NAME}) in range\((.*?)\)(?:\s*\(with (.*)\))?\s*$")
+_RE_IF = re.compile(rf"^if\(cond=({_NAME})\)\s*$")
 _RE_TILE_TYPE = re.compile(r"^(?:const )?Tile\[(\w+),\(([^)]*)\)\]")
 _RE_ARRAY_TYPE = re.compile(r"^Array\[(\w+),\(([^)]*)\):\(([^)]*)\)\]")
 _RE_PARTVIEW_TYPE = re.compile(
@@ -186,6 +204,14 @@ class _State:
     loop: LoopInfo | None = None
     in_loop: bool = False
     arange_n: int = 0
+    # multipath (Route 3): every loop in opening order, the enclosing
+    # loops of the current position (outer first), the current path
+    # predicate and whether an enclosing condition is unmodeled
+    multipath: bool = False
+    loops: list[LoopInfo] = field(default_factory=list)
+    loop_stack: list[str] = field(default_factory=list)
+    path: Term | None = None
+    guarded: bool = False
     unknown_ops: dict[str, int] = field(default_factory=dict)
     func_args: list[FuncArg] = field(default_factory=list)
     ptr_meta: dict[str, tuple[int, bool]] = field(default_factory=dict)
@@ -219,13 +245,26 @@ def _has_datadep(t: Any) -> bool:
     return bool(_datadep_whys(t))
 
 
-def parse_cutile_ir(text: str, kernel_name: str = "cutile_kernel") -> AccessGraph:
+def parse_cutile_ir(
+    text: str, kernel_name: str = "cutile_kernel", *, multipath: bool = False
+) -> AccessGraph:
     lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
     if not lines:
         raise UnsupportedTTIR("empty CuTile IR", kind="parse")
-    st = _State(kernel_name=kernel_name)
+    st = _State(kernel_name=kernel_name, multipath=multipath)
     _parse_header(lines[0], st)
     _walk(lines, 1, 0, st)
+    if multipath:
+        return AccessGraph(
+            kernel_name=kernel_name,
+            func_args=st.func_args,
+            accesses=st.accesses,
+            loop=st.loops[0] if len(st.loops) == 1 else None,
+            iter_args={},
+            pid_axes=st.pid_axes,
+            loops=list(st.loops),
+            multipath=True,
+        )
     return AccessGraph(
         kernel_name=kernel_name,
         func_args=st.func_args,
@@ -307,6 +346,10 @@ def _walk(lines: list[str], i: int, indent: int, st: _State) -> int:
             return i + 1
         if line.startswith("continue"):
             return i + 1
+        if line.startswith(("yield", "break")):
+            # an if-arm terminator (multipath) or a while-form construct
+            # (refused before its body is walked): hand it to the caller
+            return i
         if line.startswith("do ("):
             # combiner lambda of a value-level op (tile_reduce/scan): its
             # results were already bound DataDep by the op line — the
@@ -325,7 +368,10 @@ def _handle_line(lines: list[str], i: int, indent: int, line: str, st: _State) -
         fm = _RE_FOR.match(line)
         if fm:
             return _handle_for(lines, i, indent, [], fm, st)
-        if line in ("then", "else") or line.startswith(("then", "else", "if ")):
+        im = _RE_IF.match(line)
+        if im and st.multipath:
+            return _handle_if(lines, i, indent, [], im.group(1), st)
+        if line in ("then", "else") or line.startswith(("then", "else", "if ", "if(")):
             raise UnsupportedTTIR(
                 f"line {i + 1}: `if` block structure is not modeled",
                 kind="control-flow",
@@ -352,7 +398,10 @@ def _handle_line(lines: list[str], i: int, indent: int, line: str, st: _State) -
             "data-dependent trip) is not modeled",
             kind="control-flow",
         )
-    if rhs.startswith("if ") or rhs == "if":
+    im = _RE_IF.match(rhs)
+    if im and st.multipath:
+        return _handle_if(lines, i, indent, results, im.group(1), st)
+    if rhs.startswith(("if ", "if(")) or rhs == "if":
         raise UnsupportedTTIR(
             f"line {i + 1}: `if` block structure is not modeled",
             kind="control-flow",
@@ -414,7 +463,7 @@ def _handle_for(
     fm: re.Match,
     st: _State,
 ) -> int:
-    if st.in_loop or st.loop is not None:
+    if (st.in_loop or st.loop is not None) and not st.multipath:
         raise UnsupportedTTIR(
             f"line {i + 1}: multiple/nested loops", kind="nested-loop"
         )
@@ -426,9 +475,15 @@ def _handle_for(
         raise UnsupportedTTIR(
             f"line {i + 1}: range() with {len(bounds)} bounds", kind="parse"
         )
-    st.loop = LoopInfo(
+    info = LoopInfo(
         loop_ssa=iv, induction_var=iv, lower=bounds[0], upper=bounds[1], step=bounds[2]
     )
+    if st.multipath:
+        # cuTile SSA names are unique per kernel, so the induction
+        # variable identifies the loop; opening order = outer before inner
+        st.loops.append(info)
+    else:
+        st.loop = info
     # `do (params)` line, then the body header `(params):` one level in
     j = i + 1
     if j < len(lines) and lines[j].strip().startswith("do ("):
@@ -450,10 +505,139 @@ def _handle_for(
                     st.env[pname] = DataDep("loop-carried value")
             j += 1
     st.in_loop = True
+    saved_path, saved_guarded = st.path, st.guarded
+    st.loop_stack.append(iv)
     j = _walk(lines, j, body_indent, st)
-    st.in_loop = False
+    st.loop_stack.pop()
+    st.path, st.guarded = saved_path, saved_guarded
+    st.in_loop = bool(st.loop_stack)
+    if j < len(lines) and lines[j].strip().startswith(("yield", "break")):
+        raise UnsupportedTTIR(
+            f"line {j + 1}: `{lines[j].strip().split(' ')[0]}` inside a `for` "
+            "body is not modeled",
+            kind="control-flow",
+        )
     for rname, rtyp in results:
         st.env[rname] = _TOKEN if rtyp.strip() == "Token" else DataDep("loop result")
+    return j
+
+
+def _conj(a: Term | None, b: Term | None) -> Term | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return BoolBin("and", a, b)
+
+
+def _walk_arm(
+    lines: list[str], j: int, indent: int, st: _State
+) -> tuple[int, str, list[str]]:
+    """Walk one if-arm body at ``indent``; returns (index past the arm,
+    terminator, yield operand tokens). The terminator is ``yield``,
+    ``return``, or ``dedent`` (an arm that just runs out)."""
+    k = _walk(lines, j, indent, st)
+    if k > j and lines[k - 1].strip() == "return":
+        cur = len(lines[k - 1]) - len(lines[k - 1].lstrip())
+        if cur == indent:
+            return k, "return", []
+    if k < len(lines):
+        t = lines[k].strip()
+        cur = len(lines[k]) - len(lines[k].lstrip())
+        if cur == indent and t.startswith("yield"):
+            toks = [x for x in _split_top(t[len("yield") :].strip()) if x]
+            return k + 1, "yield", toks
+        if cur == indent and t.startswith("break"):
+            raise UnsupportedTTIR(
+                f"line {k + 1}: `break` inside an `if` arm is not modeled",
+                kind="control-flow",
+            )
+    return k, "dedent", []
+
+
+def _handle_if(
+    lines: list[str],
+    i: int,
+    indent: int,
+    results: list[tuple[str, str]],
+    cond_token: str,
+    st: _State,
+) -> int:
+    """Multipath: both arms under path predicates (design section 3.1 of
+    Route 3, the structured case: cuTile IR has no basic blocks, so an
+    early ``return`` in one arm simply makes the code after the ``if``
+    carry the other arm's condition)."""
+    cv = _val(st, cond_token)
+    cond: Term | None = None
+    if isinstance(
+        cv, (Const, Pid, Param, Arange, LoopVar, Bin, Cmp, BoolBin, Select, Not)
+    ) and not _has_datadep(cv):
+        cond = cv  # type: ignore[assignment]
+    saved_path, saved_guarded = st.path, st.guarded
+    n = len(lines)
+    j = i + 1
+    arms: dict[str, tuple[str, list[Any]]] = {}
+    for label in ("then", "else"):
+        if j >= n or lines[j].strip() != label:
+            if label == "else":
+                break  # an if without an else arm
+            raise UnsupportedTTIR(
+                f"line {j + 1}: expected `{label}` after `if`", kind="parse"
+            )
+        j += 1
+        body_indent = indent + 4
+        if (
+            j < n
+            and lines[j].strip().startswith("(")
+            and lines[j].strip().endswith("):")
+        ):
+            j += 1  # the arm's (empty) parameter header
+        if cond is None:
+            st.guarded = True
+        else:
+            st.path = _conj(saved_path, cond if label == "then" else Not(cond))
+        j, term, toks = _walk_arm(lines, j, body_indent, st)
+        vals = [_val(st, t) for t in toks]  # resolved inside the arm's scope
+        arms[label] = (term, vals)
+        st.path, st.guarded = saved_path, saved_guarded
+    then_term = arms.get("then", ("dedent", []))[0]
+    else_term = arms.get("else", ("yield", []))[0]
+    # the continuation: an arm that returns never reaches the code after
+    # the if, so that code runs under the OTHER arm's condition
+    if then_term == "return" and else_term == "return":
+        st.path = _conj(saved_path, Cmp("ne", Const(0), Const(0)))  # unreachable
+    elif then_term == "return":
+        if cond is None:
+            st.guarded = True
+        else:
+            st.path = _conj(saved_path, Not(cond))
+    elif else_term == "return":
+        if cond is None:
+            st.guarded = True
+        else:
+            st.path = _conj(saved_path, cond)
+    # results: a Select over the two yields when everything is modelable
+    then_vals = arms.get("then", ("", []))[1]
+    else_vals = arms.get("else", ("", []))[1]
+    for idx, (rname, rtyp) in enumerate(results):
+        bound: Any = DataDep("if result")
+        if rtyp.strip() == "Token":
+            bound = _TOKEN
+        elif (
+            cond is not None
+            and idx < len(then_vals)
+            and idx < len(else_vals)
+            and not isinstance(
+                then_vals[idx], (DataDep, PtrValue, _Token, _ArrayView, _PartView)
+            )
+            and not isinstance(
+                else_vals[idx], (DataDep, PtrValue, _Token, _ArrayView, _PartView)
+            )
+        ):
+            bound = Select(
+                cond, _as_term(then_vals[idx], "if"), _as_term(else_vals[idx], "if")
+            )
+        st.env[rname] = bound
     return j
 
 
@@ -523,6 +707,9 @@ def _record_view_access(
             loc=None,
             line_no=line_no,
             in_loop=st.in_loop,
+            path=st.path,
+            guarded=st.guarded,
+            loops=tuple(st.loop_stack) if st.multipath else (),
             mask_dropped=mask_dropped,
             elem_float=arr.dtype in _FLOAT_DTYPES,
         )
@@ -753,6 +940,9 @@ def _handle_op(
                 loc=None,
                 line_no=line_no,
                 in_loop=st.in_loop,
+                path=st.path,
+                guarded=st.guarded,
+                loops=tuple(st.loop_stack) if st.multipath else (),
                 mask_dropped=mask_dropped,
                 elem_float=is_f,
             )
@@ -806,6 +996,9 @@ def _handle_op(
                 loc=None,
                 line_no=line_no,
                 in_loop=st.in_loop,
+                path=st.path,
+                guarded=st.guarded,
+                loops=tuple(st.loop_stack) if st.multipath else (),
                 atomic=AtomicInfo(rmw_op=rmw, sem=sem, scope=scope),
                 mask_dropped=mask_dropped,
                 atomic_val=None if (_has_datadep(upd) or is_f) else upd,
