@@ -149,6 +149,10 @@ class GlobalEncoding:
     # between the dense access seqs); the two-copy solver reads them under
     # fence-ordered semantics (paper design-fence-order.md, option A).
     fence_seqs: tuple[float, ...] = ()
+    # False for graphs whose reader does not yet expose the instance's
+    # ordering constructs as fences (the cuTile reader: tokens are opaque
+    # to it), so the legacy full program order stays in force there.
+    fence_order_applies: bool = True
     # event_ids of records built from over-approximated accesses
     # (mask_dropped / guarded): SAT reports touching them are not witnesses.
     uncertain_event_ids: set[int] = field(default_factory=set)
@@ -1063,6 +1067,7 @@ def encode_graph(
             next_rep_id += 1
     return GlobalEncoding(
         fence_seqs=tuple(graph.fences),
+        fence_order_applies=getattr(graph, "frontend", "triton") != "cutile",
         records=records,
         arange_dict=env.arange_dict,
         uncertain_event_ids=uncertain,
@@ -1387,6 +1392,8 @@ def encode_graph_t0(
                 name,
                 GlobalEncoding(
                     fence_seqs=tuple(graph.fences),
+                    fence_order_applies=getattr(graph, "frontend", "triton")
+                    != "cutile",
                     records=records,
                     arange_dict=env.arange_dict,
                     uncertain_event_ids=uncertain,

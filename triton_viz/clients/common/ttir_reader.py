@@ -452,6 +452,12 @@ class AccessGraph:
     # access k in the encoder's dense integer seq (paper
     # design-fence-order.md, option A).
     fences: list[float] = field(default_factory=list)
+    # Which reader produced the graph. The cuTile reader does not yet turn
+    # the compiler's ordering tokens into fence positions (stage 1d of the
+    # paper's design-fence-order.md), and cuda.tile's token pass orders an
+    # instance's same-array conflicts on its own, so fence-ordered
+    # semantics apply to Triton graphs only until then.
+    frontend: str = "triton"
     # Every scf.for of the kernel in textual (opening) order, outer before
     # inner. ``loop`` above stays the single loop when there is exactly one
     # (the pre-multipath consumers read it) and is None otherwise.

@@ -278,6 +278,7 @@ def parse_cutile_ir(
         loop=st.loop,
         iter_args={},
         pid_axes=st.pid_axes,
+        frontend="cutile",
     )
 
 

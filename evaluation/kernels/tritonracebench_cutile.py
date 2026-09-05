@@ -1057,6 +1057,29 @@ def _trb025_args(seed: int) -> tuple:
     )
 
 
+# ── trb026: the tile-level fence (fenced re-read only) ───────────
+# The cuTile compiler's token pass orders an instance's store and its
+# read-back of the same array on its own, so the fenced Triton row has a
+# twin while the fence-dropped rows cannot be written in cuTile.
+
+
+@ct.kernel
+def trb026_reread_fenced_kernel(x, out, SLOT: ConstInt, BLOCK: ConstInt):
+    pid = ct.bid(0)
+    offs = pid * BLOCK + ct.arange(BLOCK, dtype=np.int32)
+    ct.scatter(x, offs, offs)
+    zero = ct.arange(1, dtype=np.int32)
+    n = ct.gather(x, zero + pid * BLOCK + SLOT)
+    ct.scatter(out, zero + pid, n)
+
+
+def _trb026_args(seed: int) -> tuple:
+    return (
+        torch.zeros(4 * BLOCK, dtype=torch.int32),
+        torch.zeros(4, dtype=torch.int32),
+    )
+
+
 # ── the row table ────────────────────────────────────────────────
 # name -> (kernel, make_args, extra positional args appended AFTER the
 # tensor/scalar args (the ConstInt values, in parameter order), grid,
@@ -1411,7 +1434,14 @@ for _name, _kern, _exp, _note, _pair in (
         race_pair=_pair,
     )  # fmt: skip
 
-assert len(ROWS) == 61, len(ROWS)
+_row(
+    "trb026_reread_fenced_no", trb026_reread_fenced_kernel, _trb026_args,
+    (BLOCK // 2 + 1, BLOCK), GRID, "race-free", "tile-level-fence",
+    "store own tile, read one slot back: the compiler's token pass orders "
+    "the pair (the Triton twin needs tl.debug_barrier)",
+)  # fmt: skip
+
+assert len(ROWS) == 62, len(ROWS)
 
 
 # ── the corpus (from the captured specs JSON) ────────────────────
