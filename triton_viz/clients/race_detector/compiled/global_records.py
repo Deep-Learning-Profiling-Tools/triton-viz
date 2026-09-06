@@ -36,7 +36,7 @@ verdict, which proves exactly the premise this track assumes.
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from typing import TYPE_CHECKING, Any, Literal
 
 if TYPE_CHECKING:
@@ -75,6 +75,46 @@ _KNOWN_SEMS = ("relaxed", "acquire", "release", "acq_rel")
 
 # TTIR printer spellings → the solver's canonical RMW op names.
 _RMW_OP_ALIASES = {"exch": "xchg"}
+
+# Representation choice only: larger non-affine snapshots keep the array
+# encoding, with exactly the same values, domain, and analysis scope.
+_SMALL_SNAPSHOT_ELEMENTS = 32
+
+
+def _snapshot_lookup(values: tuple[int, ...], index: Any, fallback: Any) -> Any:
+    """Expose a captured lookup as arithmetic or a small finite choice.
+
+    ``fallback`` is the original Select. Keep it outside the CAPTURED
+    element domain, which may be smaller than a synthetic tensor's numel.
+    Thus this rewrite is equivalent under the existing snapshot equalities
+    even where no consumer in-bounds premise is asserted (e.g. operands),
+    and never invents a value for an uncaptured or out-of-bounds element.
+    Masked-load other/padding and source-eligibility checks stay in _loaded.
+    """
+    if not values:
+        return fallback
+    index = simplify(index)
+    try:
+        concrete = index.as_long()
+    except AttributeError:
+        concrete = None
+    if concrete is not None:
+        return (
+            IntVal(int(values[concrete])) if 0 <= concrete < len(values) else fallback
+        )
+    step = values[1] - values[0] if len(values) > 1 else 0
+    if all(v == values[0] + i * step for i, v in enumerate(values)):
+        return If(
+            And(index >= 0, index < len(values)),
+            IntVal(int(values[0])) + index * step,
+            fallback,
+        )
+    if len(values) > _SMALL_SNAPSHOT_ELEMENTS:
+        return fallback
+    value = fallback
+    for i in reversed(range(len(values))):
+        value = If(index == i, IntVal(int(values[i])), value)
+    return value
 
 
 def _normalize_rmw_op(op: str | None) -> str | None:
@@ -197,6 +237,7 @@ class _LoopBinding:
     zero_trip: bool
     lower: Any
     step: int
+    single_trip: bool = False
 
 
 def _graph_loops(graph: AccessGraph) -> list:
@@ -313,6 +354,76 @@ class _RaceEnv:
             return any(self._binding(ssa).zero_trip for ssa in access.loops)
         return self.zero_trip if access.in_loop else False
 
+    def _snapshot_constant(self, term: Term) -> int | None:
+        """A bound constant over every admissible correlated table index.
+
+        This is finite expression evaluation, not a grid restriction or a
+        solver query. Require unmasked, fully captured, eligible sources
+        whose indices differ by integer constants. Every feasible index
+        assignment is among the cases; extra cases can only prevent this
+        optimization. The caller must retain all original load domains.
+        """
+        leaves = list(dict.fromkeys(loaded_leaves(term)))
+        if not leaves or self.symbolic_params:
+            return None
+        tables, offsets = [], []
+        for leaf in leaves:
+            if leaf.mask is not None or mentions_loaded(leaf.offset):
+                return None
+            meta = self.tensors.get(leaf.base_param)
+            if (
+                self.free_reason_for(leaf) is not None
+                or meta is None
+                or meta.snapshot is None
+                or len(meta.snapshot) != meta.numel
+            ):
+                return None
+            tables.append(meta.snapshot)
+            offsets.append(self.eval(leaf.offset))
+        deltas: list[int] = []
+        for off in offsets:
+            delta = self._as_long(off - offsets[0])
+            if delta is None:
+                return None
+            deltas.append(delta)
+        lower = max(-delta for delta in deltas)
+        upper = min(len(table) - delta for table, delta in zip(tables, deltas))
+        fixed = self._as_long(offsets[0])
+        if fixed is not None:
+            lower, upper = max(lower, fixed), min(upper, fixed + 1)
+        if not 0 < upper - lower <= _SMALL_SNAPSHOT_ELEMENTS:
+            return None
+
+        def specialize(value: Term, known: dict[Loaded, int]) -> Term:
+            if isinstance(value, Loaded):
+                return Const(int(known[value]))
+            if isinstance(value, (Bin, Cmp, BoolBin)):
+                return replace(
+                    value, a=specialize(value.a, known), b=specialize(value.b, known)
+                )
+            if isinstance(value, TSelect):
+                return replace(
+                    value,
+                    cond=specialize(value.cond, known),
+                    t=specialize(value.t, known),
+                    f=specialize(value.f, known),
+                )
+            if isinstance(value, Not):
+                return replace(value, a=specialize(value.a, known))
+            return value
+
+        constant = None
+        for index in range(lower, upper):
+            known = {
+                leaf: table[index + delta]
+                for leaf, table, delta in zip(leaves, tables, deltas)
+            }
+            value = self._as_long(self.eval(specialize(term, known)))
+            if value is None or (constant is not None and value != constant):
+                return None
+            constant = value
+        return constant
+
     def _bind_loop(self, loop: Any, index: int) -> None:
         from z3 import Int
 
@@ -336,6 +447,10 @@ class _RaceEnv:
         lower_c = self._as_long(lower_z3)
         upper_c = self._as_long(upper_z3)
         step_c = self._as_long(step_z3)
+        if lower_c is None:
+            lower_c = self._snapshot_constant(loop.lower)
+        if upper_c is None:
+            upper_c = self._snapshot_constant(loop.upper)
 
         # The step must be a concrete positive constant in BOTH modes:
         # symbolic k·step is the nonlinear Z3-unknown bait the linearity
@@ -352,8 +467,10 @@ class _RaceEnv:
 
         var = Int("ttir_loop_k" if index == 0 else f"ttir_loop_k{index}")
         zero_trip = False
+        single_trip = False
         if lower_c is not None and upper_c is not None:
             n_iters = max(0, (upper_c - lower_c + step_c - 1) // step_c)
+            single_trip = n_iters == 1
             # A zero-trip loop has NO footprint: in-loop accesses are
             # skipped entirely (encode_graph). The premise must stay the
             # exact range — fabricating an iteration (max(1, n)) produced
@@ -390,7 +507,7 @@ class _RaceEnv:
                     lower_z3 + var * IntVal(step_c) < upper_z3,
                 ),
             ) + domain
-        binding = _LoopBinding(var, premises, zero_trip, lower_z3, step_c)
+        binding = _LoopBinding(var, premises, zero_trip, lower_z3, step_c, single_trip)
         self._loops[loop.loop_ssa] = binding
         self.loop_vars = self.loop_vars + (var,)
         if index == 0:
@@ -458,7 +575,9 @@ class _RaceEnv:
             return self._arange(term)
         if isinstance(term, LoopVar):
             b = self._binding(term.loop_ssa)
-            return b.lower + b.var * IntVal(b.step)
+            # Keep k registered for two-copy renaming and iteration-order
+            # checks, but expose its forced-zero value in body addresses.
+            return b.lower if b.single_trip else b.lower + b.var * IntVal(b.step)
         if isinstance(term, IterArgOffset):
             info = self.graph.iter_args[term.arg_id]
             if mentions_loaded(info.delta):
@@ -473,7 +592,8 @@ class _RaceEnv:
                     kind="indirect-address",
                 )
             b = self._binding(info.loop_ssa) if info.loop_ssa else self._binding("")
-            return self.eval(info.offset0) + b.var * self.eval(info.delta)
+            offset0, delta = self.eval(info.offset0), self.eval(info.delta)
+            return offset0 if b.single_trip else offset0 + b.var * delta
         if isinstance(term, Bin):
             a, b = self.eval(term.a), self.eval(term.b)
             if term.op == "+":
@@ -580,7 +700,9 @@ class _RaceEnv:
             return Select(self._pad(term.access_index), off)
         arr, _numel = snap
         self.used_snapshot = True
-        value = Select(arr, off)
+        values = self.tensors[term.base_param].snapshot
+        assert values is not None
+        value = _snapshot_lookup(values, off, Select(arr, off))
         if term.mask is None:
             return value
         mask = _as_bool(self.eval(term.mask))
