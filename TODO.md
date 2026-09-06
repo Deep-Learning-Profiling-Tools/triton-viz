@@ -809,6 +809,17 @@ the demoted hazard as a `content_fragile` attribute.
 
 ## 3o. The ladder switch (L0/L1/L2) and the L1 rung: concrete per-instance enumeration (on branch `route1-concrete-enumeration`, 2026-09-04; default L0)
 
+**Correction, 2026-09-06:** after the completed `454d032` measurements, the
+enumerator's legacy same-instance program-order assumption was found to
+violate the enabled fence-order model. The correction records fences and
+original positions, checks same-instance cross-operation conflicts, and
+refuses unstable value sources or unavailable dependency provenance. Legacy
+ordering applies only when fence order is explicitly disabled. Mechanism, regression
+coverage and the measurement boundary are recorded in
+`evaluation/CONCRETE_ENUM_FENCE_ORDER.md`. The dated measurements below
+retain their original pins; none is silently upgraded to the corrected
+semantics. A new common-pin experiment remains required for paper adoption.
+
 Provenance: the paper repo's abstention analysis (2026-09-04) — the
 pinned run abstains on 492/1062 real-code rows, 217 of them in the
 `indirect-address x interpreter-unsupported` class (indirect

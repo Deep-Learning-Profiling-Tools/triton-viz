@@ -109,9 +109,13 @@ def _two_stores_same_address_kernel(out_ptr):
     tl.store(out_ptr + pid, 2.0)
 
 
-def test_same_instance_stores_across_operations_are_program_ordered():
+def test_unfenced_same_instance_stores_across_operations_race(monkeypatch):
+    from triton_viz.core.config import config as cfg
+
+    monkeypatch.setattr(cfg, "race_detector_fence_order", True)
     o = _run(_two_stores_same_address_kernel, (4,), torch.zeros(4))
-    assert o.status == "ok"
+    assert o.status == "races"
+    assert o.reports[0].race_type == RaceType.WAW
 
 
 @triton.jit
@@ -627,6 +631,7 @@ def _relay_index_kernel(idx_ptr, scratch_ptr, out_ptr, BLOCK: tl.constexpr):
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     i = tl.load(idx_ptr + offs)
     tl.store(scratch_ptr + offs, i)  # relay through this instance's scratch
+    tl.debug_barrier()
     j = tl.load(scratch_ptr + offs)
     tl.store(out_ptr + j, 1.0)
 
@@ -653,6 +658,7 @@ def _relay_written_index_kernel(idx_ptr, scratch_ptr, out_ptr, BLOCK: tl.constex
         tl.store(idx_ptr + offs - BLOCK, 0)  # instance 1 writes instance 0's indices
     i = tl.load(idx_ptr + offs)
     tl.store(scratch_ptr + offs, i)
+    tl.debug_barrier()
     j = tl.load(scratch_ptr + offs)
     tl.store(out_ptr + j, 1.0)
 
@@ -676,6 +682,7 @@ def _relay_ticket_kernel(head_ptr, scratch_ptr, buf_ptr):
     pid = tl.program_id(0)
     t = tl.atomic_add(head_ptr, 1)
     tl.store(scratch_ptr + pid, t)  # the ticket goes through memory...
+    tl.debug_barrier()
     idx = tl.load(scratch_ptr + pid)
     tl.store(buf_ptr + idx, pid)  # ...and still reaches an address
 
@@ -702,6 +709,7 @@ def _slow_kernel(out_ptr, n_iter, BLOCK: tl.constexpr):
     offs = pid * BLOCK + tl.arange(0, BLOCK)
     for i in range(n_iter):
         tl.store(out_ptr + offs, i * 1.0)
+        tl.debug_barrier()  # keep the projection control free of WAW conflicts
 
 
 def test_projected_cost_refuses_early_by_name():

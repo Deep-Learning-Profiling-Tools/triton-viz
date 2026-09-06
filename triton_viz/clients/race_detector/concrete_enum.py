@@ -15,6 +15,9 @@ executed load / store / atomic OPERATION, the active lanes' byte intervals
 coalesce; a duplicate position inside one plain store is the A1 shape and
 is reported), plus the operation's kind, element width, atomic scope and
 source location.
+In fence-order mode it also records explicit fence epochs and compact runs
+of original tile positions, and tracks same-position dependencies separately
+from the conservative value taint used by the footprint premise.
 
 What is decided (``analyze``): the model's conflict predicate, mirrored
 from ``hb_common.conflicting_access_modes`` and the two-copy solver's
@@ -28,19 +31,23 @@ from ``hb_common.conflicting_access_modes`` and the two-copy solver's
   instance's atomic IS a race. No happens-before edge exists for this
   rung: every cross-instance synchronization shape the model knows is a
   disqualifier (below).
-* within ONE instance, program order orders every access of an earlier
-  operation before every access of a later one, so cross-operation
-  overlaps are never races; the element accesses of ONE tile operation are
-  mutually unordered, so two lanes of one plain store at overlapping bytes
-  race (the duplicate-position query). Duplicate lanes of one atomic
-  serialize, duplicate lanes of one load read-read: neither races.
+* within ONE instance, fence-order mode orders cross-operation accesses
+  through explicit fences or captured same-position elementwise dependencies,
+  matching the shared solver core. Program order alone does not order WAR,
+  WAW, or RAW pairs. A possible dependency with insufficient position
+  provenance refuses by name. The legacy ``fence_order=False`` mode retains
+  whole-operation program order. In either mode two lanes of one plain store
+  at overlapping bytes race (the duplicate-position query). Duplicate lanes
+  of one atomic serialize; duplicate lanes of one load are read-read.
 
 The claim: ``proved`` / ``races`` at the ANALYZED-LAUNCH extent (these
 scalar arguments, this grid, these tensor contents), the same strength as
 the interpreter frontend's ``proved@interp`` / ``race@interp``, under the
 value-source premise (A2, extended): every load whose value reaches a
 footprint-determining position (an address, a mask, a host-side branch, a
-loop bound) must read bytes no OTHER instance writes. The premise is
+loop bound) must read bytes no OTHER instance writes, and any same-instance
+writers must determine its observed contents under the configured order.
+The premise is
 enforced by CONCRETE TAINT: every interpreter value carries the set of
 load operations it derives from (plus an ``atomic-return`` marker), and
 taint also flows THROUGH MEMORY within an instance: a store records the
@@ -48,12 +55,16 @@ taint of the value it writes, and a later same-instance load of those
 bytes inherits it (an atomic return relayed through scratch memory still
 refuses; a relayed loaded value makes the original load a value source
 too). A value-source load whose interval overlaps another instance's
-write footprint refuses by name after the run. Instances execute
+write footprint refuses by name after the run. In fence-order mode a source
+load also refuses when an overlapping writer is unordered with it, when
+earlier overlapping writers are unordered with one another, or when a prior
+store has duplicate conflicting lanes. The same checks apply recursively
+to relayed sources. Instances execute
 sequentially on one cloned copy of the tensors, which is exact under
 that premise: a footprint can only depend on memory through a
 value-source load, and such a load reads either the initial contents or
-its own instance's program-ordered earlier writes, in the sequential run
-exactly as in every real execution. Plain-data loads are unrestricted,
+its own instance's ordered earlier writes, with a uniquely determined writer
+under the captured memory model. Plain-data loads are unrestricted,
 and their cross-instance overlaps with writes are reported as races.
 
 Disqualifiers, each refusing BY NAME (``"<kind>: detail"``), never
@@ -66,6 +77,12 @@ silently:
   value-source      a value-source load overlaps another instance's
                     write footprint (the A2 premise), including a spin
                     on a plain-loaded flag.
+  value-source-order a value-source load has an unordered same-instance
+                    writer, unordered earlier writers, or a prior store
+                    with conflicting duplicate positions.
+  dependency-order  overlapping same-instance accesses may have a dependency
+                    whose exact position relation was not captured; no
+                    whole-operation order is inferred from value taint.
   projected-cost    after the first instance and a grace period of
                     ``ENUM_PROJECTION_GRACE_S``, the running mean
                     per-instance time (first instance excluded) times
@@ -108,6 +125,7 @@ import statistics
 import sys
 import time
 from dataclasses import dataclass, field
+from itertools import chain
 from typing import Any, Callable
 
 import numpy as np
@@ -115,7 +133,7 @@ import numpy as np
 from ...core.callbacks import ForLoopCallbacks, OpCallbacks
 from ...core.client import Client
 from ...core.config import config as cfg
-from ...core.data import AtomicCas, AtomicRMW, Load, Store
+from ...core.data import AtomicCas, AtomicRMW, Barrier, Load, Store
 from ...core.patch import PatchOp
 from ...utils.traceback_utils import (
     _is_framework_frame,
@@ -151,6 +169,7 @@ ENUM_PROJECTION_FACTOR = 2.0
 
 _ATOMIC = -1  # taint marker: derived from an atomic return value
 _TAINT_ATTR = "_tilerace_taint"
+_DEP_ATTR = "_tilerace_positional_deps"
 
 _KIND_LOAD = 0
 _KIND_STORE = 1
@@ -342,6 +361,59 @@ def _collect_taint(objs) -> tuple[frozenset[int], bool]:
     return taint, unknown
 
 
+def _positional_deps(objs: Any, shape: tuple[int, ...]) -> frozenset[int]:
+    """Exact same-position anchors, separate from conservative value taint.
+
+    An operand with another shape cannot establish the positional rule:
+    scalar broadcasting, reductions and layout changes need more provenance
+    than this recorder has. Their value taint is deliberately retained.
+    """
+    deps: set[int] = set()
+    for obj in objs:
+        for h in _iter_handles(obj):
+            if np.shape(h.data) == shape:
+                deps.update(getattr(h, "attr", {}).get(_DEP_ATTR, ()))
+    return frozenset(deps)
+
+
+def _set_positional_deps(handle: Any, deps: frozenset[int]) -> None:
+    attr = getattr(handle, "attr", None)
+    if isinstance(attr, dict):
+        # Unlike taint, this must overwrite: a reduction can return a handle
+        # from an internal elementwise operation without preserving positions.
+        attr[_DEP_ATTR] = deps
+
+
+@dataclass
+class _PositionalFootprint:
+    """Address runs whose original (pre-mask) flat position increases by one.
+
+    Coalescing by address alone loses the lane identity required by D3. These
+    runs stay compact for ordinary contiguous tiles, including masked tails.
+    """
+
+    shape: tuple[int, ...]
+    starts: np.ndarray
+    ends: np.ndarray
+    positions: np.ndarray
+
+    @classmethod
+    def capture(
+        cls, data: np.ndarray, positions: np.ndarray, shape: tuple[int, ...], elem: int
+    ) -> _PositionalFootprint:
+        order = np.argsort(data, kind="stable")
+        addresses = data[order].astype(np.int64, copy=False)
+        positions = positions[order]
+        if not addresses.size:
+            return cls(shape, addresses, addresses.copy(), positions)
+        breaks = np.flatnonzero(
+            (np.diff(addresses) != elem) | (np.diff(positions) != 1)
+        )
+        first = np.concatenate(([0], breaks + 1))
+        last = np.concatenate((breaks, [addresses.size - 1]))
+        return cls(shape, addresses[first], addresses[last] + elem, positions[first])
+
+
 # ─────────────────────────── projected cost ───────────────────────────
 
 
@@ -429,11 +501,16 @@ class ConcreteFootprintRecorder(Client):
         self,
         budget_s: float | None = None,
         bounds: list[tuple[int, int]] | None = None,
+        *,
+        fence_order: bool | None = None,
     ) -> None:
         super().__init__()
         # the caller's wall-clock budget for the run (the watchdog's
         # value); drives the projected-cost refusal, None disables it
         self.budget_s = budget_s
+        self.fence_order = (
+            cfg.race_detector_fence_order if fence_order is None else fence_order
+        )
         # the in-bounds premise: the byte spans [lo, hi) of the tensor
         # arguments' storages (the clones the run executes on); every
         # active lane of every access must fall inside one span, checked
@@ -453,6 +530,10 @@ class ConcreteFootprintRecorder(Client):
         # taint of the value a store wrote (atomics: the atomic marker;
         # loads: None): taint through memory within an instance
         self.op_store_taint: list[frozenset[int] | None] = []
+        self.op_fence_epoch: list[int] = []
+        self.op_deps: list[frozenset[int]] = []
+        self.op_possible_deps: list[frozenset[int]] = []
+        self.op_positions: list[_PositionalFootprint] = []
         self.intervals = _IntervalBuffer()
         self.sites: list[tuple[str, int, str] | None] = []
         self._site_ids: dict[Any, int] = {}
@@ -465,11 +546,13 @@ class ConcreteFootprintRecorder(Client):
         # per-instance state
         self._pid_index = -1
         self._seq = 0
+        self._fence_epoch = 0
         self._loads_in_instance: list[int] = []
         self._atomic_seen = False
         self._last_load_op_id: int | None = None
         self._synthesized_mask_pending = False
         self._pending_store_taint: frozenset[int] | None = None
+        self._pending_dep_inputs: list[Any] = []
         self._instance_t0 = 0.0
         self._run_t0 = 0.0
         # patch bookkeeping
@@ -495,6 +578,7 @@ class ConcreteFootprintRecorder(Client):
         self.pids.append((pid[0], pid[1], pid[2]))
         self._pid_index = len(self.pids) - 1
         self._seq = 0
+        self._fence_epoch = 0
         self._loads_in_instance = []
         self._atomic_seen = False
         self._last_load_op_id = None
@@ -541,6 +625,7 @@ class ConcreteFootprintRecorder(Client):
             Store: self._pre_store,
             AtomicRMW: self._pre_atomic_rmw,
             AtomicCas: self._pre_atomic_cas,
+            Barrier: self._pre_barrier,
         }
         # RawLoad/RawStore deliberately absent: the interpreter's
         # create_load/create_store synthesize an all-True mask and
@@ -578,6 +663,21 @@ class ConcreteFootprintRecorder(Client):
                 if vunknown:
                     vt = vt | recorder._unknown_taint()
                 recorder._pending_store_taint = vt
+            if recorder.fence_order and kind is not None:
+                # Match the core's value/mask/compare roots, never pointer
+                # provenance. Raw load/store wrappers delegate to these.
+                indices = {
+                    "create_masked_load": (1,),
+                    "create_masked_store": (1, 2),
+                    "create_store": (1,),
+                    "create_tensor_pointer_store": (1,),
+                    "create_descriptor_store": (1,),
+                    "create_atomic_rmw": (2, 3),
+                    "create_atomic_cas": (1, 2),
+                }.get(name, ())
+                recorder._pending_dep_inputs = [
+                    args[i] for i in indices if i < len(args)
+                ]
             ret = fn(*args, **kwargs)
             taint, unknown = _collect_taint(list(args) + list(kwargs.values()))
             if unknown:
@@ -588,6 +688,25 @@ class ConcreteFootprintRecorder(Client):
                 taint = taint | frozenset((_ATOMIC,))
             for h in _iter_handles(ret):
                 _tag(h, taint)
+                if recorder.fence_order:
+                    if kind in ("load", "atomic") and recorder.op_kind:
+                        # The memory operation is an anchor. Do not flatten
+                        # dependencies through intermediate memory operations:
+                        # their masks may make the intermediate lane inactive.
+                        _set_positional_deps(h, frozenset((len(recorder.op_kind) - 1,)))
+                    elif name in recorder._POSITIONAL_METHODS:
+                        _set_positional_deps(
+                            h,
+                            _positional_deps(
+                                list(args) + list(kwargs.values()), np.shape(h.data)
+                            ),
+                        )
+                    elif name.startswith("create_") or name in (
+                        "reduce",
+                        "associative_scan",
+                        "materialize_pointers",
+                    ):
+                        _set_positional_deps(h, frozenset())
             return ret
 
         wrapper.__name__ = getattr(fn, "__name__", name)
@@ -611,6 +730,30 @@ class ConcreteFootprintRecorder(Client):
             "create_tensor_pointer_store",
             "create_descriptor_store",
         )
+    )
+    # This whitelist establishes the same-position rule, unlike the generic
+    # taint wrapper (which intentionally follows every operation). Shape must
+    # also remain identical. Dot/reduce/scan/reshape/trans/broadcast are absent.
+    _POSITIONAL_METHODS = frozenset(
+        "binary_op ternary_op unary_op cast_impl "
+        "create_fp_to_fp create_bitcast create_int_to_ptr create_ptr_to_int "
+        "create_si_to_fp create_ui_to_fp create_fp_to_si create_fp_to_ui "
+        "create_fp_ext create_fp_trunc create_int_cast "
+        "create_fadd create_fmul create_fdiv create_frem create_fsub create_mul "
+        "create_precise_divf create_sdiv create_udiv create_srem create_urem "
+        "create_add create_sub create_shl create_lshr create_minsi create_minui "
+        "create_minimumf create_minnumf create_maxsi create_maxui create_maximumf "
+        "create_maxnumf create_and create_xor create_or create_idiv create_ashr "
+        "create_umulhi create_clampf create_select create_fma create_fabs "
+        "create_cos create_exp create_exp2 create_iabs create_floor create_ceil "
+        "create_log create_log2 create_precise_sqrt create_sqrt create_sin "
+        "create_erf create_rsqrt create_addptr "
+        "create_icmpSLE create_icmpSLT create_icmpSGE create_icmpSGT "
+        "create_icmpULE create_icmpULT create_icmpUGE create_icmpUGT "
+        "create_icmpEQ create_icmpNE create_fcmpOLT create_fcmpOGT "
+        "create_fcmpOLE create_fcmpOGE create_fcmpOEQ create_fcmpONE "
+        "create_fcmpULT create_fcmpUGT create_fcmpULE create_fcmpUGE "
+        "create_fcmpUEQ create_fcmpUNE".split()
     )
 
     def _install_builder_patch(self) -> None:
@@ -825,7 +968,9 @@ class ConcreteFootprintRecorder(Client):
             sink_handles.append(mask)
         position = "a memory address" if kind != _KIND_LOAD else "a load address"
         self._sink(sink_handles, position if mask is None else "an address or mask")
+        shape = np.shape(ptr.data)
         data = np.asarray(ptr.data).reshape(-1)
+        positions = np.arange(data.size, dtype=np.int64) if self.fence_order else None
         if mask is not None:
             raw = (
                 mask.data if hasattr(mask, "data") and hasattr(mask, "dtype") else mask
@@ -834,6 +979,8 @@ class ConcreteFootprintRecorder(Client):
                 np.asarray(raw, dtype=bool), np.shape(ptr.data)
             ).reshape(-1)
             data = data[m]
+            if positions is not None:
+                positions = positions[m]
         elem = max(1, int(ptr.get_element_ty().primitive_bitwidth) // 8)
         if self.check_bounds and data.size:
             self._check_bounds(kind, data, elem)
@@ -850,6 +997,17 @@ class ConcreteFootprintRecorder(Client):
         self.op_site.append(self._site_id(capture_current_source_location()))
         self.op_lanes.append(int(data.size))
         self.op_value_source.append(False)
+        if self.fence_order:
+            self.op_fence_epoch.append(self._fence_epoch)
+            self.op_deps.append(_positional_deps(self._pending_dep_inputs, shape))
+            possible, unknown = _collect_taint(self._pending_dep_inputs)
+            if unknown:
+                possible = possible | self._unknown_taint()
+            self.op_possible_deps.append(possible)
+            self.op_positions.append(
+                _PositionalFootprint.capture(data, positions, shape, elem)
+            )
+        self._pending_dep_inputs = []
         if kind == _KIND_STORE:
             pending = self._pending_store_taint
             self._pending_store_taint = None
@@ -908,6 +1066,10 @@ class ConcreteFootprintRecorder(Client):
         if keys is not None:  # NKI frontend
             return
         self._record(_KIND_LOAD, ptr, mask)
+
+    def _pre_barrier(self, *a: Any, **k: Any) -> None:
+        if self._pid_index >= 0 and self.fence_order:
+            self._fence_epoch += 1
 
     def _pre_store(
         self, ptr: Any, mask: Any, keys: Any = None, *a: Any, **k: Any
@@ -980,6 +1142,70 @@ class _Analyzer:
         self.pid_index = np.asarray(rec.op_pid_index, dtype=np.int64)
         self.reports: list[ConcreteRaceReport] = []
         self._seen: set[tuple[int, int, str, bool]] = set()
+        self.deps = rec.op_deps
+        self._position_results: dict[tuple[int, int], tuple[int, int] | str | None] = {}
+
+    def _positional_conflict(
+        self, first: int, second: int
+    ) -> tuple[int, int] | str | None:
+        """None if all overlapping positions are ordered, else a witness
+        (lo, hi), or a named refusal when position provenance is insufficient.
+        The operation pair must have a positional dependency already.
+        """
+        key = (first, second)
+        if key in self._position_results:
+            return self._position_results[key]
+        rec = self.rec
+        a, b = rec.op_positions[first], rec.op_positions[second]
+        elem = rec.op_elem[first]
+        result: tuple[int, int] | str | None = None
+        if _is_atomic(rec.op_kind[first]) and _is_atomic(rec.op_kind[second]):
+            result = "dependency-order: torn atomic accesses need per-element compatibility and dependency provenance"
+        elif a.shape != b.shape or elem != rec.op_elem[second]:
+            result = "dependency-order: overlapping dependent accesses have different shapes or element widths"
+        elif b.starts.size:
+            prefix_end = np.maximum.accumulate(b.ends)
+            for sa, ea, pa in zip(a.starts, a.ends, a.positions):
+                j = int(np.searchsorted(b.starts, ea, side="left")) - 1
+                while j >= 0 and prefix_end[j] > sa:
+                    sb, eb, pb = b.starts[j], b.ends[j], b.positions[j]
+                    lo, hi = max(int(sa), int(sb)), min(int(ea), int(eb))
+                    if lo < hi:
+                        if (int(sa) - int(sb)) % elem:
+                            result = "dependency-order: dependent accesses have misaligned element boundaries"
+                            break
+                        posa = int(pa) + (lo - int(sa)) // elem
+                        posb = int(pb) + (lo - int(sb)) // elem
+                        if posa != posb:
+                            result = (lo, hi)
+                            break
+                    j -= 1
+                if result is not None:
+                    break
+        self._position_results[key] = result
+        return result
+
+    def _same_instance_conflict(
+        self, first: int, second: int, lo: int, hi: int
+    ) -> tuple[int, int] | str | None:
+        rec = self.rec
+        if first == second or not rec.fence_order:
+            return None
+        if rec.op_seq[first] > rec.op_seq[second]:
+            first, second = second, first
+        if rec.op_fence_epoch[first] != rec.op_fence_epoch[second]:
+            return None
+        if first in self.deps[second]:
+            return self._positional_conflict(first, second)
+        possible = rec.op_possible_deps[second]
+        if first in possible or (
+            _is_atomic(rec.op_kind[first]) and _ATOMIC in possible
+        ):
+            return (
+                "dependency-order: overlapping same-instance accesses have value "
+                "provenance without a captured same-position dependency"
+            )
+        return (lo, hi)
 
     # ── witness construction ──
     def _access(self, op: int) -> ConcreteAccess:
@@ -1024,12 +1250,13 @@ class _Analyzer:
 
     # ── the value-source premise (A2) ──
     def value_source_violation(self) -> str | None:
-        """The A2 premise, cross-instance: a value-source load must not
-        overlap bytes another instance writes. Same-instance writes are
-        program-ordered and deterministic; an EARLIER same-instance
-        write relays its value's taint into the load (an atomic return
-        refuses, a relayed loaded value makes the original load a value
-        source, checked in turn); a LATER one cannot affect the value."""
+        """A footprint load must have the same bytes in every allowed order.
+
+        In fence mode, same-instance replay is not itself an order proof:
+        every overlapping writer must be ordered against the load, and
+        earlier writers must also be ordered against one another. Apply
+        the same test recursively to every through-memory taint source.
+        """
         rec = self.rec
         worklist = [op for op, flag in enumerate(rec.op_value_source) if flag]
         if not worklist:
@@ -1050,6 +1277,7 @@ class _Analyzer:
         # bisection instead of a full scan per load (the scan made the
         # check quadratic in the number of value-source loads)
         processed: set[int] = set()
+        duplicate_ops = {op for op, _ in rec.intra_dups}
         while worklist:
             load = worklist.pop()
             if load in processed:
@@ -1060,6 +1288,7 @@ class _Analyzer:
             hi = int(np.searchsorted(self.ops, load, side="right"))
             lpid, lseq = rec.op_pid_index[load], rec.op_seq[load]
             for s, e in zip(self.starts[lo:hi], self.ends[lo:hi]):
+                prior_writes: list[tuple[int, int, int]] = []
                 hi = int(np.searchsorted(ws, e, side="left"))  # writes with start < e
                 j = hi - 1
                 while j >= 0 and prefix_max_end[j] > s:
@@ -1074,6 +1303,51 @@ class _Analyzer:
                                 f"{_fmt_site(rec.sites[rec.op_site[other]])} (instance "
                                 f"{rec.pids[rec.op_pid_index[other]]}): the read-only-inputs premise fails"
                             )
+                        if rec.fence_order:
+                            lepoch = rec.op_fence_epoch[load]
+                            wepoch = rec.op_fence_epoch[other]
+                            if wepoch == lepoch:
+                                # A later store may be ordered by an exact
+                                # same-position dependency (e.g. a loaded
+                                # mask in an in-place pointwise update).
+                                ordered_after = (
+                                    rec.op_seq[other] > lseq
+                                    and self._same_instance_conflict(
+                                        load, other, int(s), int(e)
+                                    )
+                                    is None
+                                )
+                                if not ordered_after:
+                                    return (
+                                        "value-source-order: a footprint-determining load "
+                                        "overlaps a same-instance writer without a "
+                                        "captured happens-before order"
+                                    )
+                                j -= 1
+                                continue
+                            if wepoch < lepoch:
+                                if other in duplicate_ops:
+                                    return (
+                                        "value-source-order: a footprint-determining load "
+                                        "can read a store with conflicting duplicate positions"
+                                    )
+                                begin, end = (
+                                    max(int(s), int(ws[j])),
+                                    min(int(e), int(we[j])),
+                                )
+                                for ps, pe, prev in prior_writes:
+                                    if (
+                                        prev != other
+                                        and rec.op_fence_epoch[prev] == wepoch
+                                        and ps < end
+                                        and begin < pe
+                                    ):
+                                        return (
+                                            "value-source-order: a footprint-determining load "
+                                            "has overlapping earlier writers unordered "
+                                            "with respect to one another"
+                                        )
+                                prior_writes.append((begin, end, other))
                         if rec.op_seq[other] < lseq:
                             relayed = rec.op_store_taint[other] or frozenset()
                             if _ATOMIC in relayed:
@@ -1098,6 +1372,70 @@ class _Analyzer:
             if self._report(op, op, addr, addr + elem, _INTRA_OP_REASON):
                 return True
         return False
+
+    def same_instance(self) -> str | None:
+        """Fence-ordered cross-operation conflicts, preserving D3 positions.
+
+        The sweep runs independently in each instance. A pair whose generic
+        provenance suggests an uncaptured dependency is refused, not declared
+        ordered and not turned into a potentially spurious witness.
+        """
+        rec = self.rec
+        if not rec.fence_order or not self.starts.size:
+            return None
+        epochs = np.asarray(rec.op_fence_epoch, dtype=np.int64)
+        order = np.lexsort(
+            (self.ends, self.starts, epochs[self.ops], self.pid_index[self.ops])
+        )
+        active_w: list[tuple[int, int, int]] = []
+        active_r: list[tuple[int, int, int]] = []
+        previous_group = None
+        checked: set[tuple[int, int]] = set()
+        for interval in order:
+            s, e, op = (
+                int(self.starts[interval]),
+                int(self.ends[interval]),
+                int(self.ops[interval]),
+            )
+            pid = rec.op_pid_index[op]
+            group = (pid, rec.op_fence_epoch[op])
+            if group != previous_group:
+                active_w.clear()
+                active_r.clear()
+                checked.clear()
+                previous_group = group
+            for active in (active_w, active_r):
+                while active and active[0][0] <= s:
+                    heapq.heappop(active)
+            writes = _writes(rec.op_kind[op])
+            candidates = chain(active_w, active_r) if writes else iter(active_w)
+            for end_j, other, start_j in candidates:
+                if op == other:
+                    continue
+                if (
+                    _is_atomic(rec.op_kind[op])
+                    and _is_atomic(rec.op_kind[other])
+                    and s == start_j
+                    and rec.op_elem[op] == rec.op_elem[other]
+                ):
+                    continue  # equal-width, equal-address atomics in one CTA
+                key = (min(op, other), max(op, other))
+                if key in checked:
+                    continue
+                checked.add(key)
+                conflict = self._same_instance_conflict(op, other, s, min(e, end_j))
+                if isinstance(conflict, str):
+                    return conflict
+                if conflict is not None and self._report(
+                    op,
+                    other,
+                    *conflict,
+                    "same-instance conflicting accesses lack a fence or a "
+                    "same-position dependency happens-before edge",
+                ):
+                    return None
+            heapq.heappush(active_w if writes else active_r, (e, op, s))
+        return None
 
     # ── cross-instance sweep ──
     def cross_instance(self) -> None:
@@ -1242,11 +1580,25 @@ def analyze(
     rec: ConcreteFootprintRecorder, max_reports: int = ENUM_MAX_REPORTS
 ) -> EnumOutcome:
     """Decide the recorded launch: value-source premise first (a violation
-    refuses the whole launch), then the duplicate-position query, then
-    the cross-instance sweep."""
+    refuses the whole launch), then duplicate positions, same-instance
+    fence/dependency order, and the cross-instance sweep."""
     t0 = time.perf_counter()
     an = _Analyzer(rec, max_reports)
-    violation = an.value_source_violation()
+    violation: str | None
+    if rec.fence_order and any(
+        length != len(rec.op_kind)
+        for length in (
+            len(rec.op_fence_epoch),
+            len(rec.op_deps),
+            len(rec.op_possible_deps),
+            len(rec.op_positions),
+        )
+    ):
+        violation = (
+            "dependency-order: recorder lacks fence or original-position metadata"
+        )
+    else:
+        violation = an.value_source_violation()
     outcome = EnumOutcome(
         status="unsupported",
         grid=rec.grid,
@@ -1258,9 +1610,14 @@ def analyze(
         outcome.reason = violation
     else:
         if not an.intra_op_duplicates():
-            an.cross_instance()
-        outcome.reports = an.reports
-        outcome.status = "races" if an.reports else "ok"
+            violation = an.same_instance()
+            if violation is None:
+                an.cross_instance()
+        if violation is not None:
+            outcome.reason = violation
+        else:
+            outcome.reports = an.reports
+            outcome.status = "races" if an.reports else "ok"
     if rec.instance_times:
         outcome.instance_s = statistics.median(rec.instance_times)
         outcome.max_instance_s = max(rec.instance_times)

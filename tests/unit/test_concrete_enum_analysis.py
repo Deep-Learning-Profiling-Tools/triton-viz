@@ -14,6 +14,7 @@ from triton_viz.clients.race_detector.concrete_enum import (
     _KIND_RMW,
     _KIND_STORE,
     _SCOPE_CODES,
+    _PositionalFootprint,
     ConcreteFootprintRecorder,
     analyze,
 )
@@ -21,8 +22,8 @@ from triton_viz.clients.race_detector.concrete_enum import (
 BASE = 1 << 20
 
 
-def _rec() -> ConcreteFootprintRecorder:
-    rec = ConcreteFootprintRecorder()
+def _rec(*, fence_order: bool = True) -> ConcreteFootprintRecorder:
+    rec = ConcreteFootprintRecorder(fence_order=fence_order)
     rec.grid = (4, 1, 1)
     return rec
 
@@ -44,6 +45,9 @@ def _op(
     value_source: bool = False,
     coalesce: bool = True,
     store_taint=None,
+    epoch: int = 0,
+    deps=(),
+    possible_deps=(),
 ) -> int:
     """Append one operation with the given lane addresses (element
     starts); mirrors the recorder's interval construction. ``store_taint``
@@ -64,6 +68,18 @@ def _op(
     rec.op_site.append(rec._site_id(("synthetic.py", site, "k")))
     rec.op_lanes.append(len(addrs))
     rec.op_value_source.append(value_source)
+    if rec.fence_order:
+        rec.op_fence_epoch.append(epoch)
+        rec.op_deps.append(frozenset(deps))
+        rec.op_possible_deps.append(frozenset(possible_deps))
+        rec.op_positions.append(
+            _PositionalFootprint.capture(
+                np.asarray(addrs, dtype=np.int64),
+                np.arange(len(addrs), dtype=np.int64),
+                (len(addrs),),
+                elem,
+            )
+        )
     a = np.sort(np.asarray(addrs, dtype=np.int64))
     if kind == _KIND_STORE and a.size > 1 and np.any(np.diff(a) < elem):
         rec.intra_dups.append((op_id, int(a[np.nonzero(np.diff(a) < elem)[0][0] + 1])))
@@ -105,8 +121,8 @@ def test_overlapping_stores_of_distinct_instances_race_with_byte_range():
     assert a != b
 
 
-def test_same_instance_overlaps_are_never_races():
-    rec = _rec()
+def test_legacy_same_instance_overlaps_are_program_ordered():
+    rec = _rec(fence_order=False)
     p = _pid(rec, 0)
     _op(rec, p, _KIND_STORE, [BASE])
     _op(rec, p, _KIND_STORE, [BASE])
@@ -180,7 +196,7 @@ def test_cta_scoped_atomic_is_never_compatible_across_instances():
     p = _pid(rec, 0)
     _op(rec, p, _KIND_RMW, [BASE], scope="cta")
     _op(rec, p, _KIND_RMW, [BASE], scope="cta")
-    assert analyze(rec).status == "ok"  # same instance: program order
+    assert analyze(rec).status == "ok"  # same instance: compatible atomics
 
 
 def test_torn_atomics_different_width_or_start_race():
@@ -229,19 +245,16 @@ def test_value_source_load_overlapping_any_write_refuses_by_name():
     assert out.reports == []
 
 
-def test_same_instance_earlier_store_of_plain_data_is_program_ordered():
-    # A2 is cross-instance for this rung: the load reads its own
-    # instance's program-ordered write, in the sequential run exactly as
-    # in every real execution (the value it relays is untainted)
-    rec = _rec()
+def test_legacy_same_instance_earlier_store_of_plain_data_is_program_ordered():
+    rec = _rec(fence_order=False)
     p = _pid(rec, 0)
     _op(rec, p, _KIND_STORE, [BASE])
     _op(rec, p, _KIND_LOAD, [BASE], value_source=True)
     assert analyze(rec).status == "ok"
 
 
-def test_same_instance_later_store_cannot_affect_the_loaded_value():
-    rec = _rec()
+def test_legacy_same_instance_later_store_cannot_affect_the_loaded_value():
+    rec = _rec(fence_order=False)
     p = _pid(rec, 0)
     _op(rec, p, _KIND_LOAD, [BASE], value_source=True)
     _op(rec, p, _KIND_STORE, [BASE], store_taint={_ATOMIC})  # after the load
@@ -252,7 +265,7 @@ def test_atomic_return_relayed_through_memory_refuses():
     rec = _rec()
     p = _pid(rec, 0)
     _op(rec, p, _KIND_STORE, [BASE], store_taint={_ATOMIC}, site=3)
-    _op(rec, p, _KIND_LOAD, [BASE], value_source=True, site=4)
+    _op(rec, p, _KIND_LOAD, [BASE], value_source=True, site=4, epoch=1)
     out = analyze(rec)
     assert out.status == "unsupported"
     assert out.reason.startswith("atomic-return:")
@@ -261,7 +274,7 @@ def test_atomic_return_relayed_through_memory_refuses():
     rec = _rec()
     p = _pid(rec, 0)
     _op(rec, p, _KIND_RMW, [BASE])
-    _op(rec, p, _KIND_LOAD, [BASE], value_source=True)
+    _op(rec, p, _KIND_LOAD, [BASE], value_source=True, epoch=1)
     assert analyze(rec).reason.startswith("atomic-return:")
 
 
@@ -274,7 +287,7 @@ def test_relayed_loaded_value_makes_the_original_load_a_value_source():
     p = _pid(rec, 0)
     a = _op(rec, p, _KIND_LOAD, [BASE + 256])
     _op(rec, p, _KIND_STORE, [BASE], store_taint={a})
-    _op(rec, p, _KIND_LOAD, [BASE], value_source=True)
+    _op(rec, p, _KIND_LOAD, [BASE], value_source=True, epoch=1)
     out = analyze(rec)
     assert out.status == "ok"
     assert rec.op_value_source[a] is True
@@ -283,7 +296,7 @@ def test_relayed_loaded_value_makes_the_original_load_a_value_source():
     p = _pid(rec, 0)
     a = _op(rec, p, _KIND_LOAD, [BASE + 256])
     _op(rec, p, _KIND_STORE, [BASE], store_taint={a})
-    _op(rec, p, _KIND_LOAD, [BASE], value_source=True)
+    _op(rec, p, _KIND_LOAD, [BASE], value_source=True, epoch=1)
     _op(rec, _pid(rec, 1), _KIND_STORE, [BASE + 256])  # a foreign write to A's bytes
     out = analyze(rec)
     assert out.status == "unsupported"
