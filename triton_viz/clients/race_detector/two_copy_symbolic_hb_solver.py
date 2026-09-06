@@ -110,6 +110,7 @@ from z3 import (
     Not,
     Or,
     Solver,
+    is_false,
     is_true,
     sat,
     simplify,
@@ -158,6 +159,13 @@ class _ConflictPrecheckCommon:
     correspondence: tuple[tuple[Any, Any], ...]
     has_snapshot: bool | None = None
     intra_expression: BoolRef | None = None
+
+
+@dataclass(frozen=True)
+class _BaseConstraintCache:
+    # Keep the objects alive: comparisons use Python identity, never Z3 equality.
+    snapshot: tuple[tuple[Any, ...], ...]
+    expression: BoolRef
 
 
 @dataclass(frozen=True)
@@ -504,6 +512,9 @@ class TwoCopySymbolicHBSolver:
         # (kind, seconds, sat) per executed query — the RQ3 scaling sweep
         # reads these for per-query mean/median/p95 and the SAT/UNSAT split.
         self.query_stats: list[tuple[str, float, bool]] = []
+        # Only full symbolic UNSAT results are reusable. Keep their ASTs
+        # alive, and limit the cache to this race-finding invocation.
+        self._unsat_race_queries: dict[tuple[int, int], BoolRef] = {}
 
         candidates: list[tuple[SymbolicMemoryEvent, SymbolicMemoryEvent, ModelRef, str]]
         candidates = []
@@ -518,10 +529,24 @@ class TwoCopySymbolicHBSolver:
                     )
                     continue
                 precheck_s = _time.perf_counter() - precheck_start
+                race_expression = self._race_expr(a, b)
+                normalization_start = _time.perf_counter()
+                normalized = self._normalized_race_query(
+                    race_expression, (self.different_blocks,)
+                )
+                known_unsat = self._known_unsat_race_query(normalized)
+                precheck_s += _time.perf_counter() - normalization_start
+                if known_unsat:
+                    self.query_stats.append(("cross", precheck_s, False))
+                    continue
 
-                def _build(a=a, b=b) -> Solver:
-                    s = self._new_solver()
-                    s.add(self._race_expr(a, b))
+                def _build(a=a, b=b, normalized=normalized) -> Solver:
+                    if normalized is None:
+                        s = self._new_solver()
+                        s.add(self._race_expr(a, b))
+                    else:
+                        s = Solver()
+                        s.add(normalized)
                     return s
 
                 solver = _build()
@@ -532,6 +557,8 @@ class TwoCopySymbolicHBSolver:
                     is_sat = self._race_query_is_sat(solver, a, b)
                     if is_sat:
                         model = solver.model()
+                    else:
+                        self._remember_unsat_race_query(normalized)
                 except UnsupportedSymbolicRaceQuery as exc:
                     is_sat, model = self._enumerate_pair(_build, False, exc)
                 self.query_stats.append(
@@ -673,6 +700,45 @@ class TwoCopySymbolicHBSolver:
         lo, hi = sorted((a.event_id, b.event_id))
         return (lo, hi) not in self.only_pairs
 
+    def _normalized_race_query(
+        self, race_expression: BoolRef, pair_constraints: tuple[Any, ...]
+    ) -> BoolRef | None:
+        """Normalize the complete query before constructing a fresh solver.
+
+        All base premises, the cross/same-instance conditions, lane identity,
+        and the original race expression are retained. Unsupported container
+        or coercion inputs use the original construction path instead.
+        """
+        if not all(
+            isinstance(c, BoolRef) or type(c) is bool  # noqa: E721 (only immutable builtin scalars)
+            for c in (race_expression, *pair_constraints)
+        ):
+            return None
+        base = self._base_constraint_conjunction()
+        if base is None:
+            return None
+        return simplify(And(base, *pair_constraints, race_expression))
+
+    @staticmethod
+    def _race_query_cache_key(expression: BoolRef) -> tuple[int, int]:
+        # AST ids are unique only within a context. The cache retains the
+        # expression (and its context), preventing either id from recycling.
+        return id(expression.ctx), expression.get_id()
+
+    def _known_unsat_race_query(self, expression: BoolRef | None) -> bool:
+        if expression is None:
+            return False
+        cached = getattr(self, "_unsat_race_queries", None)
+        return cached is not None and self._race_query_cache_key(expression) in cached
+
+    def _remember_unsat_race_query(self, expression: BoolRef | None) -> None:
+        if expression is None:
+            return
+        cached = getattr(self, "_unsat_race_queries", None)
+        if cached is None:
+            self._unsat_race_queries = cached = {}
+        cached[self._race_query_cache_key(expression)] = expression
+
     @staticmethod
     def _race_query_is_sat(
         solver: Solver, a: SymbolicMemoryEvent, b: SymbolicMemoryEvent
@@ -734,13 +800,30 @@ class TwoCopySymbolicHBSolver:
                         )
                     continue
                 precheck_s = _time.perf_counter() - precheck_start
+                race_expression = self._race_expr(a, b)
+                normalization_start = _time.perf_counter()
+                normalized = self._normalized_race_query(
+                    race_expression, (*same_instance, lane_cond)
+                )
+                known_unsat = self._known_unsat_race_query(normalized)
+                precheck_s += _time.perf_counter() - normalization_start
+                if known_unsat:
+                    if hasattr(self, "query_stats"):
+                        self.query_stats.append(("intra", precheck_s, False))
+                    continue
 
-                def _build(a=a, b=b, lane_cond=lane_cond) -> Solver:
-                    s = self._base_solver()
-                    for c in same_instance:
-                        s.add(c)
-                    s.add(lane_cond)
-                    s.add(self._race_expr(a, b))
+                def _build(
+                    a=a, b=b, lane_cond=lane_cond, normalized=normalized
+                ) -> Solver:
+                    if normalized is None:
+                        s = self._base_solver()
+                        for c in same_instance:
+                            s.add(c)
+                        s.add(lane_cond)
+                        s.add(self._race_expr(a, b))
+                    else:
+                        s = Solver()
+                        s.add(normalized)
                     return s
 
                 solver = _build()
@@ -751,6 +834,8 @@ class TwoCopySymbolicHBSolver:
                     is_sat = self._race_query_is_sat(solver, a, b)
                     if is_sat:
                         model = solver.model()
+                    else:
+                        self._remember_unsat_race_query(normalized)
                 except UnsupportedSymbolicRaceQuery as exc:
                     is_sat, model = self._enumerate_pair(_build, True, exc)
                 if hasattr(self, "query_stats"):
@@ -776,6 +861,8 @@ class TwoCopySymbolicHBSolver:
         Actual byte overlap and activity stay in the weaker condition;
         only the full solver supplies SAT witnesses.
         """
+        if is_false(a.writes) and is_false(b.writes):
+            return True
         # Read/read pairs (and structurally exempt atomic pairs) have no
         # conflict independently of their potentially large address DAGs.
         if is_true(simplify(Not(conflicting_access_modes(a, b)))):
@@ -1066,6 +1153,15 @@ class TwoCopySymbolicHBSolver:
                 events.extend(self._lower_record(record, ctx, len(events)))
         return events
 
+    @staticmethod
+    def _active_access_mode(active: BoolRef, condition: BoolRef) -> BoolRef:
+        """Fold literal mode conditions while retaining the full activity guard."""
+        if is_true(condition):
+            return active
+        if is_false(condition):
+            return condition
+        return And(active, condition)
+
     def _lower_record(
         self,
         record: AccessEventRecord,
@@ -1169,8 +1265,8 @@ class TwoCopySymbolicHBSolver:
                     write_cond = lane_value(
                         apply_sub(record.writes, sub), lane, n_lanes
                     )
-                reads = And(active, as_bool(read_cond))
-                writes = And(active, as_bool(write_cond))
+                reads = self._active_access_mode(active, as_bool(read_cond))
+                writes = self._active_access_mode(active, as_bool(write_cond))
                 old_value = None
                 written_value = None
 
@@ -1303,6 +1399,10 @@ class TwoCopySymbolicHBSolver:
     def _edge(self, e1: SymbolicMemoryEvent, e2: SymbolicMemoryEvent) -> BoolRef:
         if e1.idx == e2.idx:
             return BoolVal(False)
+        # Without a reads-through source, sw is identically False. Avoid
+        # constructing Or(po, False) for every pair in a large capture.
+        if (e1.idx, e2.idx) not in self.reads_through:
+            return self._program_order(e1, e2)
         return Or(
             self._program_order(e1, e2),
             self._synchronizes_with(e1, e2),
@@ -2134,11 +2234,100 @@ class TwoCopySymbolicHBSolver:
                     "only modeled under the counting axiom (spec B.1.5)"
                 )
 
+    def _base_constraint_conjunction(self) -> BoolRef | None:
+        """Reuse immutable assertions, with snapshots of every mutable source.
+
+        Constraint lists and the HB matrix are public and may be changed in
+        place. Checking their actual elements costs only Python work on a
+        cache hit; no Boolean coercion or Z3 construction is repeated. The
+        cache is first populated at query time, after co-hb has been built.
+        """
+        containers = (
+            self.arange_constraints_a,
+            self.arange_constraints_b,
+            self.rf_constraints,
+            self.atomic_coherence_constraints,
+            self.counting_constraints,
+            self.value_causality_constraints,
+            self.extra_assumptions,
+        )
+        # Do not consume a one-shot iterable before the original add path.
+        if not all(isinstance(source, (list, tuple)) for source in containers):
+            self._base_constraint_cache = None
+            return None
+        families = (
+            (self.grid_constraints,),
+            tuple(self.arange_constraints_a),
+            tuple(self.arange_constraints_b),
+            tuple(self.rf_constraints),
+            tuple(self.atomic_coherence_constraints),
+            tuple(self.counting_constraints),
+            tuple(self.value_causality_constraints),
+            tuple(self.extra_assumptions),
+        )
+        rows = tuple(self.hb[i] for i in range(len(self.events)))
+        diagonal = tuple(row[i] for i, row in enumerate(rows))
+        sources = (
+            self.grid_constraints,
+            self.arange_constraints_a,
+            self.arange_constraints_b,
+            self.rf_constraints,
+            self.atomic_coherence_constraints,
+            self.counting_constraints,
+            self.value_causality_constraints,
+            self.extra_assumptions,
+            self.events,
+            self.hb,
+            *rows,
+        )
+        snapshot = (sources, *families, diagonal)
+        cached = getattr(self, "_base_constraint_cache", None)
+        if cached is not None and all(
+            len(current) == len(previous)
+            and all(a is b for a, b in zip(current, previous))
+            for current, previous in zip(snapshot, cached.snapshot)
+        ):
+            return cached.expression
+
+        self._base_constraint_cache = None
+        # Solver.add also accepts nested containers and custom coercible
+        # values. Their contents may change without changing object identity;
+        # retain the original add path for those nonstandard inputs.
+        if (
+            not all(
+                isinstance(c, BoolRef) or type(c) is bool  # noqa: E721 (only immutable builtin scalars)
+                for family in families[:-1]
+                for c in family
+            )
+            or not all(
+                isinstance(c, ExprRef) or type(c) in (bool, int, float)
+                for c in families[-1]
+            )
+            or not all(
+                isinstance(c, BoolRef) or type(c) is bool  # noqa: E721 (immutable builtin scalars)
+                for c in diagonal
+            )
+        ):
+            return None
+
+        constraints = [c for family in families[:-1] for c in family]
+        constraints.extend(as_bool(c) for c in families[-1])
+        # Only syntactic False diagonals can be omitted: a True or
+        # conditional cycle must still exclude its valuation from executions.
+        constraints.extend(Not(c) for c in diagonal if not is_false(c))
+        expression = And(*constraints)
+        self._base_constraint_cache = _BaseConstraintCache(snapshot, expression)
+        return expression
+
     def _base_solver(self) -> Solver:
         """Assertions shared by every race query; the caller adds the
         cross-instance (``different_blocks``) or same-instance constraints.
         """
         solver = Solver()
+        conjunction = self._base_constraint_conjunction()
+        if conjunction is not None:
+            solver.add(conjunction)
+            return solver
         solver.add(self.grid_constraints)
         for c in self.arange_constraints_a:
             solver.add(c)
