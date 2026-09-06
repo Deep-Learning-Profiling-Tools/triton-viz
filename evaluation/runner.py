@@ -441,6 +441,26 @@ def _run_cancellable(
                 if time.monotonic() >= deadline:
                     raise subprocess.TimeoutExpired(cmd, timeout) from None
                 if cancel_requested is not None and cancel_requested():
+                    # The callback itself can take time (for example, while
+                    # reading control state). Arbitrate again using what is
+                    # true now, not before entering that callback.
+                    remaining = deadline - time.monotonic()
+                    if remaining <= 0:
+                        raise subprocess.TimeoutExpired(cmd, timeout) from None
+                    if proc.poll() is not None:
+                        try:
+                            # A zero-time communicate cannot reliably drain
+                            # ready pipes. Keep this bounded if a descendant
+                            # still holds them open after the child exits.
+                            stdout, stderr = proc.communicate(
+                                timeout=min(remaining, 0.1)
+                            )
+                            return subprocess.CompletedProcess(
+                                cmd, proc.returncode, stdout, stderr
+                            )
+                        except subprocess.TimeoutExpired:
+                            if time.monotonic() >= deadline:
+                                raise subprocess.TimeoutExpired(cmd, timeout) from None
                     raise RowInterrupted("attempt cancelled by operator") from None
     except BaseException:
         # Registration/callback errors and KeyboardInterrupt need the same

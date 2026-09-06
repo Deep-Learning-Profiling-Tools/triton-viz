@@ -97,6 +97,49 @@ def test_completion_wins_over_unobserved_pause(monkeypatch, tmp_path):
     assert len(checks) == 1
 
 
+def test_completion_during_pause_callback_is_preserved(monkeypatch, tmp_path):
+    _worker(monkeypatch, _write_row_code(0.2))
+    processes = []
+
+    def cancelled():
+        if not processes:  # initial check before spawn
+            return False
+        processes[0].wait(timeout=3)
+        return True
+
+    def forbidden_cleanup(proc):
+        pytest.fail("a completed row must not trigger process-group cleanup")
+
+    monkeypatch.setattr(runner, "_kill_row_group", forbidden_cleanup)
+    row = _run(
+        5,
+        output_dir=tmp_path,
+        on_spawn=processes.append,
+        cancel_requested=cancelled,
+    )
+    assert row["terminal"] == "proved"
+    assert processes[0].returncode == 0
+    assert not list(tmp_path.iterdir())
+
+
+def test_deadline_crossed_inside_pause_callback_remains_timeout(monkeypatch, tmp_path):
+    _worker(monkeypatch, "import time; time.sleep(30)")
+    checks = []
+
+    def cancelled():
+        checks.append(True)
+        if len(checks) == 1:
+            return False
+        time.sleep(0.55)
+        return True
+
+    row = _run(0.5, output_dir=tmp_path, cancel_requested=cancelled)
+    assert row["terminal"] == "timeout"
+    assert row["harness_error"] == "exceeded 0.5s"
+    assert len(checks) == 2
+    assert not list(tmp_path.iterdir())
+
+
 def test_cancel_before_spawn_does_not_create_worker(monkeypatch, tmp_path):
     def forbidden(*args, **kwargs):
         pytest.fail("cancelled attempt must not spawn")
