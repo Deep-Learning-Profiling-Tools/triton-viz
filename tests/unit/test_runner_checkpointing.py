@@ -57,7 +57,8 @@ def _alive(pid):
         # a zombie is no longer consuming CPU or running experiment work.
         state = Path(f"/proc/{pid}/stat").read_text().split(") ", 1)[1].split()[0]
         return state != "Z"
-    except FileNotFoundError:
+    except (FileNotFoundError, ProcessLookupError):
+        # The process can disappear after /proc is opened but before read.
         return False
 
 
