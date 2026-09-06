@@ -117,7 +117,11 @@ from z3 import (
 )
 from z3.z3 import BoolRef, IntNumRef, ModelRef
 
-from .conflict_simplification import conflict_impossible, conflict_precheck_features
+from .conflict_simplification import (
+    _PureSelectExpressionCache,
+    conflict_impossible,
+    conflict_precheck_features,
+)
 from .data import AccessEventRecord, RaceReport, RaceType
 from .hb_common import (
     UnsupportedSymbolicRaceQuery,
@@ -143,6 +147,16 @@ class CopyContext:
     arange_substitutions: tuple[tuple[Any, Any], ...]
     arange_constraints: tuple[Any, ...]
     copy_local_substitutions: tuple[tuple[Any, Any], ...]  # launch-level
+
+
+@dataclass
+class _ConflictPrecheckCommon:
+    # Retaining the source objects makes identity checks safe against id reuse.
+    sources: tuple[Any, ...]
+    expression: BoolRef
+    shared: tuple[tuple[Any, Any], ...]
+    correspondence: tuple[tuple[Any, Any], ...]
+    intra_expression: BoolRef | None = None
 
 
 @dataclass(frozen=True)
@@ -774,6 +788,61 @@ class TwoCopySymbolicHBSolver:
         if not any(features[a.idx]) and not any(features[b.idx]):
             return False
         simplify_first = not (features[a.idx][0] or features[b.idx][0])
+        common = self._conflict_precheck_common()
+        conflict = self._conflict(a, b)
+        if same_instance:
+            assert lane_cond is not None
+            # In one instance, pids and copy-local observations/iterations
+            # agree. Lane variables MUST remain independent.
+            if common.intra_expression is None:
+                common.intra_expression = apply_sub(common.expression, common.shared)
+            conditions = [
+                common.intra_expression,
+                apply_sub(conflict, common.shared),
+                apply_sub(lane_cond, common.shared),
+            ]
+        else:
+            conditions = [common.expression, conflict, self.different_blocks]
+        expression_cache = None
+        if simplify_first:
+            expression_cache = getattr(self, "_conflict_expression_cache", None)
+            if expression_cache is None:
+                expression_cache = (
+                    self._conflict_expression_cache
+                ) = _PureSelectExpressionCache()
+        return conflict_impossible(
+            conditions,
+            common.correspondence,
+            same_instance=same_instance,
+            simplify_first=simplify_first,
+            expression_cache=expression_cache,
+        )
+
+    def _conflict_precheck_common(self) -> _ConflictPrecheckCommon:
+        """Reuse the immutable common conjunction, never a query decision.
+
+        The constructor stores constraint sequences as tuples and contexts
+        as frozen records. Attribute replacement invalidates the cached
+        conjunction, including removal of launch pins. If a caller instead
+        installs a mutable sequence, rebuild on every call so mutations
+        cannot preserve assertions that are no longer in the full query.
+        """
+        sources = (
+            self.grid_constraints,
+            self.arange_constraints_a,
+            self.arange_constraints_b,
+            self.extra_assumptions,
+            self.ctx_a,
+            self.ctx_b,
+        )
+        immutable = all(isinstance(source, tuple) for source in sources[1:4])
+        cached = getattr(self, "_conflict_common_cache", None)
+        if (
+            immutable
+            and cached is not None
+            and all(current is old for current, old in zip(sources, cached.sources))
+        ):
+            return cached
         shared = tuple(zip(self.ctx_b.pid, self.ctx_a.pid)) + tuple(
             (bvar, avar)
             for (_, avar), (_, bvar) in zip(
@@ -787,27 +856,16 @@ class TwoCopySymbolicHBSolver:
                 self.ctx_a.arange_substitutions, self.ctx_b.arange_substitutions
             )
         )
-        conditions = [
+        expression = And(
             self.grid_constraints,
             *self.arange_constraints_a,
             *self.arange_constraints_b,
-            self._conflict(a, b),
             *[as_bool(condition) for condition in self.extra_assumptions],
-        ]
-        if same_instance:
-            assert lane_cond is not None
-            conditions.append(lane_cond)
-            # In one instance, pids and copy-local observations/iterations
-            # agree. Lane variables MUST remain independent.
-            conditions = [apply_sub(condition, shared) for condition in conditions]
-        else:
-            conditions.append(self.different_blocks)
-        return conflict_impossible(
-            conditions,
-            correspondence,
-            same_instance=same_instance,
-            simplify_first=simplify_first,
         )
+        cached = self._conflict_common_cache = _ConflictPrecheckCommon(
+            sources, expression, shared, correspondence
+        )
+        return cached
 
     def _intra_pair_lane_condition(
         self, a: SymbolicMemoryEvent, b: SymbolicMemoryEvent

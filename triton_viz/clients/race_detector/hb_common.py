@@ -9,7 +9,7 @@ from __future__ import annotations
 
 from typing import Any, Callable, Iterable, Iterator
 
-from z3 import And, BoolSort, BoolVal, Not, Or, substitute
+from z3 import And, BoolSort, BoolVal, Not, Or, is_false, is_true, simplify, substitute
 from z3.z3 import BoolRef, IntNumRef
 
 
@@ -115,14 +115,39 @@ def build_transitive_hb(
     events: list[Any],
     edge_fn: Callable[[Any, Any], BoolRef],
 ) -> list[list[BoolRef]]:
-    """Floyd-Warshall transitive closure over symbolic HB edges."""
+    """Floyd-Warshall closure, omitting only identically false paths.
+
+    Simplification uses no query assumptions: every conditional edge, including
+    cycles and self-edges, retains its original meaning.  Each layer combines
+    only the non-false incoming and outgoing entries for its intermediate node,
+    instead of constructing expressions for all pairs.  The initial matrix and
+    row/column scans cost O(n**2); path construction costs the sum of the layers'
+    incoming-count times outgoing-count, with O(n**3) worst-case work.
+    """
     n = len(events)
-    reach = [[edge_fn(events[i], events[j]) for j in range(n)] for i in range(n)]
+    reach = [
+        [simplify(edge_fn(events[i], events[j])) for j in range(n)] for i in range(n)
+    ]
     for k in range(n):
-        reach = [
-            [Or(reach[i][j], And(reach[i][k], reach[k][j])) for j in range(n)]
-            for i in range(n)
-        ]
+        # Snapshot both vectors before updating the matrix.  Even for a cyclic
+        # graph, every right-hand side then refers to the previous FW layer.
+        incoming = [(i, reach[i][k]) for i in range(n) if not is_false(reach[i][k])]
+        outgoing = [(j, edge) for j, edge in enumerate(reach[k]) if not is_false(edge)]
+        for i, left in incoming:
+            for j, right in outgoing:
+                previous = reach[i][j]
+                if is_true(previous):
+                    continue
+                if is_true(left):
+                    through = right
+                elif is_true(right) or left.eq(right):
+                    through = left
+                else:
+                    through = And(left, right)
+                if is_false(previous) or is_true(through):
+                    reach[i][j] = through
+                elif not previous.eq(through):
+                    reach[i][j] = Or(previous, through)
     return reach
 
 

@@ -110,8 +110,117 @@ def _mixed_radix(expr, bounds):
     return None
 
 
+_LINEAR_OPS = {
+    z3.Z3_OP_TRUE,
+    z3.Z3_OP_FALSE,
+    z3.Z3_OP_AND,
+    z3.Z3_OP_OR,
+    z3.Z3_OP_NOT,
+    z3.Z3_OP_IMPLIES,
+    z3.Z3_OP_XOR,
+    z3.Z3_OP_EQ,
+    z3.Z3_OP_DISTINCT,
+    z3.Z3_OP_ITE,
+    z3.Z3_OP_LE,
+    z3.Z3_OP_LT,
+    z3.Z3_OP_GE,
+    z3.Z3_OP_GT,
+    z3.Z3_OP_ADD,
+    z3.Z3_OP_SUB,
+    z3.Z3_OP_UMINUS,
+}
+
+
+class _PureSelectExpressionCache:
+    """One two-copy solver's assumption-independent expression rewrites.
+
+    Only the simplify-first path uses this cache: it never has radix lemmas
+    or uses a pair's bounds/correspondence to rewrite another expression.
+    Keys are actual immutable Z3 ASTs, after any cross/intra substitutions.
+    Values are expressions, never Solver state or query decisions.
+    Every abstracted node records whether its traversal saw a Select, so a
+    cache hit retains the same applicability information as a fresh walk.
+    """
+
+    def __init__(self):
+        self._normalized = {}
+        self._abstracted = {}
+
+    def normalize(self, expression):
+        cached = self._normalized.get(expression)
+        if cached is None:
+            cached = z3.simplify(expression)
+            self._normalized[expression] = cached
+        return cached
+
+    def abstract(self, expression):
+        cached = self._abstracted.get(expression)
+        if cached is not None:
+            return cached
+        if z3.is_const(expression) and expression.sort().kind() in (
+            z3.Z3_INT_SORT,
+            z3.Z3_BOOL_SORT,
+        ):
+            result, saw_select = expression, False
+        else:
+            kind = expression.decl().kind() if z3.is_app(expression) else None
+            allowed = kind in _LINEAR_OPS or kind in (
+                z3.Z3_OP_MUL,
+                z3.Z3_OP_IDIV,
+                z3.Z3_OP_MOD,
+            )
+            saw_select = z3.is_select(expression)
+            children = None
+            if allowed and all(
+                child.sort().kind() in (z3.Z3_INT_SORT, z3.Z3_BOOL_SORT)
+                for child in expression.children()
+            ):
+                rewritten = [self.abstract(child) for child in expression.children()]
+                children = [child for child, _ in rewritten]
+                saw_select |= any(seen for _, seen in rewritten)
+                if z3.is_mul(expression):
+                    allowed = sum(not z3.is_int_value(child) for child in children) <= 1
+                if kind in (z3.Z3_OP_IDIV, z3.Z3_OP_MOD):
+                    allowed = len(children) == 2 and (_numeral(children[1]) or 0) != 0
+            else:
+                allowed = False
+            if allowed:
+                result = expression.decl()(*children)
+            elif expression.sort().kind() == z3.Z3_INT_SORT:
+                result = z3.FreshInt("conflict_integer", ctx=expression.ctx)
+            elif expression.sort().kind() == z3.Z3_BOOL_SORT:
+                result = z3.FreshBool("conflict_boolean", ctx=expression.ctx)
+            else:
+                raise TypeError("non-integer conflict expression")
+        cached = result, saw_select
+        self._abstracted[expression] = cached
+        return cached
+
+    def relaxation(self, conditions):
+        # A diagnostic can disable this factor after a cache was populated.
+        # An old memo entry must not silently re-enable the optional path.
+        if not _ENABLE_SNAPSHOT_PRECHECK:
+            return None
+        try:
+            normalized = [self.normalize(condition) for condition in conditions]
+            for condition in normalized:
+                if z3.is_false(condition):
+                    return condition
+            rewritten = [self.abstract(condition) for condition in normalized]
+            if not any(seen for _, seen in rewritten):
+                return None
+            return z3.simplify(z3.And(*(expression for expression, _ in rewritten)))
+        except (TypeError, z3.Z3Exception):
+            return None
+
+
 def _linear_relaxation(
-    conditions, correspondence=(), *, same_instance=False, simplify_first=False
+    conditions,
+    correspondence=(),
+    *,
+    same_instance=False,
+    simplify_first=False,
+    expression_cache=None,
 ):
     """Return a sound QF_LIA relaxation, or None outside the cheap pattern.
 
@@ -119,6 +228,8 @@ def _linear_relaxation(
     for SHAPE comparison only. It never identifies actual copies in a
     cross-instance condition, and radix matching uses its original AST.
     """
+    if simplify_first and expression_cache is not None:
+        return expression_cache.relaxation(conditions)
     if simplify_first:
         # A pure Select path has no mixed-radix syntax to preserve. Fold
         # constants and trivial conflict predicates in Z3's native rewriter
@@ -128,25 +239,7 @@ def _linear_relaxation(
             return z3.BoolVal(False)
     bounds = set() if simplify_first else _explicit_digit_bounds(conditions)
     memo, flattened, array_reads = {}, [], []
-    supported = {
-        z3.Z3_OP_TRUE,
-        z3.Z3_OP_FALSE,
-        z3.Z3_OP_AND,
-        z3.Z3_OP_OR,
-        z3.Z3_OP_NOT,
-        z3.Z3_OP_IMPLIES,
-        z3.Z3_OP_XOR,
-        z3.Z3_OP_EQ,
-        z3.Z3_OP_DISTINCT,
-        z3.Z3_OP_ITE,
-        z3.Z3_OP_LE,
-        z3.Z3_OP_LT,
-        z3.Z3_OP_GE,
-        z3.Z3_OP_GT,
-        z3.Z3_OP_ADD,
-        z3.Z3_OP_SUB,
-        z3.Z3_OP_UMINUS,
-    }
+    supported = _LINEAR_OPS
 
     def abstract(expr):
         if expr in memo:
@@ -231,6 +324,7 @@ def conflict_impossible(
     *,
     same_instance=False,
     simplify_first=False,
+    expression_cache=None,
 ) -> bool:
     """Cheap UNSAT-only precheck; callers retain their original query budget."""
     relaxed = _linear_relaxation(
@@ -238,6 +332,7 @@ def conflict_impossible(
         correspondence,
         same_instance=same_instance,
         simplify_first=simplify_first,
+        expression_cache=expression_cache,
     )
     if relaxed is None:
         return False
