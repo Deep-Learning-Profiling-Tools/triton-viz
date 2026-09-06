@@ -631,6 +631,11 @@ def main(argv=None):
     parser.add_argument("--input-jsonl", type=Path, action="append", default=[])
     parser.add_argument("--rounds", type=int, default=3)
     parser.add_argument("--blocks", choices=("ABBA", "BAAB"), default="ABBA")
+    parser.add_argument(
+        "--coordination-tag",
+        default="",
+        help="process marker for existing host load guards",
+    )
     args = parser.parse_args(argv)
     if args.rounds < 1:
         parser.error("--rounds must be positive")

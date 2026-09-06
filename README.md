@@ -193,6 +193,12 @@ Triton-Viz uses a small set of environment variables to configure runtime behavi
 - `PROFILER_ENABLE_BLOCK_SAMPLING` (default: `1`): sample a subset of blocks to reduce profiling overhead.
 - `PROFILER_DISABLE_BUFFER_LOAD_CHECK` (default: `0`): disable buffer load checks in the profiler.
 
+Evaluation experiments can use [durable pinned reruns](evaluation/PINNED_RESUME.md)
+to save each row and resume after interruption. The optional
+`TRITON_VIZ_PINNED_STATE_DIR` selects an isolated host-lock directory for
+rehearsals and tests; formal runs reject this override and use the canonical
+host registry described in that guide.
+
 ## More Puzzles
 
 If you're interested in fun puzzles to work with in Triton, do check out: [Triton Puzzles](https://github.com/srush/Triton-Puzzles)
