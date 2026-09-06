@@ -117,6 +117,7 @@ from z3 import (
 )
 from z3.z3 import BoolRef, IntNumRef, ModelRef
 
+from .conflict_simplification import conflict_impossible, conflict_precheck_features
 from .data import AccessEventRecord, RaceReport, RaceType
 from .hb_common import (
     UnsupportedSymbolicRaceQuery,
@@ -495,6 +496,13 @@ class TwoCopySymbolicHBSolver:
             for b in events_b:
                 if self._pair_excluded(a, b):
                     continue
+                precheck_start = _time.perf_counter()
+                if self._conflict_precheck(a, b):
+                    self.query_stats.append(
+                        ("cross", _time.perf_counter() - precheck_start, False)
+                    )
+                    continue
+                precheck_s = _time.perf_counter() - precheck_start
 
                 def _build(a=a, b=b) -> Solver:
                     s = self._new_solver()
@@ -511,7 +519,9 @@ class TwoCopySymbolicHBSolver:
                         model = solver.model()
                 except UnsupportedSymbolicRaceQuery as exc:
                     is_sat, model = self._enumerate_pair(_build, False, exc)
-                self.query_stats.append(("cross", _time.perf_counter() - t0, is_sat))
+                self.query_stats.append(
+                    ("cross", precheck_s + _time.perf_counter() - t0, is_sat)
+                )
                 if is_sat:
                     candidates.append((a, b, model, self._CROSS_INSTANCE_REASON))
 
@@ -699,6 +709,16 @@ class TwoCopySymbolicHBSolver:
                 lane_cond = self._intra_pair_lane_condition(a, b)
                 if lane_cond is None:
                     continue
+                precheck_start = _time.perf_counter()
+                if self._conflict_precheck(
+                    a, b, same_instance=True, lane_cond=lane_cond
+                ):
+                    if hasattr(self, "query_stats"):
+                        self.query_stats.append(
+                            ("intra", _time.perf_counter() - precheck_start, False)
+                        )
+                    continue
+                precheck_s = _time.perf_counter() - precheck_start
 
                 def _build(a=a, b=b, lane_cond=lane_cond) -> Solver:
                     s = self._base_solver()
@@ -720,11 +740,74 @@ class TwoCopySymbolicHBSolver:
                     is_sat, model = self._enumerate_pair(_build, True, exc)
                 if hasattr(self, "query_stats"):
                     self.query_stats.append(
-                        ("intra", _time.perf_counter() - t0, is_sat)
+                        ("intra", precheck_s + _time.perf_counter() - t0, is_sat)
                     )
                 if is_sat:
                     out.append((a, b, model, self._INTRA_INSTANCE_REASON))
         return out
+
+    def _conflict_precheck(
+        self,
+        a: SymbolicMemoryEvent,
+        b: SymbolicMemoryEvent,
+        *,
+        same_instance: bool = False,
+        lane_cond: BoolRef | None = None,
+    ) -> bool:
+        """Prove a necessary conflict condition UNSAT without changing HB.
+
+        The private method is a single ablation switch. It never changes
+        enumeration state or participates in feasibility certification.
+        Actual byte overlap and activity stay in the weaker condition;
+        only the full solver supplies SAT witnesses.
+        """
+        # Read/read pairs (and structurally exempt atomic pairs) have no
+        # conflict independently of their potentially large address DAGs.
+        if is_true(simplify(Not(conflicting_access_modes(a, b)))):
+            return True
+        features = getattr(self, "_conflict_precheck_events", None)
+        if features is None:
+            features = self._conflict_precheck_events = {
+                event.idx: conflict_precheck_features(event.addr)
+                for event in self.events
+            }
+        if not any(features[a.idx]) and not any(features[b.idx]):
+            return False
+        simplify_first = not (features[a.idx][0] or features[b.idx][0])
+        shared = tuple(zip(self.ctx_b.pid, self.ctx_a.pid)) + tuple(
+            (bvar, avar)
+            for (_, avar), (_, bvar) in zip(
+                self.ctx_a.copy_local_substitutions,
+                self.ctx_b.copy_local_substitutions,
+            )
+        )
+        correspondence = shared + tuple(
+            (bvar, avar)
+            for (_, avar), (_, bvar) in zip(
+                self.ctx_a.arange_substitutions, self.ctx_b.arange_substitutions
+            )
+        )
+        conditions = [
+            self.grid_constraints,
+            *self.arange_constraints_a,
+            *self.arange_constraints_b,
+            self._conflict(a, b),
+            *[as_bool(condition) for condition in self.extra_assumptions],
+        ]
+        if same_instance:
+            assert lane_cond is not None
+            conditions.append(lane_cond)
+            # In one instance, pids and copy-local observations/iterations
+            # agree. Lane variables MUST remain independent.
+            conditions = [apply_sub(condition, shared) for condition in conditions]
+        else:
+            conditions.append(self.different_blocks)
+        return conflict_impossible(
+            conditions,
+            correspondence,
+            same_instance=same_instance,
+            simplify_first=simplify_first,
+        )
 
     def _intra_pair_lane_condition(
         self, a: SymbolicMemoryEvent, b: SymbolicMemoryEvent
