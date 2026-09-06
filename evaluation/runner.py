@@ -10,12 +10,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import signal
 import subprocess
 import sys
 import tempfile
 import time
 from pathlib import Path
-from typing import Any
+from typing import Any, Callable
 
 from triton_viz.core.config import config as cfg
 from triton_viz.clients.race_detector.ladder import (
@@ -374,6 +375,81 @@ def _run_one_reused(
     return row
 
 
+class RowInterrupted(Exception):
+    """An operator cancelled an attempt; no result row was produced."""
+
+
+def _kill_row_group(proc: subprocess.Popen) -> None:
+    """Stop this fresh process group and reap the child, including on errors.
+
+    The pinned service's cgroup is the outer containment boundary, including
+    descendants that deliberately leave the process group. This local cleanup
+    handles ordinary descendants immediately, without waiting for a service
+    restart or confusing operator cancellation with a measurement timeout.
+    """
+    try:
+        os.killpg(proc.pid, signal.SIGKILL)
+    except ProcessLookupError:
+        pass
+    finally:
+        # Drain the pipes like subprocess.run does after TimeoutExpired. A
+        # descendant outside the group must not hold this cleanup indefinitely.
+        try:
+            proc.communicate(timeout=10)
+        except subprocess.TimeoutExpired:
+            for stream in (proc.stdout, proc.stderr):
+                if stream is not None:
+                    stream.close()
+            proc.wait(timeout=10)
+
+
+def _run_cancellable(
+    cmd: list[str],
+    timeout: float,
+    cancel_requested: Callable[[], bool] | None,
+    on_spawn: Callable[[subprocess.Popen], None] | None,
+) -> subprocess.CompletedProcess:
+    """Fresh-process execution with the existing post-spawn timeout budget."""
+    if cancel_requested is not None and cancel_requested():
+        raise RowInterrupted("attempt cancelled before process creation")
+    proc = subprocess.Popen(
+        cmd,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+        cwd=Path(__file__).parent.parent,
+        start_new_session=True,
+    )
+    # subprocess.run starts its communicate timeout after Popen returns. In
+    # particular, slow process creation must not consume the wait budget.
+    deadline = time.monotonic() + timeout
+    try:
+        if on_spawn is not None:
+            on_spawn(proc)
+        while True:
+            remaining = max(0.0, deadline - time.monotonic())
+            # communicate drains both pipes while waiting; polling wait() with
+            # PIPE output would deadlock workers that print enough diagnostics.
+            interval = min(remaining, 0.1) if cancel_requested else remaining
+            try:
+                stdout, stderr = proc.communicate(timeout=interval)
+                return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
+            except subprocess.TimeoutExpired:
+                # Observe completion and the real deadline before cancellation.
+                # A completed communicate already returned above. A reached
+                # deadline remains a timeout even if a pause arrives with it.
+                if time.monotonic() >= deadline:
+                    raise subprocess.TimeoutExpired(cmd, timeout) from None
+                if cancel_requested is not None and cancel_requested():
+                    raise RowInterrupted("attempt cancelled by operator") from None
+    except BaseException:
+        # Registration/callback errors and KeyboardInterrupt need the same
+        # containment as timeout. Never leave a worker running after our caller
+        # has abandoned its attempt.
+        _kill_row_group(proc)
+        raise
+
+
 def _run_one(
     spec,
     corpus_name: str,
@@ -381,9 +457,25 @@ def _run_one(
     timeout: int,
     mutate: bool,
     ladder_level: LadderLevel = LadderLevel.L0,
+    *,
+    cancel_requested: Callable[[], bool] | None = None,
+    on_spawn: Callable[[subprocess.Popen], None] | None = None,
+    output_dir: Path | None = None,
 ) -> dict:
+    """Run one attempt and return its raw row after stopping the wall timer.
+
+    A pinned scheduler loads each corpus once and durably saves every returned
+    row before requesting another. Its start-intent and result commits belong
+    outside this function. ``on_spawn`` is a lightweight in-memory registration
+    callback inside the timing envelope; it must not persist a checkpoint.
+    ``cancel_requested`` means immediate operator cancellation, which raises
+    RowInterrupted rather than returning a timeout/crash row. ``output_dir``
+    places transient output inside the scheduler's owned attempt directory.
+    """
     t0 = time.perf_counter()
-    with tempfile.NamedTemporaryFile(suffix=".json", delete=False) as tf:
+    with tempfile.NamedTemporaryFile(
+        suffix=".json", dir=output_dir, delete=False
+    ) as tf:
         tmp = tf.name
     cmd = [
         sys.executable, "-m", "evaluation.harness",
@@ -395,13 +487,7 @@ def _run_one(
         cmd.append("--mutate")
     row: dict
     try:
-        proc = subprocess.run(
-            cmd,
-            timeout=timeout,
-            capture_output=True,
-            text=True,
-            cwd=Path(__file__).parent.parent,
-        )
+        proc = _run_cancellable(cmd, timeout, cancel_requested, on_spawn)
         if os.path.getsize(tmp) > 0:
             with open(tmp) as f:
                 row = json.load(f)
