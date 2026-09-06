@@ -199,3 +199,24 @@ def test_disabled_snapshot_precheck_is_respected_with_common_cache(monkeypatch, 
         assert solver._conflict_precheck(*solver.events)
     monkeypatch.setattr(cs, "_ENABLE_SNAPSHOT_PRECHECK", False)
     assert not solver._conflict_precheck(*solver.events)
+
+
+def test_indirect_addresses_do_not_scan_shared_snapshot_premises(monkeypatch):
+    from .test_conflict_precheck_cache import _store_solver
+
+    solver = _store_solver(_snapshot())
+    original = tc.conflict_precheck_features
+    scanned = []
+
+    def counted_features(expression):
+        scanned.append(expression)
+        return original(expression)
+
+    monkeypatch.setattr(tc, "conflict_precheck_features", counted_features)
+    monkeypatch.setattr(tc, "conflict_impossible", lambda *args, **kwargs: False)
+    solver._conflict_precheck(*solver.events)
+    solver._conflict_precheck(*solver.events)
+    # Address features already enable both queries. In particular, do not
+    # walk an arbitrarily large snapshot table just to rediscover Selects.
+    assert len(scanned) == len(solver.events)
+    assert solver._conflict_precheck_common().has_snapshot is None
