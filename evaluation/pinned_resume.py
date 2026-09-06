@@ -33,6 +33,9 @@ class Control:
         self.signaled = False
 
     def poll(self, force=False):
+        if self.signaled:
+            self.request = "now"
+            return self.request
         now = time.monotonic()
         if not force and now - self.last_poll < 0.5:
             return self.request

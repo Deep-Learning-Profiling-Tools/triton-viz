@@ -225,3 +225,87 @@ def test_spawn_callback_is_inside_wall_envelope(monkeypatch, tmp_path):
     row = _run(5, output_dir=tmp_path, on_spawn=lambda proc: time.sleep(0.2))
     assert row["wall_s"] >= 0.2
     assert row["terminal"] == "proved"
+
+
+@pytest.mark.parametrize("operator_cancel", [False, True])
+def test_signaled_worker_requires_operator_cancel_to_be_interruption(
+    monkeypatch, tmp_path, operator_cancel
+):
+    from evaluation.pinned_resume import Control
+
+    _worker(monkeypatch, "import time; time.sleep(30)")
+    control = Control(tmp_path)
+    processes = []
+
+    def stop_worker(proc):
+        processes.append(proc)
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=5)
+        if operator_cancel:
+            # Model the same signal delivered to the service controller.
+            os.kill(os.getpid(), signal.SIGTERM)
+
+    with control.signals():
+        if operator_cancel:
+            with pytest.raises(runner.RowInterrupted, match="signaled worker"):
+                _run(
+                    5,
+                    output_dir=tmp_path,
+                    cancel_requested=control.immediate,
+                    on_spawn=stop_worker,
+                )
+        else:
+            row = _run(
+                5,
+                output_dir=tmp_path,
+                cancel_requested=control.immediate,
+                on_spawn=stop_worker,
+            )
+            assert row["verdict"] == "error" and row["terminal"] == "crash"
+    assert processes[0].returncode == -signal.SIGTERM
+    assert not list(tmp_path.iterdir())
+
+
+def test_signaled_worker_at_deadline_remains_timeout(monkeypatch, tmp_path):
+    from evaluation.pinned_resume import Control
+
+    _worker(monkeypatch, "import time; time.sleep(30)")
+    control = Control(tmp_path)
+
+    def stop_after_deadline(proc):
+        time.sleep(0.1)
+        proc.send_signal(signal.SIGTERM)
+        proc.wait(timeout=5)
+        os.kill(os.getpid(), signal.SIGTERM)
+
+    with control.signals():
+        row = _run(
+            0.05,
+            output_dir=tmp_path,
+            cancel_requested=control.immediate,
+            on_spawn=stop_after_deadline,
+        )
+    assert row["terminal"] == "timeout"
+    assert not list(tmp_path.iterdir())
+
+
+def test_worker_signaled_inside_cancel_callback_is_interrupted(monkeypatch, tmp_path):
+    _worker(monkeypatch, "import time; time.sleep(30)")
+    processes = []
+
+    def cancelled():
+        if not processes:
+            return False
+        processes[0].send_signal(signal.SIGTERM)
+        processes[0].wait(timeout=5)
+        return True
+
+    with pytest.raises(runner.RowInterrupted, match="signaled worker"):
+        _run(
+            5,
+            output_dir=tmp_path,
+            cancel_requested=cancelled,
+            on_spawn=processes.append,
+        )
+    assert processes[0].returncode == -signal.SIGTERM
+    assert not list(tmp_path.iterdir())

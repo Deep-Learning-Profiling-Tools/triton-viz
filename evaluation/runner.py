@@ -433,6 +433,17 @@ def _run_cancellable(
             interval = min(remaining, 0.1) if cancel_requested else remaining
             try:
                 stdout, stderr = proc.communicate(timeout=interval)
+                # A whole-service stop can terminate the worker while the
+                # controller receives the same signal. That negative exit is
+                # operator interruption, not a completed crash measurement.
+                if (
+                    proc.returncode < 0
+                    and cancel_requested is not None
+                    and cancel_requested()
+                ):
+                    if time.monotonic() >= deadline:
+                        raise subprocess.TimeoutExpired(cmd, timeout) from None
+                    raise RowInterrupted("signaled worker cancelled by operator")
                 return subprocess.CompletedProcess(cmd, proc.returncode, stdout, stderr)
             except subprocess.TimeoutExpired:
                 # Observe completion and the real deadline before cancellation.
@@ -455,6 +466,14 @@ def _run_cancellable(
                             stdout, stderr = proc.communicate(
                                 timeout=min(remaining, 0.1)
                             )
+                            if proc.returncode < 0:
+                                if time.monotonic() >= deadline:
+                                    raise subprocess.TimeoutExpired(
+                                        cmd, timeout
+                                    ) from None
+                                raise RowInterrupted(
+                                    "signaled worker cancelled by operator"
+                                )
                             return subprocess.CompletedProcess(
                                 cmd, proc.returncode, stdout, stderr
                             )

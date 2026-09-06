@@ -277,3 +277,15 @@ def test_start_cli_creates_default_directory_and_dispatches(
         == 0
     )
     assert len(launched) == 1
+
+
+def test_signal_cancellation_bypasses_file_poll_throttle(tmp_path):
+    import os
+    import signal
+
+    control = resume.Control(tmp_path)
+    assert control.poll(force=True) is None
+    with control.signals():
+        os.kill(os.getpid(), signal.SIGTERM)
+        assert control.immediate() is True
+        assert control.request == "now"
