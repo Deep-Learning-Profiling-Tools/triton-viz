@@ -281,7 +281,7 @@ def test_rehearsal_on_golden_smoke_exercises_the_retry_pass(tmp_path, monkeypatc
     summary = out.with_name(out.stem + "_SUMMARY.md").read_text()
     assert "golden_smoke" in summary and "Real-code totals" not in summary
     # the per-corpus file the runner wrote is a protocol dataset
-    per_corpus = tmp_path / "golden_smoke_L1_pinned-rehearsal.jsonl"
+    per_corpus = out.parent / "golden_smoke_main.jsonl"
     assert runner_mod.assert_protocol_dataset(per_corpus)["ladder_level"] == "L1"
 
 

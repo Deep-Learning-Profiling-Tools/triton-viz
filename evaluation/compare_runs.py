@@ -90,6 +90,9 @@ class Dataset:
 
 
 def load_dataset(path: Path, corpora: set[str] | None = None) -> Dataset:
+    from evaluation.pinned_resume import verify_dataset
+
+    verify_dataset(path)
     header: dict[str, Any] = {}
     rows: dict[Key, dict[str, Any]] = {}
     with open(path) as f:

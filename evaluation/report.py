@@ -23,6 +23,9 @@ from pathlib import Path
 
 
 def _load(path: Path) -> tuple[dict, list[dict]]:
+    from evaluation.pinned_resume import verify_dataset
+
+    verify_dataset(path)
     header: dict = {}
     rows: list[dict] = []
     for line in path.read_text().splitlines():

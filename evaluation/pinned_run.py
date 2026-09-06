@@ -1,59 +1,19 @@
-"""The pinned rerun driver: ONE run of ONE detector commit over every corpus.
+"""Durable pinned reruns: one immutable experiment across driver sessions.
 
-The paper's evaluation numbers must be restated from a single run at a
-single commit (paper repo ``pre-submission/pinned-rerun.md``). The first
-pinned run (PINNED_fb91fc0.jsonl, 2026-09-02) was driven from a session
-scratchpad that was never committed; this module is that driver,
-committed so the run is reproducible from the repo alone. Protocol:
-
-  1. preconditions: a clean tracked tree (the commit hash is the
-     dataset's identity), the level decided, the row budget the level's
-     (180 s at L0, 200 s at L1+; ``runner.row_timeout_s``), never the
-     debugging-only process reuse, and the memory-model switch ON: a
-     pinned run is fence-ordered (paper repo ``design-fence-order.md``,
-     stage 5; ``config.race_detector_fence_order`` defaults to True since
-     the flip commit, so the pinned hash itself carries the semantics),
-     the driver refuses ``TRITON_VIZ_FENCE_ORDER=0`` outside
-     ``--rehearsal``, and the header and every row stamp ``fence_order``
-     (the runner and harness stamp the value their own process ran
-     under; the merge cross-checks every stamp against the run's);
-  2. main pass: every corpus through ``runner.run_corpus`` at jobs=1,
-     seed 0, one subprocess per row, under a LOAD GUARD (no other
-     evaluation process of ours running, load average below a bound)
-     so wall times are those of an idle machine;
-  3. retry pass: every row whose main-pass wall reached the budget
-     (``terminal == "timeout"`` or ``wall_s >= budget``) reruns once at
-     the retry budget (320 s);
-  4. merge: the retry row replaces the main row when it produced a
-     verdict; otherwise the row keeps the main row's fields with
-     ``pinned_error`` set and no verdict (the T/o column); every row
-     carries ``pinned_commit``, ``pinned_wall_s`` (the wall of the
-     attempt that stands) and ``pinned_pass``; ``wall_s`` is dropped so
-     no per-row number can be mistaken for a raw runner wall. Every
-     per-corpus file is checked with ``runner.assert_protocol_dataset``
-     before merging (a debugging dataset is refused);
-  5. statistics: the paper repo's evaluation.md section 6 recipe (real-
-     code rows: median / p95 / max within budget, timeouts) and section
-     12 counting (per-corpus verdicts, extents, medians) into
-     ``<merged>_SUMMARY.md``.
-
-Output: ``evaluation/results/PINNED_<commit>[_L<n>].jsonl`` plus the
-per-corpus files ``<corpus>[_L<n>]_pinned.jsonl`` the runner wrote. The
-row-by-row diff against the previous pin (the plan's step 7) and the
-fence-order attribution (section 4c) are ``evaluation.compare_runs``.
-``--rehearsal`` (a dry run on small corpora) names its outputs
-``REHEARSAL_...`` and is the only mode in which the row budget may be
-overridden (to exercise the retry pass) or the tree may be dirty.
+The public CLI uses evaluation.pinned_resume for per-row main/retry commits,
+owned service execution, pause/resume, identity checks and atomic publication.
+This module retains the shared retry predicate, merge rules and statistics.
+See evaluation/PINNED_RESUME.md for the protocol and operational instructions.
 
 Usage:
-    python -m evaluation.pinned_run --ladder-level L2
-    python -m evaluation.pinned_run --ladder-level L0
-    python -m evaluation.pinned_run --rehearsal --corpora golden_smoke --row-timeout 2
+    python -m evaluation.pinned_run start --ladder-level L2
+    python -m evaluation.pinned_run pause --run-dir RUN_DIRECTORY
+    python -m evaluation.pinned_run resume --run-dir RUN_DIRECTORY
+    python -m evaluation.pinned_run start --ladder-level L0 --purpose attribution
 """
 
 from __future__ import annotations
 
-import argparse
 import json
 import math
 import os
@@ -66,17 +26,12 @@ from pathlib import Path
 from typing import Any
 
 from evaluation.runner import (
-    RESULTS_DIR,
     _run_one,
     assert_protocol_dataset,
-    row_timeout_s,
     run_corpus,
 )
-from triton_viz.core.config import config as cfg
 from triton_viz.clients.race_detector.ladder import (
-    LADDER_LEVEL_NAMES,
     LadderLevel,
-    parse_ladder_level,
 )
 
 # The 16 corpora of the pinned run, longest first (a problem with fla
@@ -525,111 +480,35 @@ def run_pinned(
     guard: bool = True,
     log: Any = None,
 ) -> Path:
-    log = log or sys.stderr
-    root = Path(__file__).resolve().parent.parent
-    protocol_timeout = row_timeout_s(level)
-    if row_timeout is None:
-        row_timeout = protocol_timeout
-    if not rehearsal:
-        if row_timeout != protocol_timeout:
-            raise SystemExit(
-                f"a pinned run uses the level's budget ({protocol_timeout} s); "
-                "--row-timeout is a rehearsal-only override"
-            )
-        if not tree_is_clean(root):
-            raise SystemExit(
-                "the tracked tree is dirty: a pinned run's identity is its "
-                "commit hash (commit or stash first, or use --rehearsal)"
-            )
-        if not cfg.race_detector_fence_order:
-            raise SystemExit(
-                "a pinned run is fence-ordered (design-fence-order.md stage 5): "
-                "TRITON_VIZ_FENCE_ORDER=0 is set in this environment; unset it "
-                "(legacy-order attribution runs are --rehearsal only)"
-            )
-    fence_order = bool(cfg.race_detector_fence_order)
-    commit = git_commit(root)
-    tag = "REHEARSAL" if rehearsal else "PINNED"
-    level_suffix = "" if level == LadderLevel.L0 else f"_{level.name}"
-    suffix = PINNED_SUFFIX + ("-rehearsal" if rehearsal else "")
-    out = RESULTS_DIR / f"{tag}_{commit}{level_suffix}.jsonl"
-    print(
-        f"[pinned] {tag} run at commit {commit}, level {level.name}, "
-        f"{len(corpora)} corpora, row budget {row_timeout} s, retry {retry_timeout} s"
-        + (", fence order ON" if fence_order else ", fence order OFF (legacy)")
-        + ("" if guard else ", load guard OFF"),
-        file=log,
-        flush=True,
+    """Start a durable run; direct rehearsal calls execute synchronously.
+
+    Formal calls dispatch an owned service and return its run directory.
+    Completed rehearsal calls return the published dataset path.
+    """
+    from evaluation.pinned_resume import start_run
+
+    return start_run(
+        level,
+        corpora,
+        seed,
+        row_timeout,
+        retry_timeout,
+        rehearsal,
+        guard,
+        purpose="definitive" if level.name == "L2" else "attribution",
+        foreground=rehearsal,
     )
-    t_all = time.perf_counter()
-    files = main_pass(corpora, level, seed, row_timeout, guard, log, suffix)
-    retried = retry_pass(files, level, seed, row_timeout, retry_timeout, guard, log)
-    header, merged = merge(
-        files, retried, commit, level, row_timeout, retry_timeout, seed, fence_order
-    )
-    header["rehearsal"] = rehearsal
-    header["retried_rows"] = len(retried)
-    header["total_s"] = round(time.perf_counter() - t_all, 1)
-    RESULTS_DIR.mkdir(exist_ok=True)
-    with open(out, "w") as f:
-        f.write(json.dumps(header) + "\n")
-        for row in merged:
-            f.write(json.dumps(row) + "\n")
-    stats = overhead_stats(files, float(row_timeout))
-    table = verdict_table(merged)
-    summary = out.with_name(out.stem + "_SUMMARY.md")
-    summary.write_text(summary_markdown(header, merged, stats, table))
-    print(
-        f"[pinned] merged {len(merged)} rows ({len(retried)} retried) -> {out.name}; "
-        f"summary -> {summary.name}; total {header['total_s']}s",
-        file=log,
-        flush=True,
-    )
-    return out
 
 
 def main() -> None:
-    ap = argparse.ArgumentParser(description=__doc__.splitlines()[0])
-    ap.add_argument(
-        "--ladder-level", choices=LADDER_LEVEL_NAMES, default=LadderLevel.L0.name
-    )
-    ap.add_argument(
-        "--corpora", nargs="+", default=list(ALL_CORPORA), help="default: all 16"
-    )
-    ap.add_argument("--seed", type=int, default=0)
-    ap.add_argument(
-        "--row-timeout",
-        type=int,
-        default=None,
-        help="rehearsal-only override of the level's row budget (to exercise the retry pass)",
-    )
-    ap.add_argument("--retry-timeout", type=int, default=RETRY_TIMEOUT_S)
-    ap.add_argument(
-        "--rehearsal",
-        action="store_true",
-        help="a dry run: outputs are named REHEARSAL_..., the budget may be overridden, "
-        "the tree may be dirty; never a pinned dataset",
-    )
-    ap.add_argument(
-        "--no-load-guard",
-        action="store_true",
-        help="(rehearsal) skip the idle-machine wait",
-    )
-    ns = ap.parse_args()
-    unknown = [c for c in ns.corpora if c not in ALL_CORPORA]
-    if unknown:
-        ap.error(f"unknown corpora {unknown}; known: {ALL_CORPORA}")
-    if ns.no_load_guard and not ns.rehearsal:
-        ap.error("--no-load-guard is a rehearsal-only option")
-    run_pinned(
-        parse_ladder_level(ns.ladder_level),
-        tuple(ns.corpora),
-        ns.seed,
-        ns.row_timeout,
-        ns.retry_timeout,
-        rehearsal=ns.rehearsal,
-        guard=not ns.no_load_guard,
-    )
+    # Every public invocation now uses the durable scheduler. Legacy flags
+    # remain a spelling of "start"; pure merge/statistic helpers stay shared.
+    from evaluation.pinned_resume import main as resumable_main
+
+    argv = sys.argv[1:]
+    commands = {"start", "resume", "pause", "status", "verify", "_execute"}
+    resumable_main(argv if argv and argv[0] in commands else ["start", *argv])
+    return
 
 
 if __name__ == "__main__":
