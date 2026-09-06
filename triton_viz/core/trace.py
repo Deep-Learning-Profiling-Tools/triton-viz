@@ -1,3 +1,5 @@
+import weakref
+from contextlib import contextmanager
 from copy import deepcopy
 from collections.abc import Callable
 from typing import Any
@@ -12,6 +14,44 @@ import types
 
 
 launches: list[Launch] = []
+
+# Every live TritonTrace, so real-compile windows can present the underlying
+# JITFunction to Triton's code generator (see _unwrapped_jit_globals).
+_all_traces: "weakref.WeakSet[Any]" = weakref.WeakSet()
+
+
+@contextmanager
+def _unwrapped_jit_globals():
+    """Temporarily swap module globals holding a TritonTrace back to the
+    wrapped JITFunction.
+
+    Under the CLI wrappers every ``@triton.jit`` function — including DEVICE
+    functions — is wrapped into a TritonTrace. Triton's real code generator
+    resolves a callee through the caller's ``__globals__`` and only accepts
+    JITFunctions there ("Unsupported function referenced" otherwise). The
+    interpreter path tolerates the wrapper via ``TritonTrace.__call__``; a
+    real compile (the warmup-only path) does not, so for the duration of a
+    real-compile window each trace's global binding is unwound to its
+    ``jit_fn`` and restored afterwards.
+    """
+    swapped: list[tuple[dict, str, Any]] = []
+    for trace in list(_all_traces):
+        jit_fn = trace.jit_fn
+        base_fn = trace.base_fn
+        if jit_fn is None or base_fn is None:
+            continue
+        module_globals = getattr(base_fn, "__globals__", None)
+        if module_globals is None:
+            continue
+        for name, value in list(module_globals.items()):
+            if value is trace:
+                module_globals[name] = jit_fn
+                swapped.append((module_globals, name, trace))
+    try:
+        yield
+    finally:
+        for module_globals, name, trace in swapped:
+            module_globals[name] = trace
 
 
 class TraceInterface:
@@ -171,10 +211,74 @@ class TritonTrace(LaunchInterface, TraceInterface, KernelTraceSupport):
 
         self._copy_callable_attrs(runner, self.base_fn, src_fallback=self.jit_fn)
 
+        # Register for _unwrapped_jit_globals: real-compile windows unwind
+        # this trace's module-global binding to the raw JITFunction so the
+        # code generator can resolve it as a device-function callee.
+        _all_traces.add(self)
+
     def run(self, *args, **kwargs):
+        clients = self.client_manager.clients
+        warmup_only = (
+            bool(clients)
+            and self.warmup_runner is not None
+            and all(getattr(c, "WARMUP_ONLY", False) for c in clients.values())
+        )
+
+        if warmup_only:
+            # Warmup-only clients (e.g. the compiled-mode race detector)
+            # consume nothing from the interpreted run: their whole analysis
+            # input is the warmup compilation artifact. Skip the interpreter
+            # entirely — no language patching, no grid loop — and execute the
+            # REAL kernel instead, so the host script keeps its true semantics
+            # (outputs, asserts, autotuning). This is load-bearing, not just
+            # an optimization: Triton's interpreter patches tl.core.tensor
+            # dunders in place and the snapshot/restore around it does not
+            # survive a traced launch followed by a REAL compile of a second
+            # kernel in the same process (the leaked interpreter __bool__
+            # breaks semantic._load_legacy's `other.handle if other else
+            # None`). Warmup-only clients never need that machinery, so they
+            # never engage it. NOTE: the real handle is warmup_runner —
+            # self.runner is the InterpretedFunction (or an Autotuner whose
+            # fn was swapped to it); warmup_runner is the raw JITFunction, or
+            # for Autotuner/Heuristics a deepcopy still bound to the real
+            # kernel. The whole window (warmup compile + real launch, which
+            # may compile further specializations) runs with TritonTrace
+            # globals unwound so device-function callees resolve to real
+            # JITFunctions in the code generator.
+            with _unwrapped_jit_globals():
+                with self.client_manager.patch_warmup(self.jit_fn):
+                    if self.warmup_runner:
+                        self.warmup_runner.warmup(*args, **kwargs)
+                try:
+                    ret = self.warmup_runner.run(*args, **kwargs)
+                finally:
+                    self.finalize()
+                return ret
+
         with self.client_manager.patch_warmup(self.jit_fn):
             if self.warmup_runner:
-                self.warmup_runner.warmup(*args, **kwargs)
+                # Real warmup compilation walks the kernel AST to hash and
+                # inline referenced device functions. When a kernel calls a
+                # `@triton.jit` helper that we have also wrapped in trace()
+                # (the CLI / "wrap every jit" pattern), that helper global is a
+                # TritonTrace, which triton's dependency walker rejects
+                # ("Unsupported function referenced"). Only compiled-mode
+                # clients trigger this warmup; eager traces skip it. Present the
+                # raw jit_fns to the compiler, then restore the wrappers.
+                try:
+                    with _unwrap_traced_globals(self.base_fn):
+                        self.warmup_runner.warmup(*args, **kwargs)
+                except RuntimeError as exc:
+                    # Driverless host (CPU-only CI): triton's warmup resolves
+                    # driver.active and dies with "0 active drivers". Warmup
+                    # is OPTIONAL for the eager clients (under
+                    # TRITON_INTERPRET it never ran at all — jit_fn is None
+                    # and this branch is skipped); compiled-mode clients that
+                    # NEED the artifacts surface their own honest
+                    # no_ttgir/no_ttir verdicts downstream. Anything other
+                    # than the driver-discovery failure still raises.
+                    if "active driver" not in str(exc):
+                        raise
 
         with self.client_manager.patch_run(self.base_fn, frontend_name="triton"):
             kwargs.update({"client_manager": self.client_manager})
@@ -206,6 +310,45 @@ class TritonTrace(LaunchInterface, TraceInterface, KernelTraceSupport):
         with self.client_manager.patch_warmup(self.jit_fn):
             if self.warmup_runner:
                 self.warmup_runner.warmup(*args, **kwargs)
+
+
+@contextmanager
+def _unwrap_traced_globals(base_fn: Callable | None):
+    """Temporarily replace any TritonTrace in the kernel's reachable globals
+    with its underlying jit_fn, for the duration of a real warmup compilation.
+
+    A device function (``@triton.jit`` helper called from inside another
+    kernel) wrapped in trace() appears as a TritonTrace. triton's dependency
+    walker and codegen only accept JITCallables, so they raise "Unsupported
+    function referenced" on the wrapper. Kernel and same-module helpers share
+    one module dict, so swapping every TritonTrace there resolves the common
+    case; a helper imported from another module is reached as ``mod.helper``,
+    so we also descend one level into module objects in the kernel's globals
+    (only TritonTrace entries are touched, and everything is restored).
+    """
+    g = getattr(base_fn, "__globals__", None)
+    if g is None:
+        yield
+        return
+    saved: list[tuple[dict, str, Any]] = []
+
+    def unwrap(container: dict) -> None:
+        for name, val in list(container.items()):
+            if isinstance(val, TritonTrace) and val.jit_fn is not None:
+                saved.append((container, name, val))
+                container[name] = val.jit_fn
+
+    unwrap(g)
+    for val in list(g.values()):
+        if isinstance(val, types.ModuleType):
+            mod_dict = getattr(val, "__dict__", None)
+            if isinstance(mod_dict, dict):
+                unwrap(mod_dict)
+    try:
+        yield
+    finally:
+        for container, name, val in saved:
+            container[name] = val
 
 
 class NKITrace(LaunchInterface, TraceInterface):

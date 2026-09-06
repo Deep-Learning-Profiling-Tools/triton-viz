@@ -1,0 +1,16 @@
+#loc = loc("/home/hwu27/workspace/triton-viz/tests/golden/ttgir/generate_golden.py":146:0)
+#loc4 = loc("lock_ptr"(#loc))
+#loc5 = loc("out_ptr"(#loc))
+module {
+  tt.func public @cas_kernel(%lock_ptr: !tt.ptr<i32> {tt.divisibility = 16 : i32} loc("lock_ptr"(#loc)), %out_ptr: !tt.ptr<i32> {tt.divisibility = 16 : i32} loc("out_ptr"(#loc))) attributes {noinline = false} {
+    %old = arith.constant 0 : i32 loc(#loc6)
+    %old_0 = arith.constant 1 : i32 loc(#loc6)
+    %old_1 = tt.atomic_cas acq_rel, gpu, %lock_ptr, %old, %old_0 : (!tt.ptr<i32>, i32, i32) -> i32 loc(#loc6)
+    tt.store %out_ptr, %old_1 : !tt.ptr<i32> loc(#loc2)
+    tt.return loc(#loc3)
+  } loc(#loc)
+} loc(#loc)
+#loc1 = loc("/home/hwu27/workspace/triton-viz/tests/golden/ttgir/generate_golden.py":148:37)
+#loc2 = loc("/home/hwu27/workspace/triton-viz/tests/golden/ttgir/generate_golden.py":149:22)
+#loc3 = loc("/home/hwu27/workspace/triton-viz/tests/golden/ttgir/generate_golden.py":149:4)
+#loc6 = loc("old"(#loc1))
