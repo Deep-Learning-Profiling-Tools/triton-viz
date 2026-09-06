@@ -246,3 +246,34 @@ def test_completed_export_requires_durable_receipt(experiment):
     (path / "COMPLETE.json").unlink()
     with pytest.raises(FileNotFoundError):
         resume.verify_dataset(out)
+
+
+def test_start_cli_creates_default_directory_and_dispatches(
+    experiment, monkeypatch, tmp_path
+):
+    _, template, _, _ = experiment
+    output_root = tmp_path / "default-results"
+    monkeypatch.setattr(runner, "RESULTS_DIR", output_root)
+    launched = []
+
+    def build(config, *, run_id, only_names):
+        manifest = json.loads(json.dumps(template))
+        manifest.update(config=config, run_id=run_id)
+        return manifest, {}
+
+    def launch(path, manifest):
+        assert path.parent == output_root / "pinned-runs"
+        assert path.name == manifest["run_id"]
+        assert RunStore.inspect(path)["main_committed"] == 0
+        launched.append(path)
+        return "test.service"
+
+    monkeypatch.setattr(identity, "build_manifest", build)
+    monkeypatch.setattr(service, "launch", launch)
+    assert (
+        resume.main(
+            ["start", "--rehearsal", "--no-load-guard", "--corpora", "golden_smoke"]
+        )
+        == 0
+    )
+    assert len(launched) == 1

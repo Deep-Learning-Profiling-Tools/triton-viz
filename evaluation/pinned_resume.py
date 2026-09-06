@@ -182,7 +182,7 @@ def start_run(
     foreground=False,
     only_names=None,
 ):
-    from evaluation.pinned_run import RESULTS_DIR
+    from evaluation.runner import RESULTS_DIR
     from evaluation.pinned_service import launch, admission
 
     config = official_config(

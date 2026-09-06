@@ -248,7 +248,6 @@ def test_rehearsal_on_golden_smoke_exercises_the_retry_pass(tmp_path, monkeypatc
     is retried at the retry budget and decides; the merged file is
     stamped and named REHEARSAL."""
     monkeypatch.setattr(runner_mod, "RESULTS_DIR", tmp_path)
-    monkeypatch.setattr(pr, "RESULTS_DIR", tmp_path)
     # the rows' subprocesses inherit the environment: merge under it
     monkeypatch.setattr(
         cfg,
@@ -291,7 +290,6 @@ def test_pinned_mode_refuses_the_legacy_order(tmp_path, monkeypatch):
     from triton_viz.core.config import config as cfg
 
     monkeypatch.setattr(runner_mod, "RESULTS_DIR", tmp_path)
-    monkeypatch.setattr(pr, "RESULTS_DIR", tmp_path)
     monkeypatch.setattr(pr, "tree_is_clean", lambda root: True)
     monkeypatch.setattr(cfg, "race_detector_fence_order", False)
     with pytest.raises(SystemExit, match="fence-ordered"):
@@ -300,7 +298,6 @@ def test_pinned_mode_refuses_the_legacy_order(tmp_path, monkeypatch):
 
 def test_pinned_mode_refuses_a_budget_override(tmp_path, monkeypatch):
     monkeypatch.setattr(runner_mod, "RESULTS_DIR", tmp_path)
-    monkeypatch.setattr(pr, "RESULTS_DIR", tmp_path)
     with pytest.raises(SystemExit, match="rehearsal-only"):
         pr.run_pinned(
             LadderLevel.L0,
