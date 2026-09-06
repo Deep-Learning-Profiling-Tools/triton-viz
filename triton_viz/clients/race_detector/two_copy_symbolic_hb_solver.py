@@ -156,6 +156,7 @@ class _ConflictPrecheckCommon:
     expression: BoolRef
     shared: tuple[tuple[Any, Any], ...]
     correspondence: tuple[tuple[Any, Any], ...]
+    has_snapshot: bool
     intra_expression: BoolRef | None = None
 
 
@@ -785,10 +786,17 @@ class TwoCopySymbolicHBSolver:
                 event.idx: conflict_precheck_features(event.addr)
                 for event in self.events
             }
-        if not any(features[a.idx]) and not any(features[b.idx]):
+        common = self._conflict_precheck_common()
+        # Even linear addresses otherwise enter array solving when shared
+        # snapshot premises contain Selects. The same necessary-condition
+        # precheck can prove them disjoint without the full array/HB query.
+        if (
+            not any(features[a.idx])
+            and not any(features[b.idx])
+            and not common.has_snapshot
+        ):
             return False
         simplify_first = not (features[a.idx][0] or features[b.idx][0])
-        common = self._conflict_precheck_common()
         conflict = self._conflict(a, b)
         if same_instance:
             assert lane_cond is not None
@@ -863,7 +871,11 @@ class TwoCopySymbolicHBSolver:
             *[as_bool(condition) for condition in self.extra_assumptions],
         )
         cached = self._conflict_common_cache = _ConflictPrecheckCommon(
-            sources, expression, shared, correspondence
+            sources,
+            expression,
+            shared,
+            correspondence,
+            has_snapshot=conflict_precheck_features(expression)[1],
         )
         return cached
 
