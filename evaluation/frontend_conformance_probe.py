@@ -24,10 +24,18 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--corpus", required=True)
     parser.add_argument("--name", required=True)
-    parser.add_argument("--track", choices=("static", "dynamic"), required=True)
+    parser.add_argument("--track", choices=("static", "dynamic", "enum"), required=True)
+    parser.add_argument("--dynamic-budget", type=float, default=60.0)
+    parser.add_argument("--sequence-length", type=int)
+    parser.add_argument("--head-dim", type=int)
+    parser.add_argument("--stack-delay", type=float)
     parser.add_argument("--ttir", type=Path)
     parser.add_argument("--out", type=Path, required=True)
     ns = parser.parse_args()
+    if ns.stack_delay is not None:
+        import faulthandler
+
+        faulthandler.dump_traceback_later(ns.stack_delay)
 
     import torch
     from evaluation.kernels import load
@@ -43,6 +51,51 @@ def main():
     spec = next(s for s in load(ns.corpus).specs if s.name == ns.name)
     args = spec.make_args(0)
     bound = _launch_binding(spec, args)
+    source_configuration = ns.name
+    if ns.head_dim is not None:
+        old_d = int(bound["D"])
+        new_d = ns.head_dim
+        if new_d < 2 or new_d > old_d or new_d & (new_d - 1):
+            parser.error("head dimension must be a smaller power of two")
+        for name, value in bound.items():
+            if (
+                isinstance(value, torch.Tensor)
+                and value.ndim == 4
+                and value.shape[-1] == old_d
+            ):
+                bound[name] = value[..., :new_d]
+        bound["D"] = new_d
+        bound["LOG2_D"] = new_d.bit_length() - 1
+        spec = replace(
+            spec,
+            constexprs={
+                **spec.constexprs,
+                "D": new_d,
+                "LOG2_D": new_d.bit_length() - 1,
+            },
+        )
+        source_configuration += f"__diagnostic_D{new_d}"
+    if ns.sequence_length is not None:
+        old_s = int(bound["S"])
+        new_s = ns.sequence_length
+        chunks = int(bound["num_chunks"])
+        if new_s < chunks or new_s > old_s or new_s % chunks:
+            parser.error("reduced sequence must cover all chunks evenly")
+        for name, value in bound.items():
+            if isinstance(value, torch.Tensor) and value.ndim == 4:
+                axes = [axis for axis, size in enumerate(value.shape) if size == old_s]
+                if len(axes) == 1:
+                    slices = [slice(None)] * value.ndim
+                    slices[axes[0]] = slice(0, new_s)
+                    bound[name] = value[tuple(slices)]
+        bound["S"] = new_s
+        bound["chunk_size"] = new_s // chunks
+        source_configuration += f"__diagnostic_S{new_s}"
+    if ns.head_dim is not None or ns.sequence_length is not None:
+        arg_names = [
+            name for name in spec.kernel_fn.arg_names if name not in spec.constexprs
+        ]
+        args = tuple(bound[name] for name in arg_names)
     inputs = {}
     for name, value in bound.items():
         if isinstance(value, torch.Tensor):
@@ -58,7 +111,10 @@ def main():
     source = inspect.getsource(spec.kernel_fn.fn)
     result = {
         "kind": "conformance-diagnostic-not-timing",
-        "name": ns.name,
+        "name": source_configuration,
+        "original_configuration": ns.name,
+        "sequence_length_override": ns.sequence_length,
+        "head_dim_override": ns.head_dim,
         "corpus": ns.corpus,
         "track": ns.track,
         "ladder_level": "L2",
@@ -94,10 +150,25 @@ def main():
         det.finalize()
         result["result"] = _static_result(det, 0.0, None)
         result["result"].pop("time_s", None)
-    else:
+    elif ns.track == "dynamic":
+        import evaluation.harness as harness
+
+        harness.DYNAMIC_TIMEOUT_S = ns.dynamic_budget
+        result["diagnostic_dynamic_budget_s"] = ns.dynamic_budget
         result["result"] = _dynamic_track(
             replace(spec, make_args=lambda seed: args), 0, LadderLevel.L2
         )
+    else:
+        from triton_viz.clients.race_detector.concrete_enum import enumerate_launch
+
+        outcome = enumerate_launch(spec.kernel_fn, (), bound, spec.grid)
+        result["result"] = {
+            "status": outcome.status,
+            "reason": outcome.reason,
+            "n_reports": len(outcome.reports),
+            "n_instances": outcome.n_instances,
+            "grid": None if outcome.grid is None else list(outcome.grid),
+        }
     ns.out.parent.mkdir(parents=True, exist_ok=True)
     ns.out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"name": ns.name, "track": ns.track, "result": result["result"]}))

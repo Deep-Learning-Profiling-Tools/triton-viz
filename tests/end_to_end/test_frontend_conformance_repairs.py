@@ -47,6 +47,17 @@ def test_same_axis_coupling_retains_real_duplicate_lane_waw():
 
 
 @triton.jit
+def _nonzero_range_start(out):
+    mask = tl.arange(8, 16) < 12
+    col = tl.arange(0, 8)
+    tl.store(out + tl.program_id(0) * 8 + col, 1, mask)
+
+
+def test_same_axis_coupling_uses_coordinates_not_arange_values():
+    assert _run(_nonzero_range_start, torch.zeros(16)).last_reports == []
+
+
+@triton.jit
 def _two_axes(out):
     rows = tl.arange(0, 8)
     cols = tl.arange(0, 8)
