@@ -9,6 +9,7 @@ from __future__ import annotations
 import argparse
 import copy
 import dis
+import enum
 import hashlib
 import importlib
 import importlib.metadata
@@ -98,6 +99,8 @@ def source_identity() -> dict:
 
 
 def _kernel_identity(kernel) -> dict:
+    from triton.runtime.jit import JITFunction
+
     fn = getattr(kernel, "fn", kernel)
     result: dict[str, Any] = {
         "source": getattr(kernel, "src", None),
@@ -108,18 +111,256 @@ def _kernel_identity(kernel) -> dict:
         "arg_names": list(getattr(kernel, "arg_names", ())),
     }
     dependencies = {}
+    callables = {}
     seen = set()
+    primitive_containers: dict[int, int] = {}
 
-    def global_reads(code):
-        # co_names also includes attributes such as the exp in tl.exp. Those
-        # are not reads of a same-named module global, and cloudpickle rightly
-        # omits that unused global when transporting the function by value.
-        for instruction in dis.get_instructions(code):
-            if instruction.opname in {"LOAD_GLOBAL", "LOAD_NAME"}:
-                yield instruction.argval
-        for constant in code.co_consts:
-            if isinstance(constant, types.CodeType):
-                yield from global_reads(constant)
+    def code_identity(code):
+        # marshal encodes string interning/sharing, which cloudpickle may
+        # change without changing code. Describe semantic code fields instead.
+        def literal(value):
+            if type(value) is types.CodeType:  # noqa: E721
+                return code_identity(value)
+            if type(value) in (tuple, frozenset):  # noqa: E721
+                items = [literal(v) for v in value]
+                if type(value) is frozenset:
+                    items.sort(key=lambda v: json.dumps(v, sort_keys=True))
+                return {type(value).__name__: items}
+            if type(value) in (bool, int, float, complex, str, bytes) or value in (  # noqa: E721
+                None,
+                Ellipsis,
+            ):
+                return {type(value).__name__: repr(value)}
+            raise DynamicSubprocessError("unsupported callable code constant")
+
+        return {
+            "bytecode": code.co_code.hex(),
+            "constants": [literal(v) for v in code.co_consts],
+            "names": code.co_names,
+            "varnames": code.co_varnames,
+            "freevars": code.co_freevars,
+            "cellvars": code.co_cellvars,
+            "argcount": code.co_argcount,
+            "posonlyargcount": code.co_posonlyargcount,
+            "kwonlyargcount": code.co_kwonlyargcount,
+            "flags": code.co_flags,
+            "exceptiontable": getattr(code, "co_exceptiontable", b"").hex(),
+        }
+
+    def constant(value, key):
+        # Exact types matter: subclasses may change arithmetic or attribute
+        # semantics without changing the scalar serialized in the receipt.
+        if type(value) in (bool, int, str) or value is None:  # noqa: E721
+            return {"constant": value}
+        if type(value) is float:  # noqa: E721
+            return {"constant_float64_bits": struct.pack("!d", value).hex()}
+        if type(value) is tuple:
+            return {"tuple": [constant(v, key) for v in value]}
+        import triton.language as tl
+
+        if type(value) is tl.dtype:
+            return {"dtype": str(value)}
+        if type(value) is tl.constexpr:
+            return {"constexpr": constant(value.value, key)}
+        if type(value) is tl.core.PropagateNan:
+            return {"propagate_nan": int(value)}
+        if isinstance(value, enum.Enum) and type(value).__module__.startswith(
+            "triton."
+        ):
+            return {
+                "enum": type(value).__module__ + "." + type(value).__qualname__,
+                "name": value.name,
+                "value": constant(value.value, key),
+            }
+        # Lists/dicts can carry aliases or be mutated by a helper; equal
+        # element values alone do not attest that execution state.
+        raise DynamicSubprocessError(
+            f"unsupported runtime dependency {key}: {type(value).__name__}"
+        )
+
+    def keyword_defaults(function, key):
+        values = function.__kwdefaults__
+        return (
+            None
+            if values is None
+            else {
+                name: constant(value, key + "." + name)
+                for name, value in values.items()
+            }
+        )
+
+    def primitive(value, key, *, framework_state=False):
+        # Triton primitives are part of the pinned interpreter implementation.
+        # Bind the actual callable too: module/name alone misses replacements
+        # made with functools.wraps. Application Python callables are refused.
+        # Builtin wrappers such as tl.exp capture dtype-name lists. These
+        # belong to the trusted primitive, but still bind their values and
+        # aliases across wrapper closures in this identity traversal.
+        if framework_state and type(value) in (list, dict):  # noqa: E721
+            if id(value) in primitive_containers:
+                return {"container_ref": primitive_containers[id(value)]}
+            group = primitive_containers[id(value)] = len(primitive_containers)
+            items = value if type(value) is list else value.items()  # noqa: E721
+            return {
+                "container_id": group,
+                type(value).__name__: [
+                    primitive(item, key, framework_state=True) for item in items
+                ],
+            }
+        if framework_state and type(value) is tuple:
+            return {
+                "tuple": [primitive(item, key, framework_state=True) for item in value]
+            }
+        module = getattr(value, "__module__", "")
+        if not module.startswith("triton."):
+            return constant(value, key)
+        from triton.runtime.jit import ConstexprFunction
+
+        if type(value) is ConstexprFunction:
+            return {"constexpr_function": primitive(value.fn, key)}
+        if type(value) is types.FunctionType:  # noqa: E721
+            import triton
+
+            if (
+                not Path(value.__code__.co_filename)
+                .resolve()
+                .is_relative_to(Path(triton.__file__).resolve().parent)
+            ):
+                raise DynamicSubprocessError(
+                    f"unsupported primitive replacement: {key}"
+                )
+            return {
+                "primitive": module + "." + value.__qualname__,
+                "code": _hash(code_identity(value.__code__)),
+                "defaults": constant(value.__defaults__, key),
+                "kwdefaults": keyword_defaults(value, key),
+                "closure": [
+                    primitive(cell.cell_contents, key, framework_state=True)
+                    for cell in value.__closure__ or ()
+                ],
+            }
+        import triton.language as tl
+
+        if type(value) is tl.dtype:
+            return {"dtype": str(value)}
+        if isinstance(value, type):
+            return {"primitive_type": module + "." + value.__qualname__}
+        return constant(value, key)
+
+    def describe(value, key):
+        if type(value) is JITFunction:  # noqa: E721
+            description = {
+                "source": value.src,
+                "module": value.fn.__module__,
+                "qualname": value.fn.__qualname__,
+            }
+            visit(value, key)
+            return description
+        if isinstance(value, types.ModuleType):
+            if type(value) is not types.ModuleType:  # noqa: E721
+                raise DynamicSubprocessError(f"unsupported module subclass: {key}")
+            filename = vars(value).get("__file__")
+            return {
+                "module": value.__name__,
+                "file": filename,
+                "sha256": hashlib.sha256(Path(filename).read_bytes()).hexdigest()
+                if filename
+                else None,
+                "attributes": {},
+            }
+        if type(value) is types.BuiltinFunctionType and value.__module__ in (  # noqa: E721
+            "builtins",
+            "math",
+        ):
+            if value.__name__ in {
+                "id",
+                "globals",
+                "locals",
+                "vars",
+                "eval",
+                "exec",
+                "__import__",
+            }:
+                raise DynamicSubprocessError(
+                    f"unsupported runtime introspection: {key}"
+                )
+            return {"builtin": value.__module__ + "." + value.__qualname__}
+        return primitive(value, key)
+
+    def reads(code, bindings, prefix):
+        instructions = list(dis.get_instructions(code))
+        for index, instruction in enumerate(instructions):
+            if instruction.opname in {
+                "IMPORT_NAME",
+                "IMPORT_FROM",
+                "STORE_GLOBAL",
+                "DELETE_GLOBAL",
+            }:
+                raise DynamicSubprocessError(
+                    f"unsupported runtime binding mutation: {prefix}"
+                )
+            if instruction.opname == "IS_OP" and not (
+                index
+                and instructions[index - 1].opname == "LOAD_CONST"
+                and instructions[index - 1].argval is None
+            ):
+                raise DynamicSubprocessError(
+                    f"unsupported identity comparison: {prefix}"
+                )
+            if instruction.opname not in {
+                "LOAD_GLOBAL",
+                "LOAD_NAME",
+                "LOAD_DEREF",
+                "LOAD_CLASSDEREF",
+            }:
+                continue
+            name = instruction.argval
+            if name not in bindings:
+                if name in {
+                    "id",
+                    "globals",
+                    "locals",
+                    "vars",
+                    "eval",
+                    "exec",
+                    "__import__",
+                }:
+                    raise DynamicSubprocessError(
+                        f"unsupported runtime introspection: {name}"
+                    )
+                continue  # Normal, unshadowed Python builtins.
+            value = bindings[name]
+            key = prefix + "." + name
+            if key not in dependencies:
+                dependencies[key] = describe(value, key)
+            description = dependencies[key]
+            # Only direct, statically named module attribute chains are
+            # admitted. Module aliases, getattr(module, ...), passing a module
+            # to a helper, and dynamic module __getattr__ require a richer
+            # transport contract; never silently treat them as file-only.
+            while isinstance(value, types.ModuleType):
+                index += 1
+                if index >= len(instructions) or instructions[index].opname not in {
+                    "LOAD_ATTR",
+                    "LOAD_METHOD",
+                }:
+                    raise DynamicSubprocessError(
+                        f"unsupported indirect module dependency: {key}"
+                    )
+                attribute = instructions[index].argval
+                if attribute not in vars(value):
+                    raise DynamicSubprocessError(
+                        f"unsupported dynamic module attribute: {key}.{attribute}"
+                    )
+                value = vars(value)[attribute]
+                key += "." + attribute
+                attributes = description["attributes"]
+                if attribute not in attributes:
+                    attributes[attribute] = describe(value, key)
+                description = attributes[attribute]
+        for nested in code.co_consts:
+            if isinstance(nested, types.CodeType):
+                reads(nested, bindings, prefix)
 
     def visit(current, prefix):
         if id(current) in seen:
@@ -127,40 +368,23 @@ def _kernel_identity(kernel) -> dict:
         seen.add(id(current))
         function = getattr(current, "fn", current)
         code = getattr(function, "__code__", None)
-        if code is None:
-            return
+        if type(function) is not types.FunctionType:  # noqa: E721
+            raise DynamicSubprocessError(f"unsupported kernel callable: {prefix}")
+        callables[prefix] = {
+            "code": _hash(code_identity(code)),
+            "defaults": constant(function.__defaults__, prefix + ".defaults"),
+            "kwdefaults": keyword_defaults(function, prefix + ".kwdefaults"),
+        }
         closure = {
             name: cell.cell_contents
             for name, cell in zip(code.co_freevars, function.__closure__ or ())
         }
         bindings = {**getattr(function, "__globals__", {}), **closure}
-        for name in dict.fromkeys((*global_reads(code), *code.co_freevars)):
-            value = bindings.get(name)
-            key = prefix + "." + name
-            if hasattr(value, "src") and hasattr(value, "fn"):
-                dependencies[key] = {
-                    "source": value.src,
-                    "module": value.fn.__module__,
-                    "qualname": value.fn.__qualname__,
-                }
-                visit(value, key)
-            elif isinstance(value, types.ModuleType):
-                filename = getattr(value, "__file__", None)
-                dependencies[key] = {
-                    "module": value.__name__,
-                    "file": filename,
-                    "sha256": hashlib.sha256(Path(filename).read_bytes()).hexdigest()
-                    if filename
-                    else None,
-                }
-            elif isinstance(value, (bool, int, str)) or value is None:
-                if name in bindings:
-                    dependencies[key] = {"constant": value}
-            elif isinstance(value, float):
-                dependencies[key] = {"constant_float": repr(value)}
+        reads(code, bindings, prefix)
 
     visit(kernel, "kernel")
     result["dependency_sources"] = dependencies
+    result["callables"] = callables
     return result
 
 
@@ -326,7 +550,7 @@ def run_dynamic(spec, seed, level, budget_s, hooks=()) -> dict[str, Any]:
         _json(path / "request.json", request)
         environment = dict(os.environ)
         # Match actual import paths, including explicit evaluation helpers and
-        # development-only dependencies; no monkeypatched objects are inherited.
+        # development-only dependencies. Runtime module reads are checked before GO.
         environment["PYTHONPATH"] = os.pathsep.join(str(p) for p in sys.path if p)
         process_started = time.perf_counter()
         proc = subprocess.Popen(
