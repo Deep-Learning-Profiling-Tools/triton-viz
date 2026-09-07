@@ -1423,3 +1423,17 @@ needs; none blocks submission.
 - Next advisor alignment carries: Q5 (M4/sm90 submission scope),
   the landing-figure question, and confirmation of the executed
   contribution-triad reframing.
+
+## Missing source-fence diagnostics (completed 2026-09-07)
+
+- [x] Explain eligible same-instance, cross-operation reports in the
+      symbolic solver and concrete enumerator, including both source sites
+      and the absent captured tile-level fence. Preserve verdicts, witnesses,
+      existing reason prefixes and launch-level refusal classifications.
+      Save report reasons in static, interpreter and enumeration witness
+      exports. The shared formatter excludes duplicate lanes, cross-instance
+      reports, legacy order, unknown source metadata and pre-exit summaries.
+      Validation: 169 unit/capture tests pass after the frozen experiment
+      sequence completes and exclusive host admission is acquired. No cuTile
+      token-order work or measurement rerun is included. Scope, compatibility
+      and verification: `evaluation/MISSING_FENCE_DIAGNOSTICS.md`.

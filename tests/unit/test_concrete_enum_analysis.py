@@ -4,8 +4,12 @@ one test per clause of the conflict predicate and of the value-source
 premise, with hand-built footprints so each verdict is attributable.
 """
 
-import numpy as np
+from dataclasses import asdict
 
+import numpy as np
+import pytest
+
+import triton_viz.clients.race_detector.concrete_enum as enum_module
 from triton_viz.clients import RaceType
 from triton_viz.clients.race_detector.concrete_enum import (
     _ATOMIC,
@@ -92,6 +96,90 @@ def _op(
         ends = uniq[np.concatenate((brk, [uniq.size - 1]))] + elem
     rec.intervals.append(starts, ends, op_id)
     return op_id
+
+
+def _diagnostic_outcome_signature(outcome):
+    signature = asdict(outcome)
+    for field in ("time_s", "run_s", "analyze_s", "instance_s", "max_instance_s"):
+        signature.pop(field)
+    for report in signature["reports"]:
+        report.pop("reason")
+    return signature
+
+
+@pytest.mark.parametrize("kind", ["RAW", "WAR", "WAW"])
+@pytest.mark.parametrize("fenced", [False, True])
+def test_missing_fence_diagnostic_preserves_enum_verdict_and_witness(
+    monkeypatch,
+    kind,
+    fenced,
+):
+    rec = _rec()
+    p = _pid(rec, 0)
+    kinds = {
+        "RAW": (_KIND_STORE, _KIND_LOAD),
+        "WAR": (_KIND_LOAD, _KIND_STORE),
+        "WAW": (_KIND_STORE, _KIND_STORE),
+    }
+    _op(rec, p, kinds[kind][0], [BASE], site=10)
+    _op(rec, p, kinds[kind][1], [BASE], site=11, epoch=int(fenced))
+    out = analyze(rec)
+    if fenced:
+        assert out.status == "ok" and not out.reports
+    else:
+        assert out.status == "races"
+        report = out.reports[0]
+        assert report.race_type.name == kind
+        assert report.byte_range == (BASE, BASE + 4)
+        assert "Missing source fence:" in report.reason
+        assert "synthetic.py:10" in report.reason
+        assert "synthetic.py:11" in report.reason
+        assert "under the tile-level memory model" in report.reason
+        assert "Compiler-inserted barriers" in report.reason
+    signature = _diagnostic_outcome_signature(out)
+    monkeypatch.setattr(
+        enum_module, "append_missing_fence_diagnostic", lambda reason, **_: reason
+    )
+    assert _diagnostic_outcome_signature(analyze(rec)) == signature
+
+
+@pytest.mark.parametrize(
+    "case", ["unknown_seq", "equal_seq", "unknown_site", "duplicate", "cross"]
+)
+def test_missing_fence_diagnostic_keeps_other_enum_reasons(case):
+    rec = _rec()
+    p = _pid(rec, 0)
+    a = _op(
+        rec, p, _KIND_STORE, [BASE, BASE] if case == "duplicate" else [BASE], site=10
+    )
+    if case != "duplicate":
+        b = _op(
+            rec, _pid(rec, 1) if case == "cross" else p, _KIND_LOAD, [BASE], site=11
+        )
+        if case == "unknown_seq":
+            rec.op_seq[a] = -1
+        elif case == "equal_seq":
+            rec.op_seq[b] = rec.op_seq[a]
+        elif case == "unknown_site":
+            rec.sites[rec.op_site[a]] = None
+    out = analyze(rec)
+    assert out.status == "races"
+    assert all("Missing source fence:" not in report.reason for report in out.reports)
+
+
+def test_missing_fence_diagnostic_preserves_enum_dependency_and_address_translation():
+    rec = _rec()
+    p = _pid(rec, 0)
+    load = _op(rec, p, _KIND_LOAD, [BASE, BASE + 4], site=10)
+    _op(rec, p, _KIND_STORE, [BASE + 4, BASE + 8], site=11, deps=(load,))
+    out = analyze(rec)
+    assert out.status == "races"
+    report = out.reports[0]
+    assert "Missing source fence:" in report.reason
+    translated = enum_module._translate_report(report, [(BASE, BASE + 16, BASE * 2)])
+    assert translated.witness_addr == BASE * 2 + 4
+    assert translated.byte_range == (BASE * 2 + 4, BASE * 2 + 8)
+    assert translated.reason == report.reason
 
 
 def test_disjoint_stores_prove_clean():

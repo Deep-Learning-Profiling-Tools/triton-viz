@@ -131,6 +131,154 @@ def _solve(records, *, grid=(2, 1, 1), arange_dict=None):
 # ──────────────────────── Tests ────────────────────────
 
 
+def _diagnostic_records(kind="RAW"):
+    constructors = {
+        "RAW": (_scalar_store, _scalar_load),
+        "WAR": (_scalar_load, _scalar_store),
+        "WAW": (_scalar_store, _scalar_store),
+    }
+    records = [
+        make(IntVal(100), event_id=i, program_seq=i, elem_size=4)
+        for i, make in enumerate(constructors[kind])
+    ]
+    for i, record in enumerate(records):
+        record.source_location = ("diagnostic.py", 10 + i, "kernel")
+    return records
+
+
+def _diagnostic_signature(solver, reports):
+    """Retain every verdict/witness field, omitting explanation and timing."""
+    return (
+        [(kind, result) for kind, _, result in solver.query_stats],
+        [
+            (
+                tuple(
+                    (
+                        event.event_id,
+                        event.lane,
+                        event.program_seq,
+                        event.record.source_location,
+                        event.record.access_mode,
+                    )
+                    for event in (report.first, report.second)
+                ),
+                report.race_type,
+                report.witness_addr,
+                report.witness_grid_a,
+                report.witness_grid_b,
+                report.model,
+            )
+            for report in reports
+        ],
+    )
+
+
+@pytest.mark.parametrize("kind", ["RAW", "WAR", "WAW"])
+@pytest.mark.parametrize("fences", [(), (-0.5,), (0.5,), (1.5,)])
+def test_missing_fence_diagnostic_preserves_symbolic_witness(
+    monkeypatch,
+    kind,
+    fences,
+):
+    records = _diagnostic_records(kind)
+    solver = TwoCopySymbolicHBSolver(
+        records, grid=(1, 1, 1), arange_dict={}, fence_order=True, fence_seqs=fences
+    )
+    reports = solver.find_races()
+    signature = _diagnostic_signature(solver, reports)
+    if fences == (0.5,):
+        assert reports == []
+    else:
+        assert len(reports) == 1
+        report = reports[0]
+        assert report.race_type.name == kind
+        assert report.witness_addr == 100
+        assert report.reason.startswith(solver._INTRA_INSTANCE_REASON)
+        assert "Missing source fence:" in report.reason
+        assert "diagnostic.py:10" in report.reason
+        assert "diagnostic.py:11" in report.reason
+        assert "under the tile-level memory model" in report.reason
+        assert "uniform participation" in report.reason
+        assert "Compiler-inserted barriers" in report.reason
+    monkeypatch.setattr(
+        tc_module, "append_missing_fence_diagnostic", lambda reason, **_: reason
+    )
+    assert _diagnostic_signature(solver, solver.find_races()) == signature
+
+
+@pytest.mark.parametrize(
+    "case",
+    [
+        "unknown_seq",
+        "equal_seq",
+        "pre_exit",
+        "unknown_site",
+        "malformed_site",
+        "legacy",
+        "duplicate",
+        "cross",
+    ],
+)
+def test_missing_fence_diagnostic_keeps_other_symbolic_reasons(case):
+    records = _diagnostic_records()
+    grid = (1, 1, 1)
+    fence_order = True
+    if case == "unknown_seq":
+        records[0].program_seq = -1
+    elif case == "equal_seq":
+        records[1].program_seq = 0
+    elif case == "pre_exit":
+        records[0].pre_exit = True
+    elif case == "unknown_site":
+        records[0].source_location = None
+    elif case == "malformed_site":
+        records[0].source_location = ("diagnostic.py",)
+    elif case == "legacy":
+        fence_order = False
+        records[1].program_seq = 0  # preserve an unordered legacy pair
+    elif case == "duplicate":
+        records = records[:1]
+        records[0].addr_expr = [IntVal(100), IntVal(100)]
+    elif case == "cross":
+        grid = (2, 1, 1)
+        records[0].active = SymbolicExpr.PID0 == 0
+        records[1].active = SymbolicExpr.PID0 == 1
+    reports = TwoCopySymbolicHBSolver(
+        records, grid=grid, arange_dict={}, fence_order=fence_order
+    ).find_races()
+    assert reports
+    assert all("Missing source fence:" not in report.reason for report in reports)
+
+
+def test_missing_fence_diagnostic_uses_source_order_without_reordering_report():
+    records = _diagnostic_records()
+    records[0].event_id, records[1].event_id = 1, 0
+    report = TwoCopySymbolicHBSolver(
+        records, grid=(1, 1, 1), arange_dict={}, fence_order=True
+    ).find_races()[0]
+    assert report.first.event_id == 0 and report.second.event_id == 1
+    assert report.race_type is RaceType.WAR  # existing canonical report order
+    assert (
+        "write at diagnostic.py:10 and the read at diagnostic.py:11" in report.reason
+    )
+
+
+def test_missing_fence_diagnostic_keeps_cross_position_dependency_witness():
+    records = _diagnostic_records("WAR")
+    lane = Int("missing_fence_lane")
+    records[0].addr_expr = IntVal(100) + 4 * lane
+    records[1].addr_expr = IntVal(104) + 4 * lane
+    records[1].dep_loads = (records[0].event_id,)
+    report = TwoCopySymbolicHBSolver(
+        records,
+        grid=(1, 1, 1),
+        arange_dict={(0, 2): (lane, And(lane >= 0, lane < 2))},
+        fence_order=True,
+    ).find_races()[0]
+    assert report.witness_addr == 104
+    assert "Missing source fence:" in report.reason
+
+
 def test_pid_alpha_renaming_reports_race_for_same_template():
     """elem_size=4 stride=1 means adjacent pids overlap by 3 bytes."""
     base = 1_000_000

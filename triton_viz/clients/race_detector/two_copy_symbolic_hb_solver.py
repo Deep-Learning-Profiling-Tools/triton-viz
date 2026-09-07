@@ -138,6 +138,7 @@ from .hb_common import (
     normalize_copy_local_vars,
     to_lanes,
 )
+from .report_diagnostics import append_missing_fence_diagnostic
 
 
 @dataclass(frozen=True)
@@ -2446,6 +2447,24 @@ class TwoCopySymbolicHBSolver:
             model.evaluate(second.pid[i], model_completion=True).as_long()
             for i in range(3)
         )
+
+        if reason == self._INTRA_INSTANCE_REASON:
+            reason = append_missing_fence_diagnostic(
+                reason,
+                fence_order=self.fence_order,
+                same_instance=witness_grid_a == witness_grid_b,
+                distinct_operations=first.record is not second.record,
+                first_seq=first.program_seq,
+                second_seq=second.program_seq,
+                fence_between=self._fence_between(
+                    first.program_seq, second.program_seq
+                ),
+                first_site=first.record.source_location,
+                second_site=second.record.source_location,
+                first_mode="write" if fw else "read",
+                second_mode="write" if sw else "read",
+                pre_exit=first.record.pre_exit or second.record.pre_exit,
+            )
 
         assert race_type is not None, "race_type_value must always be populated"
         return RaceReport(

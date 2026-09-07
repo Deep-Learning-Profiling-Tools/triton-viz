@@ -132,6 +132,7 @@ def _static_result(det: Any, elapsed: float, t0_gate: bool | None) -> dict[str, 
             "second": rep.second_record.source_location,
             kind_key: rep.race_type.name,
             "pids": [list(rep.witness_grid_a or ()), list(rep.witness_grid_b or ())],
+            "reason": getattr(rep, "reason", ""),
         }
 
     # §3c guardrail 1: fragility evidence is carried as its own attribute
@@ -412,6 +413,7 @@ def _dynamic_track(
             "second": rep.second_record.source_location,
             "race_type": rep.race_type.name,
             "pids": [list(rep.witness_grid_a or ()), list(rep.witness_grid_b or ())],
+            "reason": getattr(rep, "reason", ""),
         }
         for rep in (getattr(det, "last_reports", []) or [])
     ]
@@ -504,6 +506,7 @@ def _enum_track(
             "race_type": rep.race_type.name,
             "pids": [list(rep.witness_grid_a), list(rep.witness_grid_b)],
             "bytes": list(rep.byte_range),
+            "reason": getattr(rep, "reason", ""),
         }
         for rep in outcome.reports
     ]

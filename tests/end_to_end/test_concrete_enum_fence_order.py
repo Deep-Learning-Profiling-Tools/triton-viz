@@ -70,6 +70,11 @@ def test_order_matches_symbolic_frontend_and_requires_intervening_fence(kind, fe
     assert all(
         r.witness_grid_a == r.witness_grid_b == (0, 0, 0) for r in result.reports
     )
+    for report in [*result.reports, *detector.last_reports]:
+        assert "Missing source fence:" in report.reason
+        for record in (report.first_record, report.second_record):
+            filename, line, _ = record.source_location
+            assert f"{filename}:{line}" in report.reason
 
 
 @pytest.mark.parametrize("kind", ["RAW", "WAR", "WAW"])

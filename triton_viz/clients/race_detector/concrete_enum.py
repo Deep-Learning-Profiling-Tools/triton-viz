@@ -142,6 +142,7 @@ from ...utils.traceback_utils import (
 )
 from .bounds import StorageBounds
 from .data import RaceType
+from .report_diagnostics import append_missing_fence_diagnostic
 
 # Structural instance ceiling (paper repo design doc section 4): 488 of the
 # pinned run's 492 abstaining rows have at most this many instances; the
@@ -1270,6 +1271,22 @@ class _Analyzer:
         if key in self._seen:
             return len(self.reports) >= self.max_reports
         self._seen.add(key)
+        # Annotation only: conflict/order checks and report deduplication have
+        # already finished. Keep the witness fields and refusal reasons intact.
+        if rec.fence_order and same_instance and op_a != op_b:
+            reason = append_missing_fence_diagnostic(
+                reason,
+                fence_order=rec.fence_order,
+                same_instance=same_instance,
+                distinct_operations=op_a != op_b,
+                first_seq=rec.op_seq[op_a],
+                second_seq=rec.op_seq[op_b],
+                fence_between=rec.op_fence_epoch[op_a] != rec.op_fence_epoch[op_b],
+                first_site=rec.sites[rec.op_site[op_a]],
+                second_site=rec.sites[rec.op_site[op_b]],
+                first_mode="write" if _writes(rec.op_kind[op_a]) else "read",
+                second_mode="write" if _writes(rec.op_kind[op_b]) else "read",
+            )
         self.reports.append(
             ConcreteRaceReport(
                 first=_Endpoint(self._access(op_a)),
