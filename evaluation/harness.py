@@ -210,13 +210,16 @@ def _watchdog(seconds: float):
     # alarm. The outer process watchdog remains the hard containment boundary.
     old_timer = signal.setitimer(signal.ITIMER_REAL, seconds, min(seconds, 0.1))
     started = time.monotonic()
-    interrupter.start()
+    thread_started = False
     try:
+        interrupter.start()
+        thread_started = True
         yield
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
         stopped.set()
-        interrupter.join()
+        if thread_started:
+            interrupter.join()
         signal.signal(signal.SIGALRM, old_handler)
         # Re-arm an enclosing SIGALRM timer with its remaining time — a
         # nested watchdog must not permanently defuse the outer one.

@@ -79,7 +79,8 @@ assert control.check() == z3.sat
 
 
 @pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="POSIX interval timer")
-def test_watchdog_restores_enclosing_timer_and_handler(monkeypatch):
+@pytest.mark.parametrize("start_fails", [False, True])
+def test_watchdog_restores_enclosing_timer_and_handler(monkeypatch, start_fails):
     old_handler = object()
     handler_calls = []
     timer_calls = []
@@ -96,8 +97,20 @@ def test_watchdog_restores_enclosing_timer_and_handler(monkeypatch):
     monkeypatch.setattr(harness.signal, "signal", set_handler)
     monkeypatch.setattr(harness.signal, "setitimer", set_timer)
     monkeypatch.setattr(harness.time, "monotonic", lambda: next(ticks))
-    with harness._watchdog(1.0):
-        pass
+    if start_fails:
+
+        def fail_start(self):
+            raise RuntimeError("cannot start new thread")
+
+        monkeypatch.setattr(harness.threading.Thread, "start", fail_start)
+    expected = (
+        pytest.raises(RuntimeError, match="cannot start new thread")
+        if start_fails
+        else nullcontext()
+    )
+    with expected:
+        with harness._watchdog(1.0):
+            pass
     assert timer_calls == [
         (signal.ITIMER_REAL, 1.0, 0.1),
         (signal.ITIMER_REAL, 0, 0.0),
