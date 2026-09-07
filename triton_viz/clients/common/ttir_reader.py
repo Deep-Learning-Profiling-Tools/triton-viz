@@ -529,6 +529,15 @@ _RE_CMPI = re.compile(rf"^arith\.cmpi (\w+), ({_SSA}), ({_SSA})")
 _RE_BOOLBIN = re.compile(rf"^arith\.(andi|ori) ({_SSA}), ({_SSA})\s*:\s*(\S+)")
 _RE_SELECT = re.compile(rf"^arith\.select ({_SSA}), ({_SSA}), ({_SSA})")
 _RE_EXT = re.compile(rf"^arith\.(extsi|trunci|extui) ({_SSA})")
+# Only the known custom, three-operand dot spelling has a positional C
+# contribution. Do not infer an accumulator slot for generic syntax,
+# dot_scaled, extra operands, or unknown attributes. The optional integer
+# accuracy attribute is an attr-dict entry, not a fourth SSA operand.
+_RE_DOT = re.compile(
+    rf"^tt\.dot\s+({_SSA}),\s*({_SSA}),\s*({_SSA})"
+    r"(?:,\s*inputPrecision\s*=\s*(?:ieee|tf32|tf32x3|bf16x3|bf16x6))?"
+    r"(?:\s*\{\s*maxNumImpreciseAcc\s*=\s*\d+\s*:\s*i32\s*\})?\s*:"
+)
 # Trailing attributes print in TWO spellings: a dict (`{isVolatile =
 # true}` for volatile spin reads) or bare assignments (`cacheModifier =
 # ca` — liger's cache-hinted loads); both are irrelevant to the footprint.
@@ -1439,7 +1448,18 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                     "tt.elementwise_inline_asm",
                 )
             )
-            merged = _prov_of(operands, position_preserving)
+            dot = _RE_DOT.match(body)
+            if dot:
+                # d[i,j] = product(A, B)[i,j] + C[i,j]: only the
+                # accumulator's existing positional path represents D3.
+                # Keep all A/B paths non-positional, then restore C's
+                # flags so an A/C-shared source retains its valid C path.
+                # This does not model dot values, move positions, or add
+                # ordering for the matrix product's inputs.
+                merged = _prov_of(dot.group(1, 2), False)
+                merged.update(_prov_of((dot.group(3),)))
+            else:
+                merged = _prov_of(operands, position_preserving)
             if merged:
                 prov[res] = merged
 

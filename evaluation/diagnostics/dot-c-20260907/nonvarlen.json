@@ -1,0 +1,6032 @@
+{
+  "kind": "static correctness diagnostic; not performance data",
+  "name": "fla_log_linear_attn_chunk__chunkwise_bwd_kernel_diag",
+  "baseline_ref": "f133ec8",
+  "candidate_parent": "f133ec88593671b8c41d12865f1953dfc495bc9a",
+  "candidate_reader_sha256": "adab92aea4c6d26d6c3b27d20788d32a3ef79460b35d60394947d91d7817b655",
+  "baseline_reader_sha256": "06278210c428a9a1f3741f18063cfa29ccccbf7efe24ebbce66c727d6c25e706",
+  "script_sha256": "344bea7e7486f54a2259c32493cbd8fc6e995f81cfe73abccd061ee338ff7100",
+  "ttir_path": "/tmp/triton-viz-final-cache-31c48f5/I6H7OUEUA6VZBXPTTS5RF5OMNRHCZEVDB55EUNBDZH7CGDCIY63Q/chunkwise_bwd_kernel_diag.ttir",
+  "ttir_sha256": "8d0882bb828b44105f2df07aa41ff6359033fade46d45e86b6c8381bb49e02f3",
+  "prior_diagnostic_sha256": "63851b21d8ca75fc09536e40bbd823a2fe686f0f4d048b4968983023ea53f3a2",
+  "specs_sha256": "f968e82a951bb9c81d30f0372143377b6866d01174194c1980c6a19fa7c5132b",
+  "values_sidecar_sha256": "3ea59bf7a5ca4eebfd506230cfbd2b31bbdf892c2ee138aa3ca76ecb99ffb82b",
+  "kernel_source_sha256": "72848618b2dd18016e198cb0330082588c2fdedb1f825aa15a81cabef8cd1fdf",
+  "seed": 0,
+  "grid": [
+    1,
+    4
+  ],
+  "constexprs": {
+    "BT": 64,
+    "H": 2,
+    "IS_VARLEN": false,
+    "K": 64,
+    "L": 7,
+    "V": 32,
+    "cu_seqlens": null
+  },
+  "inputs": [
+    {
+      "shape": [
+        2,
+        64,
+        2,
+        32
+      ],
+      "stride": [
+        4096,
+        64,
+        32,
+        1
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "sha256": "2867c1fc3182111a19618b652f4c3825ea2ab465ee864f22681f0a4b4a5d560d"
+    },
+    {
+      "shape": [
+        2,
+        64,
+        1,
+        64
+      ],
+      "stride": [
+        4096,
+        64,
+        64,
+        1
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "sha256": "c45e0a81234e0aed1a0d69496c90ff0466c9cf3a06750393340e778537e11eb2"
+    },
+    {
+      "shape": [
+        2,
+        64,
+        1,
+        64
+      ],
+      "stride": [
+        4096,
+        64,
+        64,
+        1
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "sha256": "b7b08d1093cd51f6ca1dd97deba1907891d1fffc08d91405c63952d59647026f"
+    },
+    {
+      "shape": [
+        2,
+        64,
+        2,
+        32
+      ],
+      "stride": [
+        4096,
+        64,
+        32,
+        1
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "sha256": "7c19f51fc6538180cda502892375bfbafaf071ce8eb1c9722de98a8cdfa95ca2"
+    },
+    {
+      "shape": [
+        2,
+        64,
+        2
+      ],
+      "stride": [
+        128,
+        2,
+        1
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "sha256": "84f561e510ac144b1f4a6aef92cccf9b155c4fc92034959e8d72358f98be6a89"
+    },
+    {
+      "shape": [
+        2,
+        64,
+        2,
+        7
+      ],
+      "stride": [
+        896,
+        14,
+        7,
+        1
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "sha256": "1c7feeb32634a081383747bd3e64abb7fbb19d141d60301f77486f6692835e7a"
+    },
+    {
+      "shape": [
+        64,
+        64
+      ],
+      "stride": [
+        64,
+        1
+      ],
+      "dtype": "torch.int32",
+      "device": "cpu",
+      "sha256": "e83fd503b08d952fd28aa5768747ca72c5f886dde5501f620d1586501ef3bac9"
+    },
+    {
+      "shape": [
+        7,
+        64,
+        64
+      ],
+      "stride": [
+        4096,
+        64,
+        1
+      ],
+      "dtype": "torch.int32",
+      "device": "cpu",
+      "sha256": "9a6b4cc313757888a0d10936b64f836d4103023864d5b37f9bb750789a690640"
+    },
+    {
+      "shape": [
+        2,
+        64,
+        2,
+        64
+      ],
+      "stride": [
+        8192,
+        128,
+        64,
+        1
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31"
+    },
+    {
+      "shape": [
+        2,
+        64,
+        2,
+        64
+      ],
+      "stride": [
+        8192,
+        128,
+        64,
+        1
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "sha256": "de2f256064a0af797747c2b97505dc0b9f3df0de4f489eac731c23ae9ca9cc31"
+    },
+    {
+      "shape": [
+        2,
+        64,
+        2,
+        32
+      ],
+      "stride": [
+        4096,
+        64,
+        32,
+        1
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "sha256": "c35020473aed1b4642cd726cad727b63fff2824ad68cedd7ffb73c7cbd890479"
+    },
+    {
+      "shape": [
+        2,
+        64,
+        2
+      ],
+      "stride": [
+        128,
+        2,
+        1
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "sha256": "5f70bf18a086007016e948b04aed3b82103a36bea41755b6cddfaf10ace3c6ef"
+    },
+    {
+      "shape": [
+        2,
+        64,
+        2,
+        7
+      ],
+      "stride": [
+        896,
+        14,
+        7,
+        1
+      ],
+      "dtype": "torch.float32",
+      "device": "cpu",
+      "sha256": "1aae2dda4016febd2765e64d20dd992319d388cc8a8690f1ae5f7984a4734dd3"
+    },
+    {
+      "scalar": 64
+    }
+  ],
+  "single_path": {
+    "baseline": {
+      "kind": "indirect-address",
+      "reason": "addptr offset: data-dependent (loaded value)"
+    },
+    "candidate": {
+      "kind": "indirect-address",
+      "reason": "addptr offset: data-dependent (loaded value)"
+    }
+  },
+  "accesses": {
+    "baseline": [
+      {
+        "kind": "load",
+        "base_param": "llut",
+        "offset": {
+          "op": "+",
+          "a": {
+            "value": 0
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 64
+              }
+            },
+            "b": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1376,
+          "col": 21
+        },
+        "line_no": 70,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": false,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "l",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "+",
+                    "a": {
+                      "op": "+",
+                      "a": {
+                        "op": "*",
+                        "a": {
+                          "op": "//",
+                          "a": {
+                            "axis": 1
+                          },
+                          "b": {
+                            "value": 2
+                          }
+                        },
+                        "b": {
+                          "name": "T"
+                        }
+                      },
+                      "b": {
+                        "op": "*",
+                        "a": {
+                          "axis": 0
+                        },
+                        "b": {
+                          "value": 64
+                        }
+                      }
+                    },
+                    "b": {
+                      "ssa": "%b_llut_13",
+                      "start": 0,
+                      "end": 64,
+                      "dim": 0
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 7
+              }
+            }
+          },
+          "b": {
+            "access_index": 0,
+            "base_param": "llut",
+            "offset": {
+              "op": "+",
+              "a": {
+                "value": 0
+              },
+              "b": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "ssa": "%b_llut_13",
+                    "start": 0,
+                    "end": 64,
+                    "dim": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 1
+                }
+              }
+            },
+            "mask": {
+              "op": "and",
+              "a": {
+                "op": "and",
+                "a": {
+                  "pred": "sge",
+                  "a": {
+                    "ssa": "%b_llut_13",
+                    "start": 0,
+                    "end": 64,
+                    "dim": 0
+                  },
+                  "b": {
+                    "value": 0
+                  }
+                },
+                "b": {
+                  "pred": "slt",
+                  "a": {
+                    "ssa": "%b_llut_13",
+                    "start": 0,
+                    "end": 64,
+                    "dim": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                }
+              },
+              "b": {
+                "op": "and",
+                "a": {
+                  "pred": "sge",
+                  "a": {
+                    "ssa": "%b_llut_13",
+                    "start": 0,
+                    "end": 64,
+                    "dim": 1
+                  },
+                  "b": {
+                    "value": 0
+                  }
+                },
+                "b": {
+                  "pred": "slt",
+                  "a": {
+                    "ssa": "%b_llut_13",
+                    "start": 0,
+                    "end": 64,
+                    "dim": 1
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                }
+              }
+            },
+            "other": null
+          }
+        },
+        "mask": {
+          "pred": "sge",
+          "a": {
+            "ssa": "%b_llut_13",
+            "start": 0,
+            "end": 64,
+            "dim": 0
+          },
+          "b": {
+            "ssa": "%b_llut_13",
+            "start": 0,
+            "end": 64,
+            "dim": 1
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1394,
+          "col": 18
+        },
+        "line_no": 93,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "g",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "op": "+",
+              "a": {
+                "value": 0
+              },
+              "b": {
+                "op": "*",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "//",
+                    "a": {
+                      "axis": 1
+                    },
+                    "b": {
+                      "value": 2
+                    }
+                  },
+                  "b": {
+                    "name": "T"
+                  }
+                },
+                "b": {
+                  "value": 2
+                }
+              }
+            },
+            "b": {
+              "op": "%",
+              "a": {
+                "axis": 1
+              },
+              "b": {
+                "value": 2
+              }
+            }
+          },
+          "b": {
+            "op": "*",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 2
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "pred": "sge",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 0
+            }
+          },
+          "b": {
+            "pred": "slt",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "name": "T"
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1416,
+          "col": 18
+        },
+        "line_no": 121,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "q",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "*",
+                "a": {
+                  "op": "//",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "name": "T"
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 1
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 1
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 1
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1417,
+          "col": 18
+        },
+        "line_no": 135,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "k",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "*",
+                "a": {
+                  "op": "//",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "name": "T"
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            },
+            "b": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1418,
+          "col": 18
+        },
+        "line_no": 148,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "v",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "ssa": "%b_v_91",
+              "start": 0,
+              "end": 32,
+              "dim": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 1
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 0
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 0
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 1
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 1
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1419,
+          "col": 18
+        },
+        "line_no": 163,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "do",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            },
+            "b": {
+              "ssa": "%b_v_91",
+              "start": 0,
+              "end": 32,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 1
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1420,
+          "col": 19
+        },
+        "line_no": 176,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "dq",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 128
+              }
+            },
+            "b": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1421,
+          "col": 19
+        },
+        "line_no": 182,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "dk",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 128
+              }
+            },
+            "b": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1422,
+          "col": 19
+        },
+        "line_no": 185,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "dv",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            },
+            "b": {
+              "ssa": "%b_v_91",
+              "start": 0,
+              "end": 32,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 1
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1423,
+          "col": 19
+        },
+        "line_no": 188,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "dg",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "op": "+",
+              "a": {
+                "value": 0
+              },
+              "b": {
+                "op": "*",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "//",
+                    "a": {
+                      "axis": 1
+                    },
+                    "b": {
+                      "value": 2
+                    }
+                  },
+                  "b": {
+                    "name": "T"
+                  }
+                },
+                "b": {
+                  "value": 2
+                }
+              }
+            },
+            "b": {
+              "op": "%",
+              "a": {
+                "axis": 1
+              },
+              "b": {
+                "value": 2
+              }
+            }
+          },
+          "b": {
+            "op": "*",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 2
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "pred": "sge",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 0
+            }
+          },
+          "b": {
+            "pred": "slt",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "name": "T"
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1424,
+          "col": 19
+        },
+        "line_no": 191,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "store",
+        "base_param": "dv",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            },
+            "b": {
+              "ssa": "%b_v_91",
+              "start": 0,
+              "end": 32,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 1
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1439,
+          "col": 19
+        },
+        "line_no": 236,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": false,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "store",
+        "base_param": "dq",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 128
+              }
+            },
+            "b": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1440,
+          "col": 19
+        },
+        "line_no": 237,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": false,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "store",
+        "base_param": "dk",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 128
+              }
+            },
+            "b": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1441,
+          "col": 19
+        },
+        "line_no": 238,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": false,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": [
+          8
+        ]
+      },
+      {
+        "kind": "store",
+        "base_param": "dg",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "op": "+",
+              "a": {
+                "value": 0
+              },
+              "b": {
+                "op": "*",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "//",
+                    "a": {
+                      "axis": 1
+                    },
+                    "b": {
+                      "value": 2
+                    }
+                  },
+                  "b": {
+                    "name": "T"
+                  }
+                },
+                "b": {
+                  "value": 2
+                }
+              }
+            },
+            "b": {
+              "op": "%",
+              "a": {
+                "axis": 1
+              },
+              "b": {
+                "value": 2
+              }
+            }
+          },
+          "b": {
+            "op": "*",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 2
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "pred": "sge",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 0
+            }
+          },
+          "b": {
+            "pred": "slt",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "name": "T"
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1442,
+          "col": 19
+        },
+        "line_no": 239,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": false,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": [
+          10
+        ]
+      },
+      {
+        "kind": "load",
+        "base_param": "mask",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "loop_ssa": "%loop"
+              },
+              "b": {
+                "value": 4096
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 64
+              }
+            },
+            "b": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1448,
+          "col": 25
+        },
+        "line_no": 245,
+        "guarded": false,
+        "path": null,
+        "in_loop": true,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": false,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [
+          "%loop"
+        ],
+        "deps": []
+      },
+      {
+        "kind": "store",
+        "base_param": "dl",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "op": "+",
+              "a": {
+                "value": 0
+              },
+              "b": {
+                "op": "*",
+                "a": {
+                  "op": "+",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "*",
+                      "a": {
+                        "op": "//",
+                        "a": {
+                          "axis": 1
+                        },
+                        "b": {
+                          "value": 2
+                        }
+                      },
+                      "b": {
+                        "name": "T"
+                      }
+                    },
+                    "b": {
+                      "value": 2
+                    }
+                  },
+                  "b": {
+                    "op": "%",
+                    "a": {
+                      "axis": 1
+                    },
+                    "b": {
+                      "value": 2
+                    }
+                  }
+                },
+                "b": {
+                  "value": 7
+                }
+              }
+            },
+            "b": {
+              "loop_ssa": "%loop"
+            }
+          },
+          "b": {
+            "op": "*",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 14
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "pred": "sge",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 0
+            }
+          },
+          "b": {
+            "pred": "slt",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "name": "T"
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1451,
+          "col": 25
+        },
+        "line_no": 259,
+        "guarded": false,
+        "path": null,
+        "in_loop": true,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": false,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [
+          "%loop"
+        ],
+        "deps": []
+      }
+    ],
+    "candidate": [
+      {
+        "kind": "load",
+        "base_param": "llut",
+        "offset": {
+          "op": "+",
+          "a": {
+            "value": 0
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 64
+              }
+            },
+            "b": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1376,
+          "col": 21
+        },
+        "line_no": 70,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": false,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "l",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "+",
+                    "a": {
+                      "op": "+",
+                      "a": {
+                        "op": "*",
+                        "a": {
+                          "op": "//",
+                          "a": {
+                            "axis": 1
+                          },
+                          "b": {
+                            "value": 2
+                          }
+                        },
+                        "b": {
+                          "name": "T"
+                        }
+                      },
+                      "b": {
+                        "op": "*",
+                        "a": {
+                          "axis": 0
+                        },
+                        "b": {
+                          "value": 64
+                        }
+                      }
+                    },
+                    "b": {
+                      "ssa": "%b_llut_13",
+                      "start": 0,
+                      "end": 64,
+                      "dim": 0
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 7
+              }
+            }
+          },
+          "b": {
+            "access_index": 0,
+            "base_param": "llut",
+            "offset": {
+              "op": "+",
+              "a": {
+                "value": 0
+              },
+              "b": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "ssa": "%b_llut_13",
+                    "start": 0,
+                    "end": 64,
+                    "dim": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 1
+                }
+              }
+            },
+            "mask": {
+              "op": "and",
+              "a": {
+                "op": "and",
+                "a": {
+                  "pred": "sge",
+                  "a": {
+                    "ssa": "%b_llut_13",
+                    "start": 0,
+                    "end": 64,
+                    "dim": 0
+                  },
+                  "b": {
+                    "value": 0
+                  }
+                },
+                "b": {
+                  "pred": "slt",
+                  "a": {
+                    "ssa": "%b_llut_13",
+                    "start": 0,
+                    "end": 64,
+                    "dim": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                }
+              },
+              "b": {
+                "op": "and",
+                "a": {
+                  "pred": "sge",
+                  "a": {
+                    "ssa": "%b_llut_13",
+                    "start": 0,
+                    "end": 64,
+                    "dim": 1
+                  },
+                  "b": {
+                    "value": 0
+                  }
+                },
+                "b": {
+                  "pred": "slt",
+                  "a": {
+                    "ssa": "%b_llut_13",
+                    "start": 0,
+                    "end": 64,
+                    "dim": 1
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                }
+              }
+            },
+            "other": null
+          }
+        },
+        "mask": {
+          "pred": "sge",
+          "a": {
+            "ssa": "%b_llut_13",
+            "start": 0,
+            "end": 64,
+            "dim": 0
+          },
+          "b": {
+            "ssa": "%b_llut_13",
+            "start": 0,
+            "end": 64,
+            "dim": 1
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1394,
+          "col": 18
+        },
+        "line_no": 93,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "g",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "op": "+",
+              "a": {
+                "value": 0
+              },
+              "b": {
+                "op": "*",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "//",
+                    "a": {
+                      "axis": 1
+                    },
+                    "b": {
+                      "value": 2
+                    }
+                  },
+                  "b": {
+                    "name": "T"
+                  }
+                },
+                "b": {
+                  "value": 2
+                }
+              }
+            },
+            "b": {
+              "op": "%",
+              "a": {
+                "axis": 1
+              },
+              "b": {
+                "value": 2
+              }
+            }
+          },
+          "b": {
+            "op": "*",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 2
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "pred": "sge",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 0
+            }
+          },
+          "b": {
+            "pred": "slt",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "name": "T"
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1416,
+          "col": 18
+        },
+        "line_no": 121,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "q",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "*",
+                "a": {
+                  "op": "//",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "name": "T"
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 1
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 1
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 1
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1417,
+          "col": 18
+        },
+        "line_no": 135,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "k",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "*",
+                "a": {
+                  "op": "//",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "name": "T"
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            },
+            "b": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1418,
+          "col": 18
+        },
+        "line_no": 148,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "v",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "ssa": "%b_v_91",
+              "start": 0,
+              "end": 32,
+              "dim": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 1
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 0
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 0
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 1
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 1
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1419,
+          "col": 18
+        },
+        "line_no": 163,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "do",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            },
+            "b": {
+              "ssa": "%b_v_91",
+              "start": 0,
+              "end": 32,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 1
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1420,
+          "col": 19
+        },
+        "line_no": 176,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "dq",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 128
+              }
+            },
+            "b": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1421,
+          "col": 19
+        },
+        "line_no": 182,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "dk",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 128
+              }
+            },
+            "b": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1422,
+          "col": 19
+        },
+        "line_no": 185,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "dv",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            },
+            "b": {
+              "ssa": "%b_v_91",
+              "start": 0,
+              "end": 32,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 1
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1423,
+          "col": 19
+        },
+        "line_no": 188,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "load",
+        "base_param": "dg",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "op": "+",
+              "a": {
+                "value": 0
+              },
+              "b": {
+                "op": "*",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "//",
+                    "a": {
+                      "axis": 1
+                    },
+                    "b": {
+                      "value": 2
+                    }
+                  },
+                  "b": {
+                    "name": "T"
+                  }
+                },
+                "b": {
+                  "value": 2
+                }
+              }
+            },
+            "b": {
+              "op": "%",
+              "a": {
+                "axis": 1
+              },
+              "b": {
+                "value": 2
+              }
+            }
+          },
+          "b": {
+            "op": "*",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 2
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "pred": "sge",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 0
+            }
+          },
+          "b": {
+            "pred": "slt",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "name": "T"
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1424,
+          "col": 19
+        },
+        "line_no": 191,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": true,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": []
+      },
+      {
+        "kind": "store",
+        "base_param": "dv",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            },
+            "b": {
+              "ssa": "%b_v_91",
+              "start": 0,
+              "end": 32,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_v_91",
+                "start": 0,
+                "end": 32,
+                "dim": 1
+              },
+              "b": {
+                "value": 32
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1439,
+          "col": 19
+        },
+        "line_no": 236,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": false,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": [
+          9
+        ]
+      },
+      {
+        "kind": "store",
+        "base_param": "dq",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 128
+              }
+            },
+            "b": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1440,
+          "col": 19
+        },
+        "line_no": 237,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": false,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": [
+          7
+        ]
+      },
+      {
+        "kind": "store",
+        "base_param": "dk",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "//",
+                      "a": {
+                        "axis": 1
+                      },
+                      "b": {
+                        "value": 2
+                      }
+                    },
+                    "b": {
+                      "name": "T"
+                    }
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                },
+                "b": {
+                  "op": "%",
+                  "a": {
+                    "axis": 1
+                  },
+                  "b": {
+                    "value": 2
+                  }
+                }
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 128
+              }
+            },
+            "b": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "op": "+",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "axis": 0
+                  },
+                  "b": {
+                    "value": 64
+                  }
+                },
+                "b": {
+                  "ssa": "%b_llut_13",
+                  "start": 0,
+                  "end": 64,
+                  "dim": 0
+                }
+              },
+              "b": {
+                "name": "T"
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1441,
+          "col": 19
+        },
+        "line_no": 238,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": false,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": [
+          8
+        ]
+      },
+      {
+        "kind": "store",
+        "base_param": "dg",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "op": "+",
+              "a": {
+                "value": 0
+              },
+              "b": {
+                "op": "*",
+                "a": {
+                  "op": "*",
+                  "a": {
+                    "op": "//",
+                    "a": {
+                      "axis": 1
+                    },
+                    "b": {
+                      "value": 2
+                    }
+                  },
+                  "b": {
+                    "name": "T"
+                  }
+                },
+                "b": {
+                  "value": 2
+                }
+              }
+            },
+            "b": {
+              "op": "%",
+              "a": {
+                "axis": 1
+              },
+              "b": {
+                "value": 2
+              }
+            }
+          },
+          "b": {
+            "op": "*",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 2
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "pred": "sge",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 0
+            }
+          },
+          "b": {
+            "pred": "slt",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "name": "T"
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1442,
+          "col": 19
+        },
+        "line_no": 239,
+        "guarded": false,
+        "path": null,
+        "in_loop": false,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": false,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [],
+        "deps": [
+          10
+        ]
+      },
+      {
+        "kind": "load",
+        "base_param": "mask",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "value": 0
+            },
+            "b": {
+              "op": "*",
+              "a": {
+                "loop_ssa": "%loop"
+              },
+              "b": {
+                "value": 4096
+              }
+            }
+          },
+          "b": {
+            "op": "+",
+            "a": {
+              "op": "*",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 64
+              }
+            },
+            "b": {
+              "ssa": "%b_llut_13",
+              "start": 0,
+              "end": 64,
+              "dim": 1
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 0
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          },
+          "b": {
+            "op": "and",
+            "a": {
+              "pred": "sge",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 0
+              }
+            },
+            "b": {
+              "pred": "slt",
+              "a": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": 1
+              },
+              "b": {
+                "value": 64
+              }
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1448,
+          "col": 25
+        },
+        "line_no": 245,
+        "guarded": false,
+        "path": null,
+        "in_loop": true,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": false,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [
+          "%loop"
+        ],
+        "deps": []
+      },
+      {
+        "kind": "store",
+        "base_param": "dl",
+        "offset": {
+          "op": "+",
+          "a": {
+            "op": "+",
+            "a": {
+              "op": "+",
+              "a": {
+                "value": 0
+              },
+              "b": {
+                "op": "*",
+                "a": {
+                  "op": "+",
+                  "a": {
+                    "op": "*",
+                    "a": {
+                      "op": "*",
+                      "a": {
+                        "op": "//",
+                        "a": {
+                          "axis": 1
+                        },
+                        "b": {
+                          "value": 2
+                        }
+                      },
+                      "b": {
+                        "name": "T"
+                      }
+                    },
+                    "b": {
+                      "value": 2
+                    }
+                  },
+                  "b": {
+                    "op": "%",
+                    "a": {
+                      "axis": 1
+                    },
+                    "b": {
+                      "value": 2
+                    }
+                  }
+                },
+                "b": {
+                  "value": 7
+                }
+              }
+            },
+            "b": {
+              "loop_ssa": "%loop"
+            }
+          },
+          "b": {
+            "op": "*",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 14
+            }
+          }
+        },
+        "mask": {
+          "op": "and",
+          "a": {
+            "pred": "sge",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "value": 0
+            }
+          },
+          "b": {
+            "pred": "slt",
+            "a": {
+              "op": "+",
+              "a": {
+                "op": "*",
+                "a": {
+                  "axis": 0
+                },
+                "b": {
+                  "value": 64
+                }
+              },
+              "b": {
+                "ssa": "%b_llut_13",
+                "start": 0,
+                "end": 64,
+                "dim": -1
+              }
+            },
+            "b": {
+              "name": "T"
+            }
+          }
+        },
+        "elem_bits": 32,
+        "loc": {
+          "file": "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+          "line": 1451,
+          "col": 25
+        },
+        "line_no": 259,
+        "guarded": false,
+        "path": null,
+        "in_loop": true,
+        "atomic": null,
+        "mask_dropped": false,
+        "atomic_val": null,
+        "atomic_cmp": null,
+        "elem_float": false,
+        "awaited": false,
+        "exit_pred": null,
+        "loops": [
+          "%loop"
+        ],
+        "deps": []
+      }
+    ]
+  },
+  "static": {
+    "baseline": {
+      "status": "races",
+      "provenance": null,
+      "confirmation": null,
+      "reason": null,
+      "n_reports": 2,
+      "witnesses": [
+        {
+          "first": [
+            "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+            1421,
+            "chunkwise_bwd_kernel_diag"
+          ],
+          "second": [
+            "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+            1440,
+            "chunkwise_bwd_kernel_diag"
+          ],
+          "race_type": "WAR",
+          "pids": [
+            [
+              0,
+              3,
+              0
+            ],
+            [
+              0,
+              3,
+              0
+            ]
+          ],
+          "reason": "conflicting lanes of a single program instance touch the same bytes with no defined intra-instance order. Missing source fence: the read at /home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py:1421 and the write at /home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py:1440 have no captured tile-level fence between them. Their reported overlap is unordered under the tile-level memory model. Review the required ordering; Triton's tl.debug_barrier() is an option only with appropriate scope and uniform participation. Compiler-inserted barriers may add ordering; this diagnosis alone proves neither a real-execution race nor a complete repair."
+        },
+        {
+          "first": [
+            "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+            1423,
+            "chunkwise_bwd_kernel_diag"
+          ],
+          "second": [
+            "/home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py",
+            1439,
+            "chunkwise_bwd_kernel_diag"
+          ],
+          "race_type": "WAR",
+          "pids": [
+            [
+              0,
+              3,
+              0
+            ],
+            [
+              0,
+              3,
+              0
+            ]
+          ],
+          "reason": "conflicting lanes of a single program instance touch the same bytes with no defined intra-instance order. Missing source fence: the read at /home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py:1423 and the write at /home/hwu27/workspace/triton-viz/.venv/lib/python3.12/site-packages/fla/ops/log_linear_attn/chunk.py:1439 have no captured tile-level fence between them. Their reported overlap is unordered under the tile-level memory model. Review the required ordering; Triton's tl.debug_barrier() is an option only with appropriate scope and uniform participation. Compiler-inserted barriers may add ordering; this diagnosis alone proves neither a real-execution race nor a complete repair."
+        }
+      ],
+      "grid_fragile": [],
+      "content_fragile": [],
+      "parse_unsupported": [],
+      "differential": [
+        "differential check failed: unhandled term Loaded"
+      ],
+      "t0_gate": false,
+      "assumes_termination": false,
+      "verdict_attrs": {
+        "verdict": "race",
+        "proved_scope": null,
+        "race_evidence": "exact",
+        "conservative": false,
+        "conditional": [],
+        "unsupported_kind": null,
+        "grid_fragile": false,
+        "content_fragile": false,
+        "content_qualified": true,
+        "ladder_level": "L2",
+        "fence_order": true
+      },
+      "time_s": 10.9559
+    },
+    "candidate": {
+      "status": "ok",
+      "provenance": "proved@T1+content",
+      "confirmation": null,
+      "reason": null,
+      "n_reports": 0,
+      "witnesses": [],
+      "grid_fragile": [],
+      "content_fragile": [],
+      "parse_unsupported": [],
+      "differential": [
+        "differential check failed: unhandled term Loaded"
+      ],
+      "t0_gate": false,
+      "assumes_termination": false,
+      "verdict_attrs": {
+        "verdict": "race-free",
+        "proved_scope": "this-params-any-grid",
+        "race_evidence": null,
+        "conservative": false,
+        "conditional": [],
+        "unsupported_kind": null,
+        "grid_fragile": false,
+        "content_fragile": false,
+        "content_qualified": true,
+        "ladder_level": "L2",
+        "fence_order": true
+      },
+      "time_s": 7.3223
+    }
+  },
+  "changed_dependencies": [
+    {
+      "index": 11,
+      "source_line": 1439,
+      "before": [],
+      "after": [
+        9
+      ]
+    },
+    {
+      "index": 12,
+      "source_line": 1440,
+      "before": [],
+      "after": [
+        7
+      ]
+    }
+  ],
+  "input_bytes_unchanged": true,
+  "passed": true
+}
