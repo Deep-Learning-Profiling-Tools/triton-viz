@@ -174,6 +174,9 @@ def _static_result(det: Any, elapsed: float, t0_gate: bool | None) -> dict[str, 
 # The watchdog turns that into an honest "timeout" status — itself a
 # dynamic-comparison data point for await-bearing kernels.
 DYNAMIC_TIMEOUT_S = 60
+# Declarative child observers. Evaluation adapters install their optimization
+# switches and profilers in the fresh child explicitly, never by inheritance.
+DYNAMIC_CHILD_HOOKS: tuple[dict[str, Any], ...] = ()
 
 
 class _DynamicDeadlineExceeded(BaseException):
@@ -442,6 +445,25 @@ def _run_one_cutile(
 def _dynamic_track(
     spec: LaunchSpec, seed: int, ladder_level: LadderLevel = LadderLevel.L0
 ) -> dict[str, Any]:
+    from evaluation.dynamic_subprocess import DynamicSubprocessError, run_dynamic
+
+    try:
+        return run_dynamic(
+            spec, seed, ladder_level, DYNAMIC_TIMEOUT_S, DYNAMIC_CHILD_HOOKS
+        )
+    except DynamicSubprocessError:
+        raise
+    except Exception as exc:
+        raise DynamicSubprocessError(f"{type(exc).__name__}: {exc}") from exc
+
+
+def _dynamic_track_local(
+    spec: LaunchSpec,
+    seed: int,
+    ladder_level: LadderLevel = LadderLevel.L0,
+    *,
+    ready=None,
+) -> dict[str, Any]:
     import triton_viz
     from triton_viz.clients import RaceDetector
     from triton_viz.clients.race_detector.hb_common import (
@@ -456,6 +478,8 @@ def _dynamic_track(
     # exactly as the mark-and-continue mode would have.
     det = RaceDetector(abort_on_error=True, ladder_level=ladder_level)
     args = spec.make_args(seed)  # fresh tensors; the interpreter mutates them
+    if ready is not None:
+        ready()
     t0 = time.perf_counter()
     error = None
     timed_out = False
@@ -874,6 +898,15 @@ def run_one(
         row["dynamic"] = _dynamic_track(spec, seed, ladder_level)
     except Exception as e:  # noqa: BLE001
         row["dynamic"] = {"error": f"{type(e).__name__}: {e}"}
+        from evaluation.dynamic_subprocess import DynamicSubprocessError
+
+        if isinstance(e, DynamicSubprocessError):
+            row.update(
+                verdict="error",
+                terminal="harness-error",
+                harness_error=f"dynamic child: {type(e).__name__}: {e}",
+            )
+            return row
 
     row["verdict"], row["terminal"] = _classify(row["static"], row.get("dynamic"))
     if row["terminal"] == "proved@interp" and "race-unconfirmed" in (

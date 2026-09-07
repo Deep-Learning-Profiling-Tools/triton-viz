@@ -56,6 +56,9 @@ triton-compiled-race-detector = "triton_viz.wrapper:apply_compiled_race_detector
 triton-visualizer = "triton_viz.visualizer_cli:main"
 
 [project.optional-dependencies]
+evaluation = [
+  "cloudpickle==3.1.1",
+]
 test = [
   "pytest",
   "pytest-xdist",

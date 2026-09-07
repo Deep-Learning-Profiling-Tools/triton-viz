@@ -89,7 +89,7 @@ def test_report_diagnostic_survives_export_and_preserves_classification(
 
         monkeypatch.setattr(triton_viz, "trace", lambda det: lambda fn: Launcher())
         monkeypatch.setattr(harness, "_watchdog", lambda seconds: nullcontext())
-        run = lambda: harness._dynamic_track(spec, 0)
+        run = lambda: harness._dynamic_track_local(spec, 0)
     else:
         outcome = concrete_enum.EnumOutcome(status="races", reports=[report])
         monkeypatch.setattr(

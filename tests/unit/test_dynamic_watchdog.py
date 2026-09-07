@@ -251,7 +251,7 @@ def test_dynamic_completion_checks_deadline_even_without_an_exception(
         grid=(1,),
         constexprs={},
     )
-    result = harness._dynamic_track(spec, 0)
+    result = harness._dynamic_track_local(spec, 0)
     assert result["status"] == expected
     assert result["time_s"] == elapsed
     assert (result["error"] is not None) == (expected == "timeout")
@@ -284,7 +284,7 @@ def test_deadline_discards_partial_reports_and_premises(monkeypatch):
         grid=(1,),
         constexprs={},
     )
-    result = harness._dynamic_track(spec, 0)
+    result = harness._dynamic_track_local(spec, 0)
     assert result["status"] == "timeout"
     assert result["n_reports"] == 0
     assert result["witnesses"] == []
