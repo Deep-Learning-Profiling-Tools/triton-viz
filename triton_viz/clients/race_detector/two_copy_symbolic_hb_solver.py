@@ -702,9 +702,22 @@ class TwoCopySymbolicHBSolver:
             if _time.monotonic() > deadline:
                 raise original
             solver = build_solver()
-            for i in range(3):
-                solver.add(pid_a[i] == pa[i])
-                solver.add(pid_b[i] == pb[i])
+            assignments = tuple(
+                (pid, IntVal(value, ctx=pid.ctx))
+                for pids, values in ((pid_a, pa), (pid_b, pb))
+                for pid, value in zip(pids, values)
+            )
+            # Substitute into EVERY original assertion, including activity,
+            # HB/rf, array and domain premises. Constant PIDs can eliminate
+            # nested address div/mod before the arithmetic solver sees them.
+            # Rebuilding first also observes any changed source constraints.
+            expression = simplify(apply_sub(And(*solver.assertions()), assignments))
+            solver.reset()
+            solver.add(expression)
+            # Keep the original PID symbols in SAT models. Together these
+            # pins and the substituted assertions are equivalent to the old
+            # assertions plus pins, including all non-PID witness variables.
+            solver.add(*(pid == value for pid, value in assignments))
             solver.set(timeout=self.ENUM_CASE_TIMEOUT_MS)
             result = solver.check()
             if result == sat:
