@@ -1,0 +1,49 @@
+{
+  "kind": "correctness diagnostics; not formal timing adoption",
+  "tritonracebench": {
+    "commit": "9fee74c",
+    "configurations": 64,
+    "labeled_correct": 63,
+    "labeled_total": 63,
+    "designated_access_pairs_matched": 29,
+    "static_decisions_skipping_interpreter": 57,
+    "interpreter_decisions": 7,
+    "enum_invocations": 0,
+    "terminal_changes_vs_31c48f5": 0,
+    "policy_note": "Each raw row is on-demand; this ran before runner-header stamping was integrated. Preserve its unstamped header; do not publish it as a pinned dataset."
+  },
+  "golden_smoke": {
+    "commit": "4d093f9",
+    "configurations_per_policy": 7,
+    "policies": [
+      "on-demand",
+      "all"
+    ],
+    "correct_observations": 14,
+    "header_and_row_policy_agreement": true,
+    "report_rendering_passed": true
+  },
+  "fla_gdn2": {
+    "commit": "9fee74c",
+    "terminal": "proved@T1",
+    "dynamic_status": "not-run",
+    "original_sha256": "2a84917d6f8a23ff759e5cd4b92a968af99e82a2a7513f93abfb0682319e0103",
+    "archive_note": "Repository formatting adds a terminal newline; the JSON payload is unchanged."
+  },
+  "tests": {
+    "integrated_detector": 143,
+    "paper_report": 37
+  },
+  "environment": {
+    "TRITON_CACHE_DIR": "/tmp/l2-lazy-validation-20260907/triton-cache",
+    "host_compile_target": "sm80 (GPU unavailable in sandbox)",
+    "worker_mode": "fresh subprocess per configuration"
+  },
+  "excluded_attempt": "An initial benchmark attempt could not write the normal user Triton cache. Only the subsequent writable-cache attempt enters the successful validation.",
+  "sha256": {
+    "tritonracebench-diagnostic.jsonl": "75fbeaad2891e8068aba5fe3c9b8b5a4a9046a9019a94dc4a4febd0deac98f85",
+    "fla-gdn2-proof.json": "36dfec414ec3d943d0169d91d6156c7513972ffdcee0add97046c1a6bfd12b7e",
+    "golden-smoke-on-demand.jsonl": "4e7f3aa95175863235a9db1b603d569cda349a3b9040f0c0e2e886bb6e119895",
+    "golden-smoke-all.jsonl": "fcbb6bc3b805a2c891d941880cec5183b1bb2175c6707ac13529c18895b530cc"
+  }
+}

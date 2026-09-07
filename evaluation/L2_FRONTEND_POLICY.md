@@ -69,3 +69,17 @@ The original FLA GDN2 recurrent forward configuration also returns its
 uses a writable temporary Triton cache because the sandbox cannot write the
 normal user cache. An earlier cache-blocked attempt is excluded from the
 successful validation. Neither diagnostic replaces any paper timing.
+
+The integrated change passes 143 focused detector/runner/checkpoint/report
+regressions. Both execution policies run all seven golden-smoke
+configurations at `4d093f9`: all 14 verdicts agree with labels, every header
+and row has the correct policy, skipped stages remain unmeasured, and the
+ordinary per-row report renders. The paper report adapter passes 37 tests
+and reproduces all pre-existing data fields in 12 archived full-run report
+artifacts covering 3,726 main attempts.
+
+Raw diagnostic results and their hashes are retained in
+`evaluation/results/l2-frontend-policy-20260907/verification.json` and the
+four neighboring result files. The benchmark diagnostic's original header
+predates policy stamping and is preserved as recorded; its per-row stamps
+identify the on-demand policy. It is not a publishable pinned dataset.
