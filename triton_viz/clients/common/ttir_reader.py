@@ -522,6 +522,7 @@ _DTYPE_BITS = {
 
 _RE_LOC_FILE = re.compile(r'^(#loc\d*) = loc\("([^"]+)":(\d+):(\d+)\)')
 _RE_LOC_NAME = re.compile(r'^(#loc\d*) = loc\("[^"]+"\((#loc\d*)\)\)')
+_RE_LOC_CALLSITE = re.compile(r"^(#loc\d*) = loc\(callsite\((#loc\d*) at (#loc\d*)\)\)")
 _RE_LOC_TRAILER = re.compile(r"loc\((#loc\d*|#loc)\)\s*$")
 _RE_FUNC = re.compile(r"tt\.func\s+\w+\s+@(\w+)\((.*)\)\s*attributes")
 _RE_RESULT = re.compile(rf"^({_SSA})(?::\d+)?\s*=\s*(.*)$")
@@ -848,6 +849,13 @@ class _LocTable:
             return True
         m = _RE_LOC_NAME.match(line)
         if m:
+            self._alias[m.group(1)] = m.group(2)
+            return True
+        m = _RE_LOC_CALLSITE.match(line)
+        if m:
+            # The memory operation belongs to the callee. The caller is
+            # useful stack context, not a substitute access source site.
+            # resolve() already bounds alias recursion and refuses unknowns.
             self._alias[m.group(1)] = m.group(2)
             return True
         if line.startswith("#loc") and "= loc(" in line:
