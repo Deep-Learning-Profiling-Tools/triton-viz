@@ -298,6 +298,8 @@ class _RaceEnv:
         self._param_vars: dict[str, Any] = {}
         self.arange_dict: dict[Any, Any] = {}
         self._arange_vars: dict[tuple[str, int], Any] = {}
+        self._integer_bound_sources: Any = None
+        self._integer_bound_cache: dict[Term, tuple[int | None, int | None]] = {}
         # One observation var per atomic access index (spec part B). An
         # index lands in modeled_obs when its record carries the var as
         # old_value (rf-justified); Observed leaves of UNMODELED indices
@@ -543,6 +545,18 @@ class _RaceEnv:
         return var
 
     # ── the evaluator ────────────────────────────────────────────────
+    def _integer_bounds(self, term: Term) -> tuple[int | None, int | None]:
+        # Terms are immutable, but callers may replace/mutate params or
+        # switch symbolic mode. Keep no launch-specific fact across either
+        # change. No AST or SAT decision from a solver is cached here.
+        sources = self.symbolic_params, tuple(self.params.items())
+        if sources != self._integer_bound_sources:
+            self._integer_bound_cache.clear()
+            self._integer_bound_sources = sources
+        return _integer_bounds(
+            term, self.params, self.symbolic_params, self._integer_bound_cache
+        )
+
     def eval(self, term: Term) -> Any:
         if isinstance(term, Const):
             return IntVal(term.value)
@@ -574,10 +588,14 @@ class _RaceEnv:
         if isinstance(term, Arange):
             return self._arange(term)
         if isinstance(term, LoopVar):
-            b = self._binding(term.loop_ssa)
+            binding = self._binding(term.loop_ssa)
             # Keep k registered for two-copy renaming and iteration-order
             # checks, but expose its forced-zero value in body addresses.
-            return b.lower if b.single_trip else b.lower + b.var * IntVal(b.step)
+            return (
+                binding.lower
+                if binding.single_trip
+                else binding.lower + binding.var * IntVal(binding.step)
+            )
         if isinstance(term, IterArgOffset):
             info = self.graph.iter_args[term.arg_id]
             if mentions_loaded(info.delta):
@@ -591,9 +609,11 @@ class _RaceEnv:
                     f"(iter_arg {term.arg_id})",
                     kind="indirect-address",
                 )
-            b = self._binding(info.loop_ssa) if info.loop_ssa else self._binding("")
+            binding = (
+                self._binding(info.loop_ssa) if info.loop_ssa else self._binding("")
+            )
             offset0, delta = self.eval(info.offset0), self.eval(info.delta)
-            return offset0 if b.single_trip else offset0 + b.var * delta
+            return offset0 if binding.single_trip else offset0 + binding.var * delta
         if isinstance(term, Bin):
             a, b = self.eval(term.a), self.eval(term.b)
             if term.op == "+":
@@ -602,10 +622,41 @@ class _RaceEnv:
                 return a - b
             if term.op == "*":
                 return a * b
-            if term.op == "//":
-                return _trunc_div(a, b)
-            if term.op == "%":
-                return a - b * _trunc_div(a, b)
+            if term.op in ("//", "%"):
+                # Pid/range bounds hold in every two-copy query, including
+                # T0 and unbounded-grid queries. Use only these structural
+                # facts, never a launch pin, mask or snapshot assumption.
+                # This keeps nested swizzles out of unnecessary signed
+                # division branches without changing negative/zero cases.
+                lower_a, upper_a = self._integer_bounds(term.a)
+                lower_b, upper_b = self._integer_bounds(term.b)
+                positive_b = lower_b is not None and lower_b > 0
+                negative_b = upper_b is not None and upper_b < 0
+                nonnegative_a = lower_a is not None and lower_a >= 0
+                nonpositive_a = upper_a is not None and upper_a <= 0
+                if nonnegative_a:
+                    # Euclidean Int division agrees with truncation for a
+                    # nonnegative dividend, even for a negative divisor.
+                    # At b=0 this retains the SAME a/0 undefined term as
+                    # _trunc_div. Its expanded remainder is exactly a at
+                    # b=0; native mod-by-zero is unconstrained, so guard it.
+                    if term.op == "//":
+                        return a / b
+                    remainder = a % b
+                    return (
+                        remainder
+                        if positive_b or negative_b
+                        else If(b == 0, a, remainder)
+                    )
+                if (positive_b or negative_b) and nonpositive_a:
+                    numerator = -a
+                    denominator = b if positive_b else -b
+                    if term.op == "%":
+                        return -(numerator % denominator)
+                    quotient = numerator / denominator
+                    return -quotient if positive_b else quotient
+                quotient = _trunc_div(a, b)
+                return quotient if term.op == "//" else a - b * quotient
             if term.op == "min":
                 return If(a <= b, a, b)
             if term.op == "max":
@@ -777,6 +828,114 @@ def _trunc_div(a: Any, b: Any) -> Any:
     ab = If(b >= 0, b, -b)
     q = aa / ab
     return If((a >= 0) == (b >= 0), q, -q)
+
+
+def _integer_bounds(
+    term: Term,
+    params: dict[str, int],
+    symbolic_params: bool,
+    cache: dict[Term, tuple[int | None, int | None]] | None = None,
+) -> tuple[int | None, int | None]:
+    """Inclusive bounds justified by the encoder's unconditional domains.
+
+    Unknown endpoints stay unknown. In particular, T0 parameters, loaded
+    values, observations and loop variables do not acquire launch-local
+    bounds. This helper emits no assertions and never reads a query mask.
+    The arithmetic is the existing unbounded-Int encoding's arithmetic.
+    """
+    if cache is None:
+        cache = {}
+    if term not in cache:
+        cache[term] = _compute_integer_bounds(term, params, symbolic_params, cache)
+    return cache[term]
+
+
+def _compute_integer_bounds(
+    term: Term,
+    params: dict[str, int],
+    symbolic_params: bool,
+    cache: dict[Term, tuple[int | None, int | None]],
+) -> tuple[int | None, int | None]:
+    if isinstance(term, Const):
+        return term.value, term.value
+    if isinstance(term, Param):
+        value = None if symbolic_params else params.get(term.name)
+        return value, value
+    if isinstance(term, Pid):
+        return 0, None
+    if isinstance(term, NumPrograms):
+        return 1, None
+    if isinstance(term, Arange):
+        return (term.start, term.end - 1) if term.start < term.end else (None, None)
+    if isinstance(term, TSelect):
+        lo_a, hi_a = _integer_bounds(term.t, params, symbolic_params, cache)
+        lo_b, hi_b = _integer_bounds(term.f, params, symbolic_params, cache)
+        return (
+            min(lo_a, lo_b) if lo_a is not None and lo_b is not None else None,
+            max(hi_a, hi_b) if hi_a is not None and hi_b is not None else None,
+        )
+    if not isinstance(term, Bin):
+        return None, None
+    lo_a, hi_a = _integer_bounds(term.a, params, symbolic_params, cache)
+    lo_b, hi_b = _integer_bounds(term.b, params, symbolic_params, cache)
+    if term.op == "+":
+        return (
+            lo_a + lo_b if lo_a is not None and lo_b is not None else None,
+            hi_a + hi_b if hi_a is not None and hi_b is not None else None,
+        )
+    if term.op == "-":
+        return (
+            lo_a - hi_b if lo_a is not None and hi_b is not None else None,
+            hi_a - lo_b if hi_a is not None and lo_b is not None else None,
+        )
+    if term.op in ("min", "max"):
+        if term.op == "min":
+            highs = [value for value in (hi_a, hi_b) if value is not None]
+            return (
+                min(lo_a, lo_b) if lo_a is not None and lo_b is not None else None,
+                min(highs) if highs else None,
+            )
+        lows = [value for value in (lo_a, lo_b) if value is not None]
+        return (
+            max(lows) if lows else None,
+            max(hi_a, hi_b) if hi_a is not None and hi_b is not None else None,
+        )
+    if term.op == "*":
+        # The bounded case also handles all combinations of operand signs.
+        if (
+            lo_a is not None
+            and hi_a is not None
+            and lo_b is not None
+            and hi_b is not None
+        ):
+            products = [a * b for a in (lo_a, hi_a) for b in (lo_b, hi_b)]
+            return min(products), max(products)
+        if lo_a == hi_a == 0 or lo_b == hi_b == 0:
+            return 0, 0
+        if lo_a is not None and lo_b is not None and lo_a >= 0 and lo_b >= 0:
+            return lo_a * lo_b, None
+        if hi_a is not None and hi_b is not None and hi_a <= 0 and hi_b <= 0:
+            return hi_a * hi_b, None
+        if lo_a is not None and hi_b is not None and lo_a >= 0 and hi_b <= 0:
+            return None, lo_a * hi_b
+        if hi_a is not None and lo_b is not None and hi_a <= 0 and lo_b >= 0:
+            return None, hi_a * lo_b
+    if term.op == "//" and lo_a is not None and lo_b is not None:
+        if lo_a >= 0 and lo_b > 0:
+            return lo_a // hi_b if hi_b is not None else 0, (
+                hi_a // lo_b if hi_a is not None else None
+            )
+    if term.op == "%" and lo_b is not None and hi_b is not None and lo_b > 0:
+        return (
+            0 if lo_a is not None and lo_a >= 0 else 1 - hi_b,
+            0 if hi_a is not None and hi_a <= 0 else hi_b - 1,
+        )
+    if term.op == "%" and lo_a is not None and lo_a >= 0:
+        # The signed remainder follows its dividend's sign for either
+        # divisor sign. At divisor zero, the original a-b*trunc(a/b)
+        # equals a, so nonnegativity still holds without a nonzero premise.
+        return 0, None
+    return None, None
 
 
 def _await_premises(
