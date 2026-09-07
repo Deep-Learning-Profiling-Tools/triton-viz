@@ -302,6 +302,12 @@ class CompiledRaceDetector(Client):
         try:
             if not contiguous or int(value.numel()) > cls.INIT_VALUES_MAX_ELEMENTS:
                 return None
+            # Lazy transforms affect logical values, not raw-pointer loads.
+            if any(
+                bool(getattr(value, flag, lambda: False)())
+                for flag in ("is_conj", "is_neg")
+            ):
+                return None
             dt = getattr(value, "dtype", None)
             if dt is None:
                 return None
@@ -337,6 +343,11 @@ class CompiledRaceDetector(Client):
     ) -> tuple[tuple[int, ...] | None, str]:
         """(pre-launch element values, "") or (None, why)."""
         try:
+            if any(
+                bool(getattr(value, flag, lambda: False)())
+                for flag in ("is_conj", "is_neg")
+            ):
+                return None, "lazy value transform"
             dt = getattr(value, "dtype", None)
             if dt is None:
                 return None, "unknown dtype"
@@ -370,51 +381,63 @@ class CompiledRaceDetector(Client):
     REPLAY_MAX_REPORTS: ClassVar[int] = 8
 
     def _snapshot_launch(self, jit_fn: Any, args: tuple, kwargs: dict) -> None:
-        values = list(args) + [
-            v for k, v in kwargs.items() if k not in ("grid", "warmup")
-        ]
-        total = sum(
-            int(v.numel()) * int(v.element_size())
-            for v in values
-            if hasattr(v, "data_ptr") and hasattr(v, "numel")
-        )
-        if total > self.SNAPSHOT_CAP_BYTES:
+        # Publish only a fully validated snapshot. A rejected or failed
+        # clone must not retain earlier launch data or original tensors.
+        self._replay_jit_fn = None
+        self._snapshot_args, self._snapshot_kwargs = None, None
+        self._snapshot_tensors = None
+        self._snapshot_skipped = None
+        try:
+            from .replay import _clone_replay_inputs
+
+            replay_kwargs = {
+                k: v for k, v in kwargs.items() if k not in ("grid", "warmup")
+            }
+            values = list(args) + list(replay_kwargs.values())
+            total = sum(
+                int(v.numel()) * int(v.element_size())
+                for v in values
+                if hasattr(v, "data_ptr")
+            )
+            if total > self.SNAPSHOT_CAP_BYTES:
+                self._snapshot_skipped = (
+                    f"tensor snapshot over cap ({total} bytes > "
+                    f"{self.SNAPSHOT_CAP_BYTES})"
+                )
+                return
+            snapshot_args, snapshot_kwargs, _, _ = _clone_replay_inputs(
+                args, replay_kwargs
+            )
+            # C3 compares static enumeration against replay in snapshot
+            # addresses. Metadata comes only from the validated clones.
+            names = list(getattr(jit_fn, "arg_names", None) or [])
+            positional = [name for name in names if name not in snapshot_kwargs]
+            snap_bound = list(zip(positional, snapshot_args))
+            snap_bound += [(k, v) for k, v in snapshot_kwargs.items() if k in names]
+            snapshot_tensors = {}
+            for name, v in snap_bound:
+                if not hasattr(v, "data_ptr"):
+                    continue
+                storage_ptr, storage_nbytes = self._capture_storage_extent(v)
+                is_contiguous = getattr(v, "is_contiguous", None)
+                snapshot_tensors[name] = GlobalTensor(
+                    data_ptr=int(v.data_ptr()),
+                    elem_size=int(v.element_size()),
+                    numel=int(v.numel()),
+                    contiguous=bool(is_contiguous()) if is_contiguous else False,
+                    storage_data_ptr=storage_ptr,
+                    storage_nbytes=storage_nbytes,
+                )
+        except Exception as e:  # noqa: BLE001
+            # Replay unavailability is not a static capture failure. Exact
+            # address proofs/reports remain valid on the original storage.
             self._snapshot_skipped = (
-                f"tensor snapshot over cap ({total} bytes > "
-                f"{self.SNAPSHOT_CAP_BYTES})"
+                f"replay snapshot unavailable: {type(e).__name__}: {e}"
             )
             return
-
-        def clone(v: Any) -> Any:
-            if hasattr(v, "data_ptr") and hasattr(v, "clone"):
-                return v.detach().clone()
-            return v
-
         self._replay_jit_fn = jit_fn
-        self._snapshot_args = tuple(clone(v) for v in args)
-        self._snapshot_kwargs = {
-            k: clone(v) for k, v in kwargs.items() if k not in ("grid", "warmup")
-        }
-        # C3 needs name → SNAPSHOT-clone bases: the diff compares the static
-        # enumeration against the replay, and both sides must speak clone
-        # addresses (the originals are mutated by the real launch).
-        names = list(getattr(jit_fn, "arg_names", None) or [])
-        snap_bound = list(zip(names, self._snapshot_args))
-        snap_bound += [(k, v) for k, v in self._snapshot_kwargs.items() if k in names]
-        self._snapshot_tensors = {}
-        for name, v in snap_bound:
-            if not hasattr(v, "data_ptr"):
-                continue
-            storage_ptr, storage_nbytes = self._capture_storage_extent(v)
-            is_contiguous = getattr(v, "is_contiguous", None)
-            self._snapshot_tensors[name] = GlobalTensor(
-                data_ptr=int(v.data_ptr()),
-                elem_size=int(v.element_size()),
-                numel=int(v.numel()),
-                contiguous=bool(is_contiguous()) if is_contiguous else False,
-                storage_data_ptr=storage_ptr,
-                storage_nbytes=storage_nbytes,
-            )
+        self._snapshot_args, self._snapshot_kwargs = snapshot_args, snapshot_kwargs
+        self._snapshot_tensors = snapshot_tensors
 
     def post_warmup_callback(self, jit_fn: Callable, ret: Any) -> None:
         asm = getattr(ret, "asm", None)

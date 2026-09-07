@@ -72,6 +72,114 @@ class ReplayOutOfBounds(Exception):
     raw host pointer and could corrupt the process)."""
 
 
+class ReplaySnapshotUnavailable(Exception):
+    """Argument cloning cannot faithfully preserve raw-pointer accesses."""
+
+
+def _replay_tensor_layout(value: Any) -> tuple[tuple, tuple[int, int]]:
+    """Require a full dense allocation, including dense transposed views.
+
+    Kernels address storage relative to data_ptr, independently of the
+    Python view's logical indexing. A logical clone may compact holes,
+    discard neighboring storage, or resolve lazy value transforms.
+    """
+    shape = tuple(int(n) for n in value.shape)
+    strides = tuple(int(n) for n in value.stride())
+    elem_size, numel = int(value.element_size()), int(value.numel())
+    storage = value.untyped_storage()
+    base, nbytes = int(storage.data_ptr()), int(storage.nbytes())
+    pointer = int(value.data_ptr())
+    if (
+        elem_size <= 0
+        or numel < 0
+        or any(n < 0 for n in shape)
+        or len(shape) != len(strides)
+        or nbytes != numel * elem_size
+        or pointer != base
+    ):
+        raise ReplaySnapshotUnavailable(
+            "tensor view does not cover its full allocation"
+        )
+    for flag in ("is_conj", "is_neg"):
+        if bool(getattr(value, flag, lambda: False)()):
+            raise ReplaySnapshotUnavailable("tensor has a lazy value transform")
+    # Full allocation size alone does not exclude internally overlapping
+    # as_strided views whose holes balance repeated logical elements.
+    if numel:
+        dense_stride = 1
+        for stride, size in sorted(zip(strides, shape)):
+            if size == 1:
+                continue
+            if stride != dense_stride:
+                raise ReplaySnapshotUnavailable(
+                    "tensor layout is not dense and non-overlapping"
+                )
+            dense_stride *= size
+        if dense_stride != numel:
+            raise ReplaySnapshotUnavailable("inconsistent tensor shape and numel")
+    layout = (shape, strides, value.dtype, value.device, elem_size, numel, nbytes)
+    return layout, (base, base + nbytes)
+
+
+def _clone_replay_inputs(
+    args: tuple, kwargs: dict
+) -> tuple[tuple, dict, dict[int, int], list[tuple[int, int]]]:
+    """Clone only when layout, allocation bounds, and aliases are preserved.
+
+    The current replay copies arguments independently. Shared allocations
+    and partial views therefore make replay unavailable; they do not make
+    the compiled address analysis unavailable. Validate originals before
+    cloning, and clones before exposing any snapshot to either channel.
+    """
+    values = list(args) + list(kwargs.values())
+    originals = []
+    for value in values:
+        if hasattr(value, "data_ptr"):
+            layout, span = _replay_tensor_layout(value)
+            originals.append((layout, span))
+    original_spans = [span for _, span in originals]
+
+    def overlaps(first: tuple[int, int], second: tuple[int, int]) -> bool:
+        return max(first[0], second[0]) < min(first[1], second[1])
+
+    for i, span in enumerate(original_spans):
+        if any(overlaps(span, other) for other in original_spans[:i]):
+            raise ReplaySnapshotUnavailable(
+                "tensor arguments have overlapping allocations"
+            )
+
+    cloned_values: list[Any] = []
+    clone_spans: list[tuple[int, int]] = []
+    base_map: dict[int, int] = {}
+    layouts = iter(originals)
+    for value in values:
+        if not hasattr(value, "data_ptr"):
+            cloned_values.append(value)
+            continue
+        layout, original_span = next(layouts)
+        clone = value.detach().clone()
+        clone_layout, clone_span = _replay_tensor_layout(clone)
+        if clone_layout != layout:
+            raise ReplaySnapshotUnavailable(
+                "tensor clone changed layout or allocation extent"
+            )
+        if clone is value or any(
+            overlaps(clone_span, span) for span in original_spans + clone_spans
+        ):
+            raise ReplaySnapshotUnavailable(
+                "tensor clone did not produce independent storage"
+            )
+        cloned_values.append(clone)
+        clone_spans.append(clone_span)
+        base_map[original_span[0]] = clone_span[0]
+    return (
+        tuple(cloned_values[: len(args)]),
+        dict(zip(kwargs, cloned_values[len(args) :])),
+        base_map,
+        clone_spans,
+    )
+
+
 class FootprintRecorder(Client):
     """Interpreter client recording per-block concrete byte footprints.
 
@@ -303,7 +411,7 @@ def run_replay(
 
     Returns clone-based footprints plus the original→clone base mapping.
     Never raises: replay is a best-effort classifier; on failure (including
-    the watchdog) the caller keeps the unconfirmed classification.
+    the watchdog) the caller treats the replay as unavailable.
     """
     # NOTE: `from ....core import trace` resolves to the trace() FUNCTION
     # (the package re-exports shadow the submodule); import the module.
@@ -312,33 +420,8 @@ def run_replay(
     trace_mod = importlib.import_module("triton_viz.core.trace")
 
     base_map: dict[int, int] = {}
-    spans: list[tuple[int, int]] = []  # the clones' storages: the in-bounds premise
-
-    def _clone(v: Any) -> Any:
-        c = v.detach().clone()
-        base_map[int(v.data_ptr())] = int(c.data_ptr())
-        try:
-            st = c.untyped_storage()
-            spans.append((int(st.data_ptr()), int(st.data_ptr()) + int(st.nbytes())))
-        except Exception:  # noqa: BLE001
-            spans.append(
-                (int(c.data_ptr()), int(c.data_ptr()) + c.numel() * c.element_size())
-            )
-        return c
-
     try:
-        cloned_args = []
-        for a in args:
-            if hasattr(a, "data_ptr") and hasattr(a, "clone"):
-                cloned_args.append(_clone(a))
-            else:
-                cloned_args.append(a)
-        cloned_kwargs = {}
-        for k, v in kwargs.items():
-            if hasattr(v, "data_ptr") and hasattr(v, "clone"):
-                cloned_kwargs[k] = _clone(v)
-            else:
-                cloned_kwargs[k] = v
+        cloned_args, cloned_kwargs, base_map, spans = _clone_replay_inputs(args, kwargs)
 
         recorder = FootprintRecorder(target_pids, bounds=spans)
         traced = trace_mod.TritonTrace(jit_fn, recorder)
