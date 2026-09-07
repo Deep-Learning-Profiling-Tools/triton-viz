@@ -1,4 +1,8 @@
-"""Exact satisfiability normalization for isolated reads of free arrays.
+"""Experimental exact normalization for isolated reads of free arrays.
+
+Not used by production analysis: fast isolated checks did not translate
+to an improvement in the complete KDA workflow. See the paper repository's
+optimizations.md section 15 for the measured adoption decision.
 
 If an array appears only as the base of one distinct Select expression,
 that read can take any scalar value. Replacing the read by a fresh scalar

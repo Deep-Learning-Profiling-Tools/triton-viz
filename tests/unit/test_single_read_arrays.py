@@ -3,8 +3,8 @@
 import pytest
 import z3
 
-from triton_viz.clients.race_detector import single_read_arrays
-from triton_viz.clients.race_detector.single_read_arrays import (
+from evaluation.solver_prototypes import single_read_arrays
+from evaluation.solver_prototypes.single_read_arrays import (
     single_read_array_normal_form,
     single_read_array_solver,
 )

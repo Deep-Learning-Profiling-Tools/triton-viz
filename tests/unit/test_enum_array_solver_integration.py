@@ -7,7 +7,7 @@ from triton_viz.clients.race_detector.guarded_division import (
     guarded_division_normal_form,
 )
 from triton_viz.clients.race_detector.hb_common import UnsupportedSymbolicRaceQuery
-from triton_viz.clients.race_detector.single_read_arrays import single_read_array_solver
+from evaluation.solver_prototypes.single_read_arrays import single_read_array_solver
 from triton_viz.clients.race_detector.two_copy_symbolic_hb_solver import (
     TwoCopySymbolicHBSolver,
 )
