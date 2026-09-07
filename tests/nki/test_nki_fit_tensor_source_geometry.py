@@ -121,3 +121,95 @@ def test_shapes_are_never_merged_across_suites(tmp_path):
     suites = [suite for _, _, suite in samples["float32"]]
     # The same shape measured by two suites stays two samples, one per suite.
     assert sorted(suites) == ["suite_a.csv", "suite_a.csv", "suite_b.csv", "suite_b.csv"]
+
+
+def test_legacy_csv_preserves_predictions_exactly(tmp_path):
+    from triton_viz.tools.nki_cost_model import TensorDotCountCalibration
+
+    path = tmp_path / "inf2.csv"
+    path.write_text("dtype,startup_ns,dot_ns,lhs_tile_ns,rhs_tile_ns,output_tile_ns\n"
+                    "bfloat16,123.25,4.75,1.5,2.25,3.125\n")
+    model = TensorDotCountCalibration.from_csv(path)
+    for dots, lhs, rhs, outputs in [(1, 1, 1, 1), (96, 48, 24, 8), (1024, 256, 64, 16)]:
+        expected = 123.25 + 4.75 * dots + 1.5 * lhs + 2.25 * rhs + 3.125 * outputs
+        assert model.active_ns("bfloat16", dots, lhs, rhs, outputs) == (expected, "source_geometry")
+
+
+def test_revisit_artifact_roundtrip_and_ood(tmp_path):
+    import json
+    from triton_viz.tools.nki_cost_model import TensorDotCountCalibration
+
+    inputs = []
+    for suite, ks in [("a", [2, 5, 9]), ("b", [3, 6, 10]), ("c", [4, 7, 11])]:
+        shapes = {}
+        for mt in [1, 2, 5]:
+            for nt in [1, 2, 3]:
+                for kt in ks:
+                    shapes[(128 * mt, 512 * nt, 128 * kt)] = [
+                        200 + 50 * mt * nt * kt + 20 * mt * kt + 10 * nt * kt
+                        + 5 * mt * nt + 3 * mt * (nt - 1) * kt**2
+                    ]
+        inputs.append(_write_trials(tmp_path / f"{suite}.csv", shapes))
+    output, cv = tmp_path / "model.csv", tmp_path / "cv.json"
+    main([*map(str, inputs), "--artifact-role", "control", "--output", str(output),
+          "--cv-output", str(cv), "--bf16-revisit-term"])
+    assert json.loads(cv.read_text())["mean_wape_pct"]["bfloat16"] < 1e-8
+    model = TensorDotCountCalibration.from_csv(output)
+    value, match = model.active_ns("bfloat16", 24, 12, 8, 6)
+    assert value == pytest.approx(200 + 50*24 + 20*12 + 10*8 + 5*6 + 3*3*1*4**2)
+    assert match == "source_geometry_revisit"
+    assert model.active_ns("bfloat16", 10000, 1000, 1000, 100)[1].endswith("_ood")
+
+
+def test_revisit_coefficient_requires_explicit_version(tmp_path):
+    from triton_viz.tools.nki_cost_model import TensorDotCountCalibration
+
+    path = tmp_path / "unversioned.csv"
+    path.write_text("dtype,startup_ns,dot_ns,revisit_ns\nbfloat16,100,10,2\n")
+    with pytest.raises(ValueError, match="requires a model version"):
+        TensorDotCountCalibration.from_csv(path)
+
+
+@pytest.mark.parametrize("whole_surface", [False, True])
+def test_revisit_ood_propagates_to_simulation(whole_surface):
+    from triton_viz.tools.nki_cost_model import (
+        CostModel, TensorDotCountCalibration, TensorCalibrationSurface, simulate,
+    )
+
+    calibration = TensorDotCountCalibration(
+        {"bfloat16": (100, 10, 1, 1, 1)},
+        {"bfloat16": 2},
+        {"bfloat16": [[2, 20]] * 5},
+    )
+    event = {"op": "dot", "engine": "tensor", "seq": 0, "flops": 1024,
+             "input_dtypes": ["bfloat16", "bfloat16"],
+             "tensor_source_dot_count": 1, "tensor_source_lhs_tile_count": 1,
+             "tensor_source_rhs_tile_count": 1, "tensor_source_output_tile_count": 1}
+    model = CostModel(tensor_dot_count_calibration=calibration)
+    if whole_surface:
+        model.tensor_calibration = TensorCalibrationSurface(
+            {"bfloat16": (100, 10)}, {"bfloat16": (1, 1e6)})
+    result = simulate([event], model)
+    assert result.components_ns["tensor_source_geometry_ood_count"] == 1
+
+
+def test_revisit_option_leaves_fp32_fit_and_predictions_unchanged(tmp_path):
+    from triton_viz.tools.nki_cost_model import TensorDotCountCalibration
+
+    controls = [tmp_path / "a.csv", tmp_path / "b.csv"]
+    for path in controls:
+        _write_controls(path, 1.0)
+    models = []
+    fitted_rows = []
+    for name, flags in [("legacy", []), ("revisit", ["--bf16-revisit-term"])]:
+        output = tmp_path / f"{name}.csv"
+        assert main([*map(str, controls), "--artifact-role", "control", "--output",
+                     str(output), "--cv-output", str(tmp_path / f"{name}.json"),
+                     *flags]) == 0
+        models.append(TensorDotCountCalibration.from_csv(output))
+        with output.open() as file:
+            fitted_rows.append(next(row for row in csv.DictReader(file)
+                                    if row["dtype"] == "float32"))
+    for key in fitted_rows[0]:
+        assert fitted_rows[0][key] == fitted_rows[1][key]
+    assert models[0].active_ns("float32", 24, 12, 8, 6) == models[1].active_ns("float32", 24, 12, 8, 6)

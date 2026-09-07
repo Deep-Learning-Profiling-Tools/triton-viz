@@ -58,16 +58,29 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument("--output", required=True, type=Path)
     parser.add_argument("--cv-output", required=True, type=Path)
     parser.add_argument("--max-mean-wape", type=float, default=20.0)
+    parser.add_argument("--bf16-revisit-term", action="store_true",
+                        help="Experimental source-tile interaction; legacy fit is the default.")
     args = parser.parse_args(argv)
     if args.artifact_role != "control":
         raise SystemExit("Refusing target artifacts in TensorE geometry fit")
     samples = _samples(args.inputs)
     output_rows, folds = [], []
+    feature_names = FEATURES + (("revisit_ns",) if args.bf16_revisit_term else ())
     for dtype, values in sorted(samples.items()):
+        use_revisit = args.bf16_revisit_term and dtype == "bfloat16"
+        if use_revisit:
+            values = [(x + [x[2] * x[3] * (1.0 - x[2] / x[1])], y, suite)
+                      for x, y, suite in values]
         matrix = np.asarray([features for features, _, _ in values])
         labels = np.asarray([label for _, label, _ in values])
         coefficients = nnls(matrix, labels)[0]
-        output_rows.append({"dtype": dtype, "samples": len(values), **dict(zip(FEATURES, map(float, coefficients)))})
+        output_rows.append({"dtype": dtype, "samples": len(values), **dict(zip(feature_names, map(float, coefficients)))})
+        if use_revisit:
+            output_rows[-1]["geometry_model"] = "tiled-revisit-v1"
+            output_rows[-1]["geometry_domain"] = json.dumps([
+                [float(matrix[:, i].min()), float(matrix[:, i].max())]
+                for i in range(1, 6)
+            ])
         for held_suite in sorted({suite for _, _, suite in values}):
             train = [(features, label) for features, label, suite in values if suite != held_suite]
             test = [(features, label) for features, label, suite in values if suite == held_suite]
@@ -80,10 +93,12 @@ def main(argv: list[str] | None = None) -> int:
         for dtype in sorted(samples)
     }
     report = {
-        "schema": "triton-viz.tensor-source-geometry-control-cv-v2",
+        "schema": ("triton-viz.tensor-source-geometry-control-cv-v3"
+                   if args.bf16_revisit_term
+                   else "triton-viz.tensor-source-geometry-control-cv-v2"),
         "protocol": "leave-one-independent-control-suite-out NNLS",
         "metric": "per-engine WAPE",
-        "features": list(FEATURES),
+        "features": list(feature_names),
         "folds": folds,
         "mean_wape_pct": means,
         "gate_pct": args.max_mean_wape,
@@ -92,7 +107,8 @@ def main(argv: list[str] | None = None) -> int:
     }
     args.output.parent.mkdir(parents=True, exist_ok=True)
     with args.output.open("w", encoding="utf-8", newline="") as file:
-        writer = csv.DictWriter(file, fieldnames=("dtype", *FEATURES, "samples"))
+        writer = csv.DictWriter(file, fieldnames=("dtype", *feature_names, "samples",
+            *(("geometry_model", "geometry_domain") if args.bf16_revisit_term else ())))
         writer.writeheader(); writer.writerows(output_rows)
     args.cv_output.write_text(json.dumps(report, indent=2, sort_keys=True) + "\n")
     print(json.dumps(report, indent=2, sort_keys=True))

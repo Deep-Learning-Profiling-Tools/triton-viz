@@ -506,13 +506,32 @@ class TensorDotCountCalibration:
     """Control-only TensorE surface keyed by source-visible tiled-Dot geometry."""
 
     points: dict[str, tuple[float, float, float, float, float]]
+    revisit_ns: dict[str, float] = field(default_factory=dict)
+    geometry_domains: dict[str, list[list[float]]] = field(default_factory=dict)
 
     @classmethod
     def from_csv(cls, path: str | Path) -> "TensorDotCountCalibration":
-        points = {}
+        points, revisit_ns, domains = {}, {}, {}
         with Path(path).open(encoding="utf-8", newline="") as file:
             for row in csv.DictReader(file):
-                points[TensorCalibrationSurface._normalize_dtype(row["dtype"])] = (
+                dtype = TensorCalibrationSurface._normalize_dtype(row["dtype"])
+                version = row.get("geometry_model")
+                if version not in (None, "", "tiled-revisit-v1"):
+                    raise ValueError(f"Unknown Tensor geometry model: {version}")
+                if not version and row.get("revisit_ns"):
+                    raise ValueError("Tensor revisit coefficient requires a model version")
+                if version == "tiled-revisit-v1":
+                    revisit_ns[dtype] = float(row["revisit_ns"])
+                    if not math.isfinite(revisit_ns[dtype]) or revisit_ns[dtype] < 0:
+                        raise ValueError("Invalid Tensor revisit coefficient")
+                    domain = json.loads(row["geometry_domain"])
+                    if len(domain) != 5 or any(
+                        len(bounds) != 2 or not all(math.isfinite(v) for v in bounds)
+                        or bounds[0] > bounds[1] for bounds in domain
+                    ):
+                        raise ValueError("Invalid Tensor geometry domain")
+                    domains[dtype] = domain
+                points[dtype] = (
                     float(row["startup_ns"]), float(row["dot_ns"]),
                     float(row.get("lhs_tile_ns") or 0.0),
                     float(row.get("rhs_tile_ns") or 0.0),
@@ -520,16 +539,30 @@ class TensorDotCountCalibration:
                 )
         if not points:
             raise ValueError(f"No source-Dot Tensor calibration rows in {path}")
-        return cls(points)
+        return cls(points, revisit_ns, domains)
 
     def active_ns(self, dtype: str, dot_count: int, lhs_tiles: int = 0,
                   rhs_tiles: int = 0, output_tiles: int = 0) -> tuple[float, str]:
-        point = self.points.get(TensorCalibrationSurface._normalize_dtype(dtype))
+        dtype = TensorCalibrationSurface._normalize_dtype(dtype)
+        point = self.points.get(dtype)
         if point is None or dot_count <= 0:
             return 0.0, "missing"
         startup, dot_ns, lhs_ns, rhs_ns, output_ns = point
-        return (startup + dot_ns * dot_count + lhs_ns * lhs_tiles
-                + rhs_ns * rhs_tiles + output_ns * output_tiles), "source_geometry"
+        total = (startup + dot_ns * dot_count + lhs_ns * lhs_tiles
+                 + rhs_ns * rhs_tiles + output_ns * output_tiles)
+        if dtype not in self.revisit_ns:
+            return total, "source_geometry"
+        # For tiled matmul this is mt * (nt - 1) * kt**2. It describes
+        # repeated K-tile work across N tiles using source geometry alone.
+        revisit = lhs_tiles * rhs_tiles * (1.0 - lhs_tiles / dot_count)
+        if dtype != "bfloat16":
+            revisit = 0.0
+        geometry = [dot_count, lhs_tiles, rhs_tiles, output_tiles, revisit]
+        ood = any(value < low or value > high for value, (low, high)
+                  in zip(geometry, self.geometry_domains[dtype]))
+        total += self.revisit_ns[dtype] * revisit
+        return max(0.0, total), ("source_geometry_revisit_ood" if ood
+                                else "source_geometry_revisit")
 
 
 @dataclass
@@ -2418,6 +2451,7 @@ def simulate(
     tensor_startup_ns = 0.0
     attention_pipeline_match = "disabled"
     tensor_domain_ood = 0
+    tensor_geometry_ood = 0
     micro_dag_engine_coverage: set[str] = set()
     source_compute_regions = {
         str(event.get("source_region_id") or event.get("fusion_group"))
@@ -2495,6 +2529,8 @@ def simulate(
                     )
                 )
                 source_dot_surface_used = calibrated_tensor_active_ns > 0
+                if source_dot_surface_used and _match.endswith("_ood"):
+                    tensor_geometry_ood = len(calibrated_dot_events)
             if source_dot_surface_used:
                 tensor_startup_ns = 0.0
                 # The fitted target is Explorer's whole TensorE active union,
@@ -2614,6 +2650,11 @@ def simulate(
         duration = float(
             event.get("scheduler_duration_override_ns", model.cost_ns(event))
         )
+
+        if (event.get("op") == "dot"
+                and "scheduler_duration_override_ns" not in event
+                and str(event.get("tensor_dot_count_calibration_match", "")).endswith("_ood")):
+            tensor_geometry_ood += 1
 
         reads = _read_accesses(event)
         writes = _write_accesses(event)
@@ -2885,6 +2926,7 @@ def simulate(
             ),
             "dma_surface_max_log_distance": dma_surface_max_log_distance,
             "tensor_flops_domain_ood_count": float(tensor_domain_ood),
+            "tensor_source_geometry_ood_count": float(tensor_geometry_ood),
             "micro_dag_vector_covered": float(
                 ENGINE_VECTOR in micro_dag_engine_coverage
             ),

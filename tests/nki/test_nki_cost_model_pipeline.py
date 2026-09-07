@@ -144,3 +144,25 @@ def test_pipeline_child_parser_contract_rejects_old_static_dma_arguments():
         _validate_command_contract(
             command + ["--compute-calibration-csv", "/tmp/compute.csv"]
         )
+
+
+def test_revisit_fit_is_explicit_and_never_enabled_by_default(tmp_path, monkeypatch):
+    from triton_viz.tools import nki_cost_model_pipeline as pipeline
+
+    commands = []
+    monkeypatch.setattr(pipeline, "_run", lambda args, dry_run: commands.append(args))
+    pipeline.fit(tmp_path, True)
+    assert not any("--bf16-revisit-term" in args for args in commands)
+    commands.clear()
+    assert pipeline.main(["fit", "--root", str(tmp_path), "--dry-run",
+                          "--bf16-revisit-term"]) == 0
+    enabled = [args for args in commands if "--bf16-revisit-term" in args]
+    assert len(enabled) == 1
+    assert enabled[0][2] == "triton_viz.tools.nki_fit_tensor_source_geometry"
+    assert enabled[0][enabled[0].index("--max-mean-wape") + 1] == "20"
+
+
+@pytest.mark.parametrize("stage", ["collect", "evaluate"])
+def test_revisit_flag_is_fit_only(stage, tmp_path):
+    with pytest.raises(SystemExit):
+        main([stage, "--root", str(tmp_path), "--dry-run", "--bf16-revisit-term"])

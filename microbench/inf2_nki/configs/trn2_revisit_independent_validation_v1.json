@@ -1,0 +1,36 @@
+{
+  "suite": "trn2_revisit_independent_validation_v1",
+  "description": "Predeclared unseen BF16 control shapes for frozen candidate verification, no fitting on these labels. Three compilation trials per shape.",
+  "warmup": 2,
+  "iters": 20,
+  "benchmarks": [
+    {
+      "name": "revisit_validation_v1",
+      "kind": "tensor_matmul_tiled",
+      "matrix": {
+        "dtype": [
+          "bfloat16"
+        ],
+        "m": [
+          384,
+          640
+        ],
+        "n": [
+          512,
+          1024,
+          1536
+        ],
+        "k": [
+          1152,
+          2304,
+          4608
+        ],
+        "trial": [
+          1,
+          2,
+          3
+        ]
+      }
+    }
+  ]
+}

@@ -333,7 +333,7 @@ def _microbench_source_manifests(root: Path) -> list[Path]:
     return manifests
 
 
-def fit(root: Path, dry_run: bool) -> None:
+def fit(root: Path, dry_run: bool, *, bf16_revisit_term: bool = False) -> None:
     calibration = root / "calibration"
     calibration.mkdir(parents=True, exist_ok=True)
     canonical = calibration / "microbench.csv"
@@ -417,6 +417,7 @@ def fit(root: Path, dry_run: bool) -> None:
         _module(
             "triton_viz.tools.nki_fit_tensor_source_geometry",
             *tensor_geometry_fit_csvs,
+            *(["--bf16-revisit-term"] if bf16_revisit_term else []),
             "--artifact-role",
             "control",
             "--max-mean-wape",
@@ -1007,6 +1008,10 @@ def evaluate(root: Path, dry_run: bool) -> None:
             for row in mechanism_rows
         ),
     }
+    report["tensor_source_geometry_ood_count"] = sum(
+        int(row.get("tensor_source_geometry_ood_count") or 0)
+        for row in tensor_rows
+    )
     report["tensor_nc_p50_mape_pct"] = statistics.mean(
         abs(float(row["nc_error_pct"])) for row in tensor_rows
     )
@@ -1112,11 +1117,15 @@ def main(argv=None) -> int:
         default=Path("/home/ubuntu/Tilebench/benchmarks/operators"),
     )
     parser.add_argument("--dry-run", action="store_true")
+    parser.add_argument("--bf16-revisit-term", action="store_true",
+                        help="Fit only: opt into the experimental BF16 Tensor geometry model.")
     args = parser.parse_args(argv)
+    if args.bf16_revisit_term and args.stage != "fit":
+        parser.error("--bf16-revisit-term is only valid for fit")
     if args.stage == "collect":
         collect(args.root.resolve(), args.tilebench_dir.resolve(), args.dry_run)
     elif args.stage == "fit":
-        fit(args.root.resolve(), args.dry_run)
+        fit(args.root.resolve(), args.dry_run, bf16_revisit_term=args.bf16_revisit_term)
     else:
         evaluate(args.root.resolve(), args.dry_run)
     return 0

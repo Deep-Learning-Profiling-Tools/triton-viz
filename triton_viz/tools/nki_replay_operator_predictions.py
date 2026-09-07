@@ -115,6 +115,7 @@ FIELDS = [
     "dma_surface_ood_count",
     "dma_surface_max_log_distance",
     "tensor_flops_domain_ood_count",
+    "tensor_source_geometry_ood_count",
     "tensor_static_matmul_instruction_count",
     "tensor_instruction_calibration_match",
     "level_a_exact_key_count",
@@ -619,6 +620,9 @@ def main(argv: list[str] | None = None) -> int:
                 ),
                 "tensor_flops_domain_ood_count": int(
                     components.get("tensor_flops_domain_ood_count", 0)
+                ),
+                "tensor_source_geometry_ood_count": int(
+                    components.get("tensor_source_geometry_ood_count", 0)
                 ),
                 "tensor_static_matmul_instruction_count": static_matmul_count,
                 "tensor_instruction_calibration_match": tensor_instruction_match,
