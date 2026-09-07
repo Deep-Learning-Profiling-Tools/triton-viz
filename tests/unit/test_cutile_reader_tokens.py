@@ -1,14 +1,20 @@
 """cuTile token order is an SSA partial order, including control-flow results.
 
-The loop pins protect the serial-iteration proof required by the solver's
-single-iteration same-instance queries. Unsupported recurrences refuse rather
-than manufacturing program-order edges or silently ignoring other iterations.
+The loop pins protect the ordering or non-aliasing proof required by the
+solver's single-iteration same-instance queries. Unordered conflict pairs
+survive capture as obligations; unsupported ancestry and awaits still refuse.
 """
 
 import pytest
 
 from triton_viz.clients.common.cutile_ir_reader import parse_cutile_ir
-from triton_viz.clients.common.ttir_reader import Cmp, Const, Param, UnsupportedTTIR
+from triton_viz.clients.common.ttir_reader import (
+    Cmp,
+    Const,
+    LoopTokenConflict,
+    Param,
+    UnsupportedTTIR,
+)
 from triton_viz.clients.race_detector.compiled.global_records import (
     GlobalTensor,
     encode_graph,
@@ -212,19 +218,73 @@ def test_one_trip_needs_no_recurrence_but_parallel_body_stores_still_race():
 
 
 @pytest.mark.parametrize("upper", ["n", "$two"])
-def test_independent_write_iterations_refuse(upper):
-    with pytest.raises(UnsupportedTTIR, match="serial memory boundary") as exc:
-        _graph(
-            *_loop(
-                [
-                    _store("$a", "$root"),
-                    "$joined: Token = join_tokens(tokens=($carry, $a))",
-                ],
-                upper=upper,
-                continued="$joined",
-            )
+def test_independent_write_iterations_defer_then_refuse_at_encoding(upper):
+    g = _graph(
+        *_loop(
+            [
+                _store("$a", "$root"),
+                "$joined: Token = join_tokens(tokens=($carry, $a))",
+            ],
+            upper=upper,
+            continued="$joined",
         )
+    )
+    assert g.loop_token_conflicts == [LoopTokenConflict("$i", 0, 0)]
+    with pytest.raises(UnsupportedTTIR) as exc:
+        _races(g)
     assert exc.value.kind == "token-order"
+
+
+def test_serial_stores_leave_only_the_independent_load_store_obligation():
+    g = _graph(*_loop([_load("$read", "$root"), _store("$a", "$carry")]))
+    assert g.loop_token_conflicts == [LoopTokenConflict("$i", 0, 1)]
+
+
+def _two_slot_loop(continued_first="$a", continued_second="$b", extra=()):
+    return (
+        "$done1: Token, $done2: Token = for $i in range($zero, n, $one) "
+        "(with $c1: Token = $root, $c2: Token = $root)",
+        "do ($i: Tile[int32,()], $c1: Token, $c2: Token)",
+        "    ($i: Tile[int32,()], $c1: Token, $c2: Token):",
+        "    " + _store("$a", "$c1"),
+        "    " + _store("$b", "$c2"),
+        *("    " + line for line in extra),
+        f"    continue {continued_first}, {continued_second}",
+    )
+
+
+def test_separate_serial_store_chains_leave_the_cross_store_obligation():
+    g = _graph(*_two_slot_loop())
+    assert g.loop_token_conflicts == [LoopTokenConflict("$i", 0, 1)]
+
+
+def test_opposite_iteration_directions_can_use_different_carried_slots():
+    g = _graph(
+        *_two_slot_loop(
+            "$next1",
+            "$next2",
+            (
+                "$next1: Token = join_tokens(tokens=($c1, $a, $b))",
+                "$next2: Token = join_tokens(tokens=($c2, $a, $b))",
+            ),
+        )
+    )
+    assert g.loop_token_conflicts == []
+    assert _races(g), "the two stores remain unordered within one iteration"
+
+
+def test_one_direction_of_iteration_order_does_not_discharge_the_pair():
+    g = _graph(
+        *_loop(
+            [
+                _store("$a", "$carry"),
+                _load("$read", "$root"),
+                "$joined: Token = join_tokens(tokens=($a, $read))",
+            ],
+            continued="$joined",
+        )
+    )
+    assert g.loop_token_conflicts == [LoopTokenConflict("$i", 0, 1)]
 
 
 def test_parallel_stores_joined_at_a_serial_iteration_boundary_remain_unordered_inside():
@@ -243,6 +303,7 @@ def test_parallel_stores_joined_at_a_serial_iteration_boundary_remain_unordered_
 
 def test_readonly_for_can_have_independent_iterations():
     g = _graph(*_loop([_load("$a", "$root")], continued="$carry"))
+    assert g.loop_token_conflicts == []
     assert g.token_order == {} and _races(g) == []
 
 
