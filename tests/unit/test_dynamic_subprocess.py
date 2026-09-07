@@ -1,4 +1,5 @@
 """Process containment preserves the launch and never credits a late exit."""
+from dataclasses import replace
 import io
 import sys
 
@@ -17,6 +18,22 @@ from triton_viz.clients.race_detector.ladder import LadderLevel
 def _copy(x, out, N: tl.constexpr):
     i = tl.program_id(0)
     tl.store(out + i, tl.load(x + i), i < N)
+
+
+@triton.jit
+def _attribute_exp(x, out, N: tl.constexpr):
+    i = tl.program_id(0)
+    tl.store(out + i, tl.exp(tl.load(x + i)), i < N)
+
+
+@triton.jit
+def _helper_exp(x):
+    return tl.exp(x)
+
+
+@triton.jit
+def _replacement_exp(x):
+    return tl.exp(x) + 1
 
 
 def _spec():
@@ -62,6 +79,43 @@ def test_callable_transport_discards_jit_caches_and_preserves_source():
     )
     assert restored.make_args is None
     assert not restored.kernel_fn.device_caches
+
+
+def test_attribute_name_collision_is_not_an_unused_global_dependency(monkeypatch):
+    cloudpickle = pytest.importorskip("cloudpickle")
+    # FLA imports a global exp helper but this kernel reads only tl.exp.
+    monkeypatch.setitem(globals(), "exp", _helper_exp)
+    spec = replace(_spec(), kernel_fn=_attribute_exp)
+    before = child._kernel_identity(spec.kernel_fn)
+    restored = cloudpickle.loads(child._serialize_spec(spec))
+    assert child._kernel_identity(restored.kernel_fn) == before
+    assert set(before["dependency_sources"]) == {"kernel.tl"}
+    assert before["dependency_sources"]["kernel.tl"]["sha256"]
+
+
+def test_real_helper_and_closure_dependencies_remain_strict(monkeypatch):
+    cloudpickle = pytest.importorskip("cloudpickle")
+    offset = 3
+
+    @triton.jit
+    def with_helper(x, out, N: tl.constexpr):
+        i = tl.program_id(0)
+        tl.store(out + i, _helper_exp(tl.load(x + i)) + offset, i < N)
+
+    spec = replace(_spec(), kernel_fn=with_helper)
+    before = child._kernel_identity(with_helper)
+    dependencies = before["dependency_sources"]
+    assert dependencies["kernel._helper_exp"]["source"] == _helper_exp.src
+    assert dependencies["kernel._helper_exp.tl"]["sha256"]
+    assert dependencies["kernel.offset"] == {"constant": 3}
+    restored = cloudpickle.loads(child._serialize_spec(spec))
+    assert child._kernel_identity(restored.kernel_fn) == before
+    monkeypatch.setitem(
+        restored.kernel_fn.fn.__globals__, "_helper_exp", _replacement_exp
+    )
+    assert child._kernel_identity(restored.kernel_fn) != before
+    with_helper.fn.__closure__[0].cell_contents = 4
+    assert child._kernel_identity(with_helper) != before
 
 
 def test_fresh_process_reports_launch_identity_and_actual_wall():

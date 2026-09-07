@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import argparse
 import copy
+import dis
 import hashlib
 import importlib
 import importlib.metadata
@@ -109,6 +110,17 @@ def _kernel_identity(kernel) -> dict:
     dependencies = {}
     seen = set()
 
+    def global_reads(code):
+        # co_names also includes attributes such as the exp in tl.exp. Those
+        # are not reads of a same-named module global, and cloudpickle rightly
+        # omits that unused global when transporting the function by value.
+        for instruction in dis.get_instructions(code):
+            if instruction.opname in {"LOAD_GLOBAL", "LOAD_NAME"}:
+                yield instruction.argval
+        for constant in code.co_consts:
+            if isinstance(constant, types.CodeType):
+                yield from global_reads(constant)
+
     def visit(current, prefix):
         if id(current) in seen:
             return
@@ -122,7 +134,7 @@ def _kernel_identity(kernel) -> dict:
             for name, cell in zip(code.co_freevars, function.__closure__ or ())
         }
         bindings = {**getattr(function, "__globals__", {}), **closure}
-        for name in (*code.co_names, *code.co_freevars):
+        for name in dict.fromkeys((*global_reads(code), *code.co_freevars)):
             value = bindings.get(name)
             key = prefix + "." + name
             if hasattr(value, "src") and hasattr(value, "fn"):
