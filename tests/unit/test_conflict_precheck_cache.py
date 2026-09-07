@@ -123,6 +123,93 @@ def test_constructor_copies_list_and_direct_mutable_extra_list_is_not_cached():
     assert solver._conflict_precheck(a, b)
 
 
+class _MutableGuard:
+    enabled = False
+
+    def sort(self):
+        return z3.IntSort()
+
+    def __ne__(self, other):
+        return z3.BoolVal(self.enabled)
+
+
+class _MutableIntGuard(int):
+    enabled = False
+
+    def __ne__(self, other):
+        return self.enabled
+
+
+@pytest.mark.parametrize("guard_type", [_MutableGuard, _MutableIntGuard])
+@pytest.mark.parametrize("initially_enabled", [False, True])
+def test_mutable_tuple_guard_keeps_public_races_and_feasibility_consistent(
+    guard_type, initially_enabled
+):
+    guard = guard_type()
+    solver = _store_solver((guard,))
+    for enabled in (initially_enabled, not initially_enabled, initially_enabled):
+        guard.enabled = enabled
+        reports = solver.find_races()
+        assert len(reports) == int(enabled)
+        assert solver.check_feasibility() == enabled
+        full_query = solver._new_solver()
+        full_query.add(solver._race_expr(*solver.events))
+        assert full_query.check() == (z3.sat if enabled else z3.unsat)
+        assert solver._conflict_common_cache is None
+
+
+def test_mutable_tuple_subclass_cannot_preserve_revoked_pins():
+    class MutableTuple(tuple):
+        conditions = ()
+
+        def __iter__(self):
+            return iter(self.conditions)
+
+    solver = _store_solver()
+    assumptions = MutableTuple()
+    solver.extra_assumptions = assumptions
+    for enabled in (False, True, False):
+        assumptions.conditions = (enabled,)
+        assert len(solver.find_races()) == int(enabled)
+        assert solver.check_feasibility() == enabled
+        assert solver._conflict_common_cache is None
+
+
+@pytest.mark.parametrize("guard", [True, 1, 1.5, z3.IntVal(1), z3.BoolVal(True)])
+def test_immutable_guard_cache_hit_does_not_repeat_admission_or_coercion(
+    monkeypatch, guard
+):
+    solver = _store_solver((guard,))
+    common = solver._conflict_precheck_common()
+
+    def unexpected_rebuild(*args):
+        raise AssertionError("immutable cache hits must remain identity-only")
+
+    monkeypatch.setattr(tc, "_immutable_precheck_source", unexpected_rebuild)
+    monkeypatch.setattr(tc, "as_bool", unexpected_rebuild)
+    assert solver._conflict_precheck_common() is common
+
+
+@pytest.mark.parametrize(
+    "field", ["pid", "copy_local_substitutions", "arange_substitutions"]
+)
+def test_mutable_context_contents_rebuild_shared_and_lane_correspondence(field):
+    solver = _store_solver()
+    first, second = z3.Ints("cache_mutable_context_first cache_mutable_context_second")
+    values = list(solver.ctx_a.pid) if field == "pid" else [(first, first)]
+    solver.ctx_a = replace(solver.ctx_a, **{field: values})
+    before = solver._conflict_precheck_common()
+    values[0] = second if field == "pid" else (first, second)
+    after = solver._conflict_precheck_common()
+    assert after is not before
+    assert solver._conflict_common_cache is None
+    # Both copies need a corresponding substitution for zip to retain it.
+    if field != "pid":
+        solver.ctx_b = replace(solver.ctx_b, **{field: ((first, first),)})
+        after = solver._conflict_precheck_common()
+    assert any(b is second for _, b in after.correspondence)
+
+
 @pytest.mark.parametrize("source", ["grid", "ranges", "mutable_ranges"])
 def test_grid_and_range_changes_invalidate_common_constraints(source):
     solver = _store_solver()

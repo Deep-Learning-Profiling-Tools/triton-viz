@@ -151,6 +151,30 @@ class CopyContext:
     copy_local_substitutions: tuple[tuple[Any, Any], ...]  # launch-level
 
 
+def _immutable_precheck_source(value: Any) -> bool:
+    """Admit only immutable leaves and containers for identity-based reuse."""
+    if type(value) in (bool, int, float):
+        return True
+    if isinstance(value, ExprRef):
+        # User-defined subclasses can override coercion with mutable state.
+        # Standard z3py expression classes represent immutable ASTs.
+        return type(value).__module__ == ExprRef.__module__
+    if type(value) is tuple:
+        return all(_immutable_precheck_source(item) for item in value)
+    if type(value) is CopyContext:
+        # Frozen records can still contain mutable fields supplied by callers.
+        # These are exactly the fields read by the common precheck below.
+        return all(
+            _immutable_precheck_source(field)
+            for field in (
+                value.pid,
+                value.copy_local_substitutions,
+                value.arange_substitutions,
+            )
+        )
+    return False
+
+
 @dataclass
 class _ConflictPrecheckCommon:
     # Retaining the source objects makes identity checks safe against id reuse.
@@ -930,9 +954,10 @@ class TwoCopySymbolicHBSolver:
 
         The constructor stores constraint sequences as tuples and contexts
         as frozen records. Attribute replacement invalidates the cached
-        conjunction, including removal of launch pins. If a caller instead
-        installs a mutable sequence, rebuild on every call so mutations
-        cannot preserve assertions that are no longer in the full query.
+        conjunction, including removal of launch pins. Cache admission also
+        checks their contents: mutable or custom coercible conditions must
+        be read on every call, even inside an unchanged tuple. Admission is
+        checked only when building a new entry, preserving cheap cache hits.
         """
         sources = (
             self.grid_constraints,
@@ -942,14 +967,12 @@ class TwoCopySymbolicHBSolver:
             self.ctx_a,
             self.ctx_b,
         )
-        immutable = all(isinstance(source, tuple) for source in sources[1:4])
         cached = getattr(self, "_conflict_common_cache", None)
-        if (
-            immutable
-            and cached is not None
-            and all(current is old for current, old in zip(sources, cached.sources))
+        if cached is not None and all(
+            current is old for current, old in zip(sources, cached.sources)
         ):
             return cached
+        self._conflict_common_cache = None
         shared = tuple(zip(self.ctx_b.pid, self.ctx_a.pid)) + tuple(
             (bvar, avar)
             for (_, avar), (_, bvar) in zip(
@@ -969,9 +992,9 @@ class TwoCopySymbolicHBSolver:
             *self.arange_constraints_b,
             *[as_bool(condition) for condition in self.extra_assumptions],
         )
-        cached = self._conflict_common_cache = _ConflictPrecheckCommon(
-            sources, expression, shared, correspondence
-        )
+        cached = _ConflictPrecheckCommon(sources, expression, shared, correspondence)
+        if all(_immutable_precheck_source(source) for source in sources):
+            self._conflict_common_cache = cached
         return cached
 
     def _intra_pair_lane_condition(
