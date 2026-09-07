@@ -465,6 +465,17 @@ def _resolve_platform_target() -> str:
         ) from exc
 
 
+def _load_single_rank_model(compiled):
+    """Support both legacy and rank-aware standalone NKI loaders."""
+    import inspect
+
+    loader = compiled._ensure_loaded
+    parameters = inspect.signature(loader).parameters
+    rank_args = {name: value for name, value in (("rank_id", 0), ("world_size", 1))
+                 if name in parameters}
+    return loader(**rank_args)
+
+
 def _run_hardware_framework(
     op: str,
     inputs: list[np.ndarray],
@@ -551,7 +562,7 @@ def _run_hardware_framework(
         )
     from nki.runtime import SpikeTensor
 
-    model = compiled._ensure_loaded()
+    model = _load_single_rank_model(compiled)
     spike_inputs = {
         name: SpikeTensor.from_numpy(value, name)
         for name, value in exec_inputs.items()
@@ -568,6 +579,12 @@ def _run_hardware_framework(
         mode="device",
     )
     compiled.run(profile=True, **exec_inputs)
+    trace_path = artifact_dir / "profile.ntff"
+    if not trace_path.is_file():
+        # New standalone SDKs profile via benchmark() without writing NTFF.
+        # Keep the legacy trace when present; otherwise explicitly capture one.
+        model(spike_inputs, outputs=spike_outputs, save_trace=True,
+              ntff_name=str(trace_path))
     summary = _profile_summary(
         artifact_dir / "file.neff",
         artifact_dir / "profile.ntff",

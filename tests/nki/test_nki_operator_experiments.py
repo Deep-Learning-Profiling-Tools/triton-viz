@@ -49,3 +49,23 @@ def test_median_hardware_trial_falls_back_when_every_trial_fails(tmp_path):
     assert nc_p50 == pytest.approx(7.0)
     assert profile["tag"] == "plain"
     assert seen[-1] == "hardware"
+
+
+def test_single_rank_loader_supports_legacy_sdk():
+    from triton_viz.tools.nki_operator_experiments import _load_single_rank_model
+
+    class Legacy:
+        def _ensure_loaded(self):
+            return "legacy-model"
+
+    assert _load_single_rank_model(Legacy()) == "legacy-model"
+
+
+def test_single_rank_loader_uses_sdk_run_defaults():
+    from triton_viz.tools.nki_operator_experiments import _load_single_rank_model
+
+    class Ranked:
+        def _ensure_loaded(self, rank_id, world_size):
+            return rank_id, world_size
+
+    assert _load_single_rank_model(Ranked()) == (0, 1)
