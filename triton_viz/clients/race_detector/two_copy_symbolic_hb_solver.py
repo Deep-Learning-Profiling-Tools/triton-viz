@@ -549,6 +549,7 @@ class TwoCopySymbolicHBSolver:
         # Only full symbolic UNSAT results are reusable. Keep their ASTs
         # alive, and limit the cache to this race-finding invocation.
         self._unsat_race_queries: dict[tuple[int, int], BoolRef] = {}
+        self._guarded_query_cache: dict[BoolRef, BoolRef] = {}
 
         candidates: list[tuple[SymbolicMemoryEvent, SymbolicMemoryEvent, ModelRef, str]]
         candidates = []
@@ -751,7 +752,15 @@ class TwoCopySymbolicHBSolver:
         base = self._base_constraint_conjunction()
         if base is None:
             return None
-        return simplify(And(base, *pair_constraints, race_expression))
+        from .guarded_division import guarded_division_normal_form
+
+        original = simplify(And(base, *pair_constraints, race_expression))
+        cache = getattr(self, "_guarded_query_cache", None)
+        if cache is None:
+            self._guarded_query_cache = cache = {}
+        if original not in cache:
+            cache[original] = guarded_division_normal_form(original)
+        return cache[original]
 
     @staticmethod
     def _race_query_cache_key(expression: BoolRef) -> tuple[int, int]:
