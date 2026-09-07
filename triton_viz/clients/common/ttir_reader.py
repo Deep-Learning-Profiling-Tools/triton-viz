@@ -873,14 +873,23 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
     # does not strip the positional flag off the tile operand next to it.
     prov: dict[str, dict[int, bool]] = {}
 
-    def _prov_of(ssa_names, position_preserving=True) -> dict[int, bool]:
+    def _prov_of(ssa_names, position_preserving=True, *, simultaneous=False) -> dict[int, bool]:
         merged: dict[int, bool] = {}
         for name in ssa_names:
             got = prov.get(name)
             if not got:
                 continue
             for idx, flag in got.items():
-                merged[idx] = merged.get(idx, True) and flag and position_preserving
+                positional = flag and position_preserving
+                if simultaneous:
+                    # All operands contribute to this element. A positional
+                    # path remains a dependency even if another path from
+                    # the SAME load permutes elements (e.g. x + rotate(x)).
+                    merged[idx] = merged.get(idx, False) or positional
+                else:
+                    # Alternatives must not borrow an inactive arm's
+                    # positional path. Keep their conservative intersection.
+                    merged[idx] = merged.get(idx, True) and positional
         return merged
 
     def _deps_of(*ssa_names) -> tuple[int, ...]:
@@ -1439,7 +1448,26 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
                     "tt.elementwise_inline_asm",
                 )
             )
-            merged = _prov_of(operands, position_preserving)
+            merged = _prov_of(
+                operands,
+                position_preserving,
+                simultaneous=position_preserving and not body.startswith("arith.select"),
+            )
+            selection = _RE_SELECT.match(body)
+            if selection:
+                # Only one value arm contributes. Preserve an arm-derived
+                # dependency unconditionally only if BOTH arms have it.
+                # The condition itself is evaluated at every position.
+                condition, true_arm, false_arm = selection.groups()
+                condition_prov = prov.get(condition, {})
+                true_prov = prov.get(true_arm, {})
+                false_prov = prov.get(false_arm, {})
+                for idx in merged:
+                    merged[idx] = condition_prov.get(idx, False) or (
+                        true_prov.get(idx, False) and false_prov.get(idx, False)
+                    )
+            elif body.startswith("arith.select"):
+                merged = {idx: False for idx in merged}
             if merged:
                 prov[res] = merged
 

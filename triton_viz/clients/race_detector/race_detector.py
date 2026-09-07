@@ -120,6 +120,9 @@ class PendingEvent(PendingCheck):
     # copy (block-pointer tile index vars); the flushed loop's iterators are
     # appended at flush time by _process_pending_check.
     copy_local_vars: tuple[Any, ...] = ()
+    # Reserve ordering when the access is captured, alongside barriers.
+    # Loop flush can happen much later (and inner loops flush first).
+    program_seq: int | None = None
 
 
 class RaceDetector(Client):
@@ -1524,6 +1527,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
         copy_local_vars: tuple[Any, ...] = (),
         active: Any = True,
         loop_flush: bool = False,
+        program_seq: int | None = None,
     ) -> None:
         if self._unsupported_capture:
             return
@@ -1599,7 +1603,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 local_constraints=local,
                 source_location=source_location,
                 grid_idx=None,
-                program_seq=self._next_program_seq(),
+                program_seq=self._next_program_seq() if program_seq is None else program_seq,
                 debug_name=self._debug_name(op_type, source_location),
                 active=active,
                 reads=access_mode == "read",
@@ -1867,7 +1871,11 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 return
             active_expr, mask_constraints = mask_result
 
-        z3_constraints = _and_constraints(ptr_constraints, mask_constraints)
+        z3_constraints = _and_constraints(
+            ptr_constraints,
+            mask_constraints,
+            *self._one_dimensional_lane_constraints(ptr_attr, mask_attr),
+        )
         source_location = capture_current_source_location()
 
         if not self.loop_stack:
@@ -1900,11 +1908,52 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                     op_type=op_type,
                     active=active_expr,
                     copy_local_vars=tile_vars,
+                    program_seq=self._next_program_seq(),
                 )
             )
         else:
             if cfg.verbose:
                 print(f"[{self.LOG_TAG}]  ↪ skip duplicated addr in loop")
+
+    @staticmethod
+    def _one_dimensional_lane_constraints(*roots: SymbolicExpr | None) -> tuple[Any, ...]:
+        """Couple independent aranges that denote the same 1-D position.
+
+        These are access-local facts, never launch-wide equalities between
+        creation sites: a source arange can participate in different tile
+        axes at other accesses. Restrict this normalization to uniformly
+        1-D, elementwise pointer/mask DAGs; do not guess through a reshape,
+        reduction, transpose, or a multidimensional intermediate.
+        """
+        allowed = (
+            set(SymbolicExpr.BINARY_OPS)
+            | set(SymbolicExpr.UNARY_OPS)
+            | set(SymbolicExpr.CAST_OPS)
+            | {"const", "pid", "arange", "load", "addptr", "where", "splat", "broadcast"}
+        )
+        seen: set[int] = set()
+        ranges: list[SymbolicExpr] = []
+        extents: set[int] = set()
+        stack = [root for root in roots if root is not None]
+        while stack:
+            node = stack.pop()
+            if id(node) in seen:
+                continue
+            seen.add(id(node))
+            if node.op not in allowed or len(node.shape) > 1:
+                return ()
+            if node.shape and node.shape[0] != 1:
+                extents.add(node.shape[0])
+            if node.op == "arange":
+                ranges.append(node)
+            stack.extend(child for child in node.children.values() if child is not None)
+        if len(ranges) < 2 or len(extents) != 1:
+            return ()
+        extent = next(iter(extents))
+        if any(node.shape != (extent,) for node in ranges):
+            return ()
+        coordinates = [node._to_z3()[0] - node.start.to_py() for node in ranges]
+        return tuple(coord == coordinates[0] for coord in coordinates[1:])
 
     def _handle_atomic_cas_check(
         self,
@@ -2184,6 +2233,7 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             ),
             active=pending.active,
             loop_flush=True,
+            program_seq=pending.program_seq,
         )
 
 
