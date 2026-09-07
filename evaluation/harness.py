@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from types import FrameType
 from typing import Any
 
 from evaluation.spec import LaunchSpec
@@ -210,7 +211,7 @@ def _watchdog(seconds: float):
         return
 
     previous_trace = sys.gettrace()
-    traced_frames = []
+    previous_frame_traces = {}
 
     def _checkpoint(frame, event, arg):  # noqa: ARG001
         if timing["cancellation_at"] is not None:
@@ -235,7 +236,10 @@ def _watchdog(seconds: float):
         # No tracing cost before expiry. Existing frames need f_trace as well
         # as the global hook; all original hooks are restored in finally.
         while frame is not None:
-            traced_frames.append((frame, frame.f_trace))
+            # Do not retain frame objects: that would keep large native AST
+            # graphs alive through unwinding and move their destruction into
+            # watchdog teardown. Only surviving frames need hook restoration.
+            previous_frame_traces[id(frame)] = frame.f_trace
             frame.f_trace = _checkpoint
             frame = frame.f_back
         sys.settrace(_checkpoint)
@@ -274,9 +278,12 @@ def _watchdog(seconds: float):
         signal.setitimer(signal.ITIMER_REAL, 0)
         if timing["checkpoint_armed"]:
             sys.settrace(previous_trace)
-            for frame, previous in traced_frames:
-                frame.f_trace = previous
-            traced_frames.clear()
+            frame: FrameType | None = sys._getframe()
+            while frame is not None:
+                if id(frame) in previous_frame_traces:
+                    frame.f_trace = previous_frame_traces[id(frame)]
+                frame = frame.f_back
+            previous_frame_traces.clear()
         stopped.set()
         if thread_started:
             interrupter.join()
