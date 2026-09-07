@@ -687,6 +687,8 @@ class _RaceEnv:
             why = "not captured"
         elif base in self.unusable_sources:
             why = self.unusable_sources[base]
+        elif not meta.contiguous:
+            why = "non-contiguous"
         elif meta.snapshot is None:
             why = meta.snapshot_reason or "no snapshot"
         elif meta.allocation_interval() != (

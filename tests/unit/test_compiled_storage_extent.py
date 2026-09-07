@@ -196,6 +196,23 @@ def test_partial_storage_snapshot_cannot_hide_valid_unsnapshotted_loads():
         encode_graph(graph, {}, tensors, multipath=True)
 
 
+def test_explicit_noncontiguous_snapshot_cannot_enable_content_model():
+    base = torch.arange(16, dtype=torch.int32).reshape(4, 4)
+    tensors = _capture(
+        idx_ptr=base.T,
+        x_ptr=torch.zeros(16, dtype=torch.int32),
+        out_ptr=torch.zeros(64, dtype=torch.int32),
+    )
+    # Direct GlobalTensor callers must not turn a logical-order flattening
+    # into a physical-address snapshot by merely supplying element values.
+    tensors["idx_ptr"] = replace(
+        tensors["idx_ptr"], snapshot=tuple(base.T.reshape(-1).tolist())
+    )
+    graph = parse_ttir(SCATTER, multipath=True)
+    with pytest.raises(UnsupportedTTIR, match="non-contiguous"):
+        encode_graph(graph, {}, tensors, multipath=True)
+
+
 def test_missing_storage_metadata_retains_legacy_contiguous_control():
     legacy = GlobalTensor(data_ptr=0x1000, elem_size=4, numel=12)
     assert _store_result(legacy, 11)[2]
