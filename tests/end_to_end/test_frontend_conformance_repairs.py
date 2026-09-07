@@ -75,7 +75,9 @@ def _loop_barriers(temp, out, FENCED: tl.constexpr):
 
 
 def test_loop_fences_order_store_and_permuted_load():
-    assert _run(_loop_barriers, torch.zeros(16), torch.zeros(32), True).last_reports == []
+    assert (
+        _run(_loop_barriers, torch.zeros(16), torch.zeros(32), True).last_reports == []
+    )
 
 
 def test_unfenced_loop_still_reports_conflict():
@@ -136,6 +138,33 @@ def test_boolean_mask_retains_both_tensor_operands(use_and):
     assert _run(_boolean_mask, torch.zeros(12), use_and).last_reports == []
 
 
+@pytest.mark.parametrize("use_and", [True, False])
+def test_concrete_enumeration_uses_same_boolean_mask_semantics(use_and):
+    from triton_viz.clients.race_detector.concrete_enum import enumerate_launch
+
+    result = enumerate_launch(
+        _boolean_mask, (torch.zeros(12),), {"USE_AND": use_and}, (2,)
+    )
+    assert result.status == "ok", result.reason
+    assert result.reports == []
+
+
+@triton.jit
+def _boolean_or_collision(out):
+    col = tl.arange(0, 8)
+    mask = (col < 0) or (col < 4)
+    tl.store(out + col % 2, 1, mask)
+
+
+def test_tensor_or_cannot_drop_the_active_collision_arm():
+    from triton_viz.clients.race_detector.concrete_enum import enumerate_launch
+
+    assert _run(_boolean_or_collision, torch.zeros(8), grid=(1,)).last_reports
+    triton_viz.clear()
+    result = enumerate_launch(_boolean_or_collision, (torch.zeros(8),), {}, (1,))
+    assert result.status == "races", result.reason
+
+
 def test_boolean_helper_preserves_constexpr_short_circuit():
     from triton_viz.core.frontend.triton import _triton_boolean_operator
 
@@ -150,8 +179,10 @@ def test_boolean_helper_evaluates_each_nonshortcircuited_operand_once():
     from triton_viz.core.frontend.triton import _triton_boolean_operator
 
     seen = []
+
     def operand(value):
         seen.append(value)
         return value
+
     assert _triton_boolean_operator(True, lambda: operand(1), lambda: operand(2)) == 2
     assert seen == [1, 2]

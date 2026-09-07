@@ -7,21 +7,23 @@ from .test_t1_rmw_static import _module
 
 
 def _graph(combine):
-    return parse_ttir(_module(
-        "%x: !tt.ptr<f32>, %cond: i1",
-        "%r = tt.make_range {end = 4 : i32, start = 0 : i32} : tensor<4xi32>",
-        "%xs = tt.splat %x : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>",
-        "%p = tt.addptr %xs, %r : tensor<4x!tt.ptr<f32>>, tensor<4xi32>",
-        "%v = tt.load %p : tensor<4x!tt.ptr<f32>>",
-        "%reshaped = tt.reshape %v : tensor<4xf32> -> tensor<2x2xf32>",
-        "%transposed = tt.trans %reshaped {order = array<i32: 1, 0>} : tensor<2x2xf32> -> tensor<2x2xf32>",
-        "%rotated = tt.reshape %transposed : tensor<2x2xf32> -> tensor<4xf32>",
-        "%cs = tt.splat %cond : i1 -> tensor<4xi1>",
-        "%zero = arith.constant dense<0.0> : tensor<4xf32>",
-        "%loaded_cond = arith.cmpf ogt, %v, %zero : tensor<4xf32>",
-        combine,
-        "tt.store %p, %out : tensor<4x!tt.ptr<f32>>",
-    ))
+    return parse_ttir(
+        _module(
+            "%x: !tt.ptr<f32>, %cond: i1",
+            "%r = tt.make_range {end = 4 : i32, start = 0 : i32} : tensor<4xi32>",
+            "%xs = tt.splat %x : !tt.ptr<f32> -> tensor<4x!tt.ptr<f32>>",
+            "%p = tt.addptr %xs, %r : tensor<4x!tt.ptr<f32>>, tensor<4xi32>",
+            "%v = tt.load %p : tensor<4x!tt.ptr<f32>>",
+            "%reshaped = tt.reshape %v : tensor<4xf32> -> tensor<2x2xf32>",
+            "%transposed = tt.trans %reshaped {order = array<i32: 1, 0>} : tensor<2x2xf32> -> tensor<2x2xf32>",
+            "%rotated = tt.reshape %transposed : tensor<2x2xf32> -> tensor<4xf32>",
+            "%cs = tt.splat %cond : i1 -> tensor<4xi1>",
+            "%zero = arith.constant dense<0.0> : tensor<4xf32>",
+            "%loaded_cond = arith.cmpf ogt, %v, %zero : tensor<4xf32>",
+            combine,
+            "tt.store %p, %out : tensor<4x!tt.ptr<f32>>",
+        )
+    )
 
 
 @pytest.mark.parametrize("operands", ["%v, %rotated", "%rotated, %v"])
@@ -53,7 +55,9 @@ def test_select_keeps_dependency_present_in_both_arms():
 
 
 def test_select_condition_is_an_unconditional_positional_operand():
-    graph = _graph("%out = arith.select %loaded_cond, %rotated, %zero : tensor<4xi1>, tensor<4xf32>")
+    graph = _graph(
+        "%out = arith.select %loaded_cond, %rotated, %zero : tensor<4xi1>, tensor<4xf32>"
+    )
     assert graph.accesses[-1].deps == (0,)
 
 
@@ -62,16 +66,28 @@ def test_unrecognized_select_syntax_cannot_invent_dependencies():
     assert graph.accesses[-1].deps == ()
 
 
-@pytest.mark.parametrize("operation,racy", [
-    ("arith.addf %v, %rotated : tensor<4xf32>", False),
-    ("arith.addf %rotated, %rotated : tensor<4xf32>", True),
-    ("arith.select %cs, %v, %rotated : tensor<4xi1>, tensor<4xf32>", True),
-])
+@pytest.mark.parametrize(
+    "operation,racy",
+    [
+        ("arith.addf %v, %rotated : tensor<4xf32>", False),
+        ("arith.addf %rotated, %rotated : tensor<4xf32>", True),
+        ("arith.select %cs, %v, %rotated : tensor<4xi1>, tensor<4xf32>", True),
+    ],
+)
 def test_dependency_reaches_solver_without_hiding_permuted_conflicts(operation, racy):
-    from triton_viz.clients.race_detector.compiled.global_records import GlobalTensor, encode_graph
-    from triton_viz.clients.race_detector.two_copy_symbolic_hb_solver import TwoCopySymbolicHBSolver
+    from triton_viz.clients.race_detector.compiled.global_records import (
+        GlobalTensor,
+        encode_graph,
+    )
+    from triton_viz.clients.race_detector.two_copy_symbolic_hb_solver import (
+        TwoCopySymbolicHBSolver,
+    )
 
     graph = _graph(f"%out = {operation}")
-    encoded = encode_graph(graph, {"cond": 1}, {"x": GlobalTensor(data_ptr=4096, elem_size=4, numel=4)})
-    solver = TwoCopySymbolicHBSolver(encoded.records, grid=(1,), arange_dict=encoded.arange_dict, fence_order=True)
+    encoded = encode_graph(
+        graph, {"cond": 1}, {"x": GlobalTensor(data_ptr=4096, elem_size=4, numel=4)}
+    )
+    solver = TwoCopySymbolicHBSolver(
+        encoded.records, grid=(1,), arange_dict=encoded.arange_dict, fence_order=True
+    )
     assert bool(solver.find_races()) is racy

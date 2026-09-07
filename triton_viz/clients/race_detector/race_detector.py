@@ -34,6 +34,7 @@ from ...core.data import (
 )
 from ..symbolic_engine import (
     SymbolicExpr,
+    ArangeSymbolicExpr,
     LoadSymbolicExpr,
     AtomicCasSymbolicExpr,
     AtomicRmwSymbolicExpr,
@@ -1603,7 +1604,9 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 local_constraints=local,
                 source_location=source_location,
                 grid_idx=None,
-                program_seq=self._next_program_seq() if program_seq is None else program_seq,
+                program_seq=self._next_program_seq()
+                if program_seq is None
+                else program_seq,
                 debug_name=self._debug_name(op_type, source_location),
                 active=active,
                 reads=access_mode == "read",
@@ -1916,8 +1919,10 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 print(f"[{self.LOG_TAG}]  ↪ skip duplicated addr in loop")
 
     @staticmethod
-    def _one_dimensional_lane_constraints(*roots: SymbolicExpr | None) -> tuple[Any, ...]:
-        """Couple independent aranges that denote the same 1-D position.
+    def _one_dimensional_lane_constraints(
+        *roots: SymbolicExpr | None,
+    ) -> tuple[Any, ...]:
+        """Couple independent arange calls denoting the same 1-D position.
 
         These are access-local facts, never launch-wide equalities between
         creation sites: a source arange can participate in different tile
@@ -1929,10 +1934,19 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             set(SymbolicExpr.BINARY_OPS)
             | set(SymbolicExpr.UNARY_OPS)
             | set(SymbolicExpr.CAST_OPS)
-            | {"const", "pid", "arange", "load", "addptr", "where", "splat", "broadcast"}
+            | {
+                "const",
+                "pid",
+                "arange",
+                "load",
+                "addptr",
+                "where",
+                "splat",
+                "broadcast",
+            }
         )
         seen: set[int] = set()
-        ranges: list[SymbolicExpr] = []
+        ranges: list[ArangeSymbolicExpr] = []
         extents: set[int] = set()
         stack = [root for root in roots if root is not None]
         while stack:
@@ -1944,9 +1958,13 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
                 return ()
             if node.shape and node.shape[0] != 1:
                 extents.add(node.shape[0])
-            if node.op == "arange":
+            if isinstance(node, ArangeSymbolicExpr):
                 ranges.append(node)
-            stack.extend(child for child in node.children.values() if child is not None)
+            for child in node.children.values():
+                if isinstance(child, tuple):
+                    stack.extend(child)
+                elif child is not None:
+                    stack.append(child)
         if len(ranges) < 2 or len(extents) != 1:
             return ()
         extent = next(iter(extents))

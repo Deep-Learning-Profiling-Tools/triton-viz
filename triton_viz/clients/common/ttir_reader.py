@@ -873,7 +873,9 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
     # does not strip the positional flag off the tile operand next to it.
     prov: dict[str, dict[int, bool]] = {}
 
-    def _prov_of(ssa_names, position_preserving=True, *, simultaneous=False) -> dict[int, bool]:
+    def _prov_of(
+        ssa_names, position_preserving=True, *, simultaneous=False
+    ) -> dict[int, bool]:
         merged: dict[int, bool] = {}
         for name in ssa_names:
             got = prov.get(name)
@@ -1451,7 +1453,8 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
             merged = _prov_of(
                 operands,
                 position_preserving,
-                simultaneous=position_preserving and not body.startswith("arith.select"),
+                simultaneous=position_preserving
+                and not body.startswith("arith.select"),
             )
             selection = _RE_SELECT.match(body)
             if selection:

@@ -268,7 +268,9 @@ class _TritonBooleanTransformer(ast.NodeTransformer):
         node = self.generic_visit(node)
         thunks = [
             ast.Lambda(
-                args=ast.arguments(posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]),
+                args=ast.arguments(
+                    posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]
+                ),
                 body=value,
             )
             for value in node.values
@@ -425,7 +427,9 @@ class TritonFrontend(Frontend):
             ast.Name(id=self._loop_wrapper_arg, ctx=ast.Load())
         )
         node.args.kwonlyargs.append(ast.arg(arg=self._boolean_wrapper_arg))
-        node.args.kw_defaults.append(ast.Name(id=self._boolean_wrapper_arg, ctx=ast.Load()))
+        node.args.kw_defaults.append(
+            ast.Name(id=self._boolean_wrapper_arg, ctx=ast.Load())
+        )
         return ast.fix_missing_locations(node)
 
     def loop_iter_wrapper(

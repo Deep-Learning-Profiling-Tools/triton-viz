@@ -46,18 +46,25 @@ def main():
     inputs = {}
     for name, value in bound.items():
         if isinstance(value, torch.Tensor):
-            tensor = value.detach().cpu().contiguous().view(torch.uint8)
+            tensor = value.detach().cpu().contiguous().reshape(-1).view(torch.uint8)
             inputs[name] = {
-                "shape": list(value.shape), "stride": list(value.stride()),
-                "dtype": str(value.dtype), "logical_bytes_sha256": sha256(tensor.numpy().tobytes()),
+                "shape": list(value.shape),
+                "stride": list(value.stride()),
+                "dtype": str(value.dtype),
+                "logical_bytes_sha256": sha256(tensor.numpy().tobytes()),
             }
         else:
             inputs[name] = {"scalar": repr(value)}
     source = inspect.getsource(spec.kernel_fn.fn)
     result = {
-        "kind": "conformance-diagnostic-not-timing", "name": ns.name,
-        "corpus": ns.corpus, "track": ns.track, "ladder_level": "L2",
-        "grid": list(spec.grid), "seed": 0, "inputs": inputs,
+        "kind": "conformance-diagnostic-not-timing",
+        "name": ns.name,
+        "corpus": ns.corpus,
+        "track": ns.track,
+        "ladder_level": "L2",
+        "grid": list(spec.grid),
+        "seed": 0,
+        "inputs": inputs,
         "kernel_source_sha256": sha256(source.encode()),
     }
     if ns.track == "static":
@@ -68,19 +75,29 @@ def main():
         result["ttir_path"] = str(ns.ttir.resolve())
         graph = parse_ttir(ttir, multipath=True)
         result["dependencies"] = [
-            {"access": i, "kind": a.kind, "line": a.line_no,
-             "source": None if a.loc is None else [a.loc.file, a.loc.line, a.loc.col],
-             "deps": list(getattr(a, "deps", ()))}
+            {
+                "access": i,
+                "kind": a.kind,
+                "line": a.line_no,
+                "source": None
+                if a.loc is None
+                else [a.loc.file, a.loc.line, a.loc.col],
+                "deps": list(getattr(a, "deps", ())),
+            }
             for i, a in enumerate(graph.accesses)
         ]
-        det = CompiledRaceDetector(confirm_races=False, differential_check=False, ladder_level=LadderLevel.L2)
+        det = CompiledRaceDetector(
+            confirm_races=False, differential_check=False, ladder_level=LadderLevel.L2
+        )
         det.pre_warmup_callback(spec.kernel_fn, grid=spec.grid, **bound)
         det.post_warmup_callback(spec.kernel_fn, SimpleNamespace(asm={"ttir": ttir}))
         det.finalize()
         result["result"] = _static_result(det, 0.0, None)
         result["result"].pop("time_s", None)
     else:
-        result["result"] = _dynamic_track(replace(spec, make_args=lambda seed: args), 0, LadderLevel.L2)
+        result["result"] = _dynamic_track(
+            replace(spec, make_args=lambda seed: args), 0, LadderLevel.L2
+        )
     ns.out.parent.mkdir(parents=True, exist_ok=True)
     ns.out.write_text(json.dumps(result, indent=2, sort_keys=True) + "\n")
     print(json.dumps({"name": ns.name, "track": ns.track, "result": result["result"]}))
