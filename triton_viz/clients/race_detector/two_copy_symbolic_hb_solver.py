@@ -865,7 +865,10 @@ class TwoCopySymbolicHBSolver:
             return True
         # Read/read pairs (and structurally exempt atomic pairs) have no
         # conflict independently of their potentially large address DAGs.
-        if is_true(simplify(Not(conflicting_access_modes(a, b)))):
+        if (
+            self._ordinary_access_mode(a) is None
+            or self._ordinary_access_mode(b) is None
+        ) and is_true(simplify(Not(conflicting_access_modes(a, b)))):
             return True
         features = getattr(self, "_conflict_precheck_events", None)
         if features is None:
@@ -1668,6 +1671,14 @@ class TwoCopySymbolicHBSolver:
         )
 
     def _conflict(self, a: SymbolicMemoryEvent, b: SymbolicMemoryEvent) -> BoolRef:
+        mode_a = self._ordinary_access_mode(a)
+        mode_b = self._ordinary_access_mode(b)
+        if mode_a is not None and mode_b is not None:
+            if not (mode_a or mode_b):
+                return BoolVal(False)
+            # Lowering already includes activity in the ordinary read/write
+            # mode. Under the two activity guards the mode predicate is True.
+            return And(a.active, b.active, self._byte_overlap(a, b))
         return And(
             a.active,
             b.active,
@@ -1675,12 +1686,31 @@ class TwoCopySymbolicHBSolver:
             conflicting_access_modes(a, b),
         )
 
+    @staticmethod
+    def _ordinary_access_mode(event: SymbolicMemoryEvent) -> bool | None:
+        """Recognize exact lowered plain modes, without assuming an op's kind.
+
+        Identity with the immutable activity expression is sufficient; unknown
+        or conditional modes and atomics retain the general conflict formula.
+        """
+        if event.is_atomic:
+            return None
+        if event.writes is event.active and is_false(event.reads):
+            return True
+        if event.reads is event.active and is_false(event.writes):
+            return False
+        return None
+
     def _race_expr(self, a: SymbolicMemoryEvent, b: SymbolicMemoryEvent) -> BoolRef:
-        return And(
-            self._conflict(a, b),
-            Not(self.hb[a.idx][b.idx]),
-            Not(self.hb[b.idx][a.idx]),
-        )
+        forward, reverse = self.hb[a.idx][b.idx], self.hb[b.idx][a.idx]
+        if is_true(forward) or is_true(reverse):
+            return BoolVal(False)
+        terms = [self._conflict(a, b)]
+        if not is_false(forward):
+            terms.append(Not(forward))
+        if not is_false(reverse):
+            terms.append(Not(reverse))
+        return terms[0] if len(terms) == 1 else And(*terms)
 
     # ──────────────────── modeled-atomic coherence ────────────────────
 

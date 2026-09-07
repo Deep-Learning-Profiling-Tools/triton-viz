@@ -187,7 +187,11 @@ def _watchdog(seconds: float):
         raise TimeoutError(f"dynamic track exceeded {seconds}s")
 
     old_handler = signal.signal(signal.SIGALRM, _fire)
-    old_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
+    # Native cleanup and best-effort fallback handlers can swallow a delivered
+    # TimeoutError. Keep interrupting after the deadline until this context
+    # exits, rather than spending the rest of the row budget after one lost
+    # alarm. The outer process watchdog remains the hard containment boundary.
+    old_timer = signal.setitimer(signal.ITIMER_REAL, seconds, min(seconds, 0.1))
     started = time.monotonic()
     try:
         yield
@@ -373,6 +377,12 @@ def _dynamic_track(
     except Exception as e:  # noqa: BLE001
         error = f"{type(e).__name__}: {e}"
     elapsed = time.perf_counter() - t0
+    # A handler may have swallowed the alarm, or native work may have delayed
+    # its delivery. Completion after the declared budget is never a credited
+    # interpreter result, even if no TimeoutError reached the handler above.
+    if elapsed >= DYNAMIC_TIMEOUT_S:
+        timed_out = True
+        error = f"dynamic track exceeded {DYNAMIC_TIMEOUT_S}s"
     witnesses = [
         {
             "first": rep.first_record.source_location,
