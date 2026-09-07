@@ -24,7 +24,10 @@ reported as a definite race. Their event ids are returned in
 ``uncertain_event_ids`` and the client downgrades such reports.
 
 Model boundary — the IN-BOUNDS premise: every record carries its tensor's
-allocation bounds (``base ≤ addr < base + numel·elem``) as constraints.
+captured storage bounds (``storage_base ≤ addr`` and
+``addr + elem ≤ storage_base + storage_nbytes``) as constraints.
+Legacy metadata without storage information supports contiguous tensors
+only, using their logical byte interval.
 With an unbounded symbolic grid, offsets would otherwise stray
 arithmetically into OTHER tensors' address ranges and fabricate
 cross-tensor races no launch can produce; real aliasing (two args sharing
@@ -131,10 +134,9 @@ class GlobalTensor:
     data_ptr: int
     elem_size: int  # bytes
     numel: int
-    # The in-bounds premise equates the allocation extent with numel·elem,
-    # which UNDERSTATES a strided view's footprint (legal accesses past
-    # numel would be deactivated — a false proof). Non-contiguous tensors
-    # therefore fail closed.
+    # Contiguity still controls value snapshots. A non-contiguous view
+    # needs independently captured storage bounds for its address model:
+    # numel·elem can understate its physical footprint and hide a race.
     contiguous: bool = True
     # PRE-LAUNCH element values for small integer tensors (spec part B):
     # captured at pre_warmup — before the real kernel mutates the storage —
@@ -149,6 +151,36 @@ class GlobalTensor:
     # too large, non-contiguous), so the refusal can say so.
     snapshot: tuple[int, ...] | None = None
     snapshot_reason: str = ""
+    # Absolute allocation interval, independent of the view's data_ptr,
+    # shape and strides. data_ptr already includes storage_offset; never
+    # add that offset again when lowering a TTIR pointer expression.
+    storage_data_ptr: int | None = None
+    storage_nbytes: int | None = None
+
+    def allocation_interval(self) -> tuple[int, int] | None:
+        """Verified byte bounds, or None when the address extent is unknown.
+
+        Keep the legacy contiguous metadata surface for callers without
+        storage information. Partial or invalid explicit metadata never
+        falls back to numel, which could silently deactivate valid accesses.
+        """
+        if self.elem_size <= 0 or self.numel < 0 or self.data_ptr < 0:
+            return None
+        if self.storage_data_ptr is None and self.storage_nbytes is None:
+            if not self.contiguous:
+                return None
+            return self.data_ptr, self.data_ptr + self.numel * self.elem_size
+        if self.storage_data_ptr is None or self.storage_nbytes is None:
+            return None
+        start, size = self.storage_data_ptr, self.storage_nbytes
+        end = start + size
+        if start < 0 or size < 0 or not start <= self.data_ptr <= end:
+            return None
+        if self.numel and self.data_ptr + self.elem_size > end:
+            return None
+        if self.contiguous and self.data_ptr + self.numel * self.elem_size > end:
+            return None
+        return start, end
 
 
 class _InitValueTensor:
@@ -657,6 +689,16 @@ class _RaceEnv:
             why = self.unusable_sources[base]
         elif meta.snapshot is None:
             why = meta.snapshot_reason or "no snapshot"
+        elif meta.allocation_interval() != (
+            meta.data_ptr,
+            meta.data_ptr + meta.numel * meta.elem_size,
+        ):
+            # Consumers assert the snapshot's 0 <= off < numel domain as
+            # their source in-bounds premise. A partial-storage view does
+            # not cover every now-legal load; retaining that premise would
+            # hide valid accesses outside the captured values. Do not grow
+            # snapshots or invent those values: keep the source free.
+            why = "snapshot covers only a tensor view, not its allocation"
         if why is not None:
             self.unusable_sources.setdefault(base, why)
             return None
@@ -921,9 +963,14 @@ def _record_for(
             )
         addr = IntVal(meta.data_ptr) + addr_off * IntVal(elem)
         # The in-bounds premise (see the module docstring's model boundary).
+        interval = meta.allocation_interval()
+        if interval is None:
+            raise UnsupportedTTIR(
+                f"unavailable allocation extent for tensor {access.base_param!r}"
+            )
         bounds = (
-            addr >= IntVal(meta.data_ptr),
-            addr < IntVal(meta.data_ptr + meta.numel * meta.elem_size),
+            addr >= IntVal(interval[0]),
+            addr + IntVal(elem) <= IntVal(interval[1]),
         )
     else:
         addr = addr_off * IntVal(elem)
@@ -1160,10 +1207,11 @@ def encode_graph(
             raise UnsupportedTTIR(
                 f"missing tensor metadata for base pointer {access.base_param!r}"
             )
-        if not meta.contiguous:
+        if meta.allocation_interval() is None:
+            layout = "non-contiguous " if not meta.contiguous else ""
             raise UnsupportedTTIR(
-                f"non-contiguous tensor {access.base_param!r}: the in-bounds "
-                "premise needs the allocation extent (v1 assumes contiguous)"
+                f"{layout}tensor {access.base_param!r}: the in-bounds "
+                "premise needs a verified allocation extent"
             )
         rec = _record_for(
             access, seq, env, graph.kernel_name, meta, await_prems, await_obs
@@ -1238,7 +1286,7 @@ def _written_load_sources(
         m = tensors.get(name)
         if m is None:
             return None
-        return (m.data_ptr, m.data_ptr + m.numel * m.elem_size)
+        return m.allocation_interval()
 
     out: dict[str, str] = {}
     for src in sorted(sources):

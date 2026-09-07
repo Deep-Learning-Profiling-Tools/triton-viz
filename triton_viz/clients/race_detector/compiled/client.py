@@ -242,11 +242,11 @@ class CompiledRaceDetector(Client):
             self._launch_grid = kwargs.get("grid")
             for name, value in bound:
                 if hasattr(value, "data_ptr"):
-                    # contiguous defaults to False when unverifiable: the
-                    # in-bounds premise is only sound for contiguous storage
-                    # (numel·elem understates a strided view's extent).
+                    # Value snapshots still require contiguity. Address
+                    # bounds use the allocation independently of view layout.
                     is_contig = getattr(value, "is_contiguous", None)
                     contiguous = bool(is_contig()) if is_contig else False
+                    storage_ptr, storage_nbytes = self._capture_storage_extent(value)
                     snapshot, why = (
                         self._capture_snapshot(value, contiguous)
                         if self.ladder_level >= LadderLevel.L2
@@ -260,6 +260,8 @@ class CompiledRaceDetector(Client):
                         init_values=self._capture_init_values(value, contiguous),
                         snapshot=snapshot,
                         snapshot_reason=why,
+                        storage_data_ptr=storage_ptr,
+                        storage_nbytes=storage_nbytes,
                     )
                 elif isinstance(value, bool):
                     self._launch_params[name] = int(value)
@@ -271,6 +273,19 @@ class CompiledRaceDetector(Client):
                 self._snapshot_launch(jit_fn, args, kwargs)
         except Exception as e:  # noqa: BLE001
             self._capture_error = f"{type(e).__name__}: {e}"
+
+    @staticmethod
+    def _capture_storage_extent(value: Any) -> tuple[int | None, int | None]:
+        """Read allocation metadata without copying or inspecting tensor values.
+
+        Tensor data_ptr is the view origin; the storage pointer can precede
+        it. Missing storage metadata keeps non-contiguous inputs unsupported.
+        """
+        try:
+            storage = value.untyped_storage()
+            return int(storage.data_ptr()), int(storage.nbytes())
+        except Exception:  # noqa: BLE001 — duck-typed legacy tensor arguments
+            return None, None
 
     # Pre-launch value capture for the RMW rf-init/counting machinery
     # (spec part B): small integer tensors only — mirrors the solver's
@@ -386,15 +401,20 @@ class CompiledRaceDetector(Client):
         names = list(getattr(jit_fn, "arg_names", None) or [])
         snap_bound = list(zip(names, self._snapshot_args))
         snap_bound += [(k, v) for k, v in self._snapshot_kwargs.items() if k in names]
-        self._snapshot_tensors = {
-            name: GlobalTensor(
+        self._snapshot_tensors = {}
+        for name, v in snap_bound:
+            if not hasattr(v, "data_ptr"):
+                continue
+            storage_ptr, storage_nbytes = self._capture_storage_extent(v)
+            is_contiguous = getattr(v, "is_contiguous", None)
+            self._snapshot_tensors[name] = GlobalTensor(
                 data_ptr=int(v.data_ptr()),
                 elem_size=int(v.element_size()),
                 numel=int(v.numel()),
+                contiguous=bool(is_contiguous()) if is_contiguous else False,
+                storage_data_ptr=storage_ptr,
+                storage_nbytes=storage_nbytes,
             )
-            for name, v in snap_bound
-            if hasattr(v, "data_ptr")
-        }
 
     def post_warmup_callback(self, jit_fn: Callable, ret: Any) -> None:
         asm = getattr(ret, "asm", None)
@@ -1437,18 +1457,18 @@ class CompiledRaceDetector(Client):
         """A T0 proof partitions accesses per base pointer — the
         NON-ALIASING premise. It may stand in for THIS launch's verdict only
         when the launch demonstrably satisfies it: every accessed base has
-        captured, contiguous metadata and the allocation intervals
-        [data_ptr, data_ptr + numel·elem) are pairwise disjoint. An aliased
+        captured allocation intervals that are pairwise disjoint. An aliased
         (e.g. in-place) or unverifiable launch falls through to T1, which
         uses the real bases — reporting the aliased race — or fails closed."""
         intervals = []
         for name in {a.base_param for a in graph.accesses}:
             meta = tensors.get(name)
-            if meta is None or not meta.contiguous:
+            if meta is None:
                 return False
-            intervals.append(
-                (meta.data_ptr, meta.data_ptr + meta.numel * meta.elem_size)
-            )
+            interval = meta.allocation_interval()
+            if interval is None:
+                return False
+            intervals.append(interval)
         intervals.sort()
         return all(s2 >= e1 for (_, e1), (s2, _) in zip(intervals, intervals[1:]))
 
