@@ -334,6 +334,7 @@ class TwoCopySymbolicHBSolver:
         launch_ceiling: bool = False,
         fence_seqs: tuple[float, ...] = (),
         fence_order: bool = False,
+        token_order: dict[tuple[int, int], Any] | None = None,
     ) -> None:
         self.records = list(records)
         # Fence-ordered intra-instance semantics (paper design-fence-order.md,
@@ -346,6 +347,13 @@ class TwoCopySymbolicHBSolver:
         # the legacy reading (every earlier operation orders every later one).
         self.fence_seqs: tuple[float, ...] = tuple(sorted(float(x) for x in fence_seqs))
         self.fence_order = bool(fence_order)
+        # cuTile supplies transitive token reachability between SOURCE
+        # program_seq positions, guarded by scalar per-instance conditions.
+        # None selects Triton's fence/dependency rules; even an empty mapping
+        # selects token-only order when fence_order is enabled. The reader
+        # must retain paths through masked accesses and reject unsupported
+        # loop summaries; token order does not imply source-wide barriers.
+        self.token_order = None if token_order is None else dict(token_order)
         # Dependency order (D2/D3): unordered record pairs (load, dependent)
         # whose same-position accesses are ordered by causality. Consulted
         # only under fence order; the legacy reading already orders them.
@@ -441,6 +449,7 @@ class TwoCopySymbolicHBSolver:
             arange_constraints=self.arange_constraints_b,
             copy_local_substitutions=tuple(copy_local_subs_b),
         )
+        self._token_guards = self._make_token_guards()
 
         # 6. Lower every record under both contexts.
         self.events: list[SymbolicMemoryEvent] = self._lower_two_copies()
@@ -1000,6 +1009,16 @@ class TwoCopySymbolicHBSolver:
         if a.program_seq >= 0 and b.program_seq >= 0 and a.program_seq != b.program_seq:
             if not self.fence_order:
                 return None
+            if self.token_order is not None:
+                ordered = simplify(
+                    Or(
+                        self._token_order_condition(a, b),
+                        self._token_order_condition(b, a),
+                    )
+                )
+                # Conditional token paths order only the executions where
+                # their guard holds. Keep the complementary intra query.
+                return None if is_true(ordered) else Not(ordered)
             if self._fence_between(a.program_seq, b.program_seq):
                 return None
             if (a.event_id, b.event_id) in self.dep_pairs or (
@@ -1307,6 +1326,49 @@ class TwoCopySymbolicHBSolver:
 
     # ──────────────────────── Edges & HB closure ────────────────────────
 
+    def _make_token_guards(self) -> dict[str, dict[tuple[int, int], BoolRef]]:
+        guards: dict[str, dict[tuple[int, int], BoolRef]] = {"a": {}, "b": {}}
+        if not self.fence_order or self.token_order is None:
+            return guards
+        lane_keys = {
+            _z3_var_key(var) for var, _ in self.ctx_a.arange_substitutions
+        }
+        for pair, condition in self.token_order.items():
+            if (
+                not isinstance(pair, tuple)
+                or len(pair) != 2
+                or not all(isinstance(seq, int) and seq >= 0 for seq in pair)
+                or pair[0] == pair[1]
+            ):
+                raise ValueError(
+                    "token-order: expected distinct known operation positions"
+                )
+            if not isinstance(condition, (bool, BoolRef)):
+                raise ValueError("token-order: path guard must be a scalar condition")
+            condition = as_bool(condition)
+            if lane_keys & _collect_z3_var_keys((condition,)):
+                raise ValueError(
+                    "token-order: path guard must be uniform across tile lanes"
+                )
+            for ctx in (self.ctx_a, self.ctx_b):
+                guards[ctx.label][pair] = apply_sub(
+                    condition, ctx.pid_substitutions + ctx.copy_local_substitutions
+                )
+        return guards
+
+    def _token_order_condition(
+        self, first: SymbolicMemoryEvent, second: SymbolicMemoryEvent
+    ) -> BoolRef:
+        """Token path guard in the first event's instance (no activity gate).
+
+        The intra query uses both copies with pids and copy-local variables
+        pinned equal. Tile lanes remain independent, so token guards must
+        not depend on lane variables.
+        """
+        return self._token_guards[first.copy].get(
+            (first.program_seq, second.program_seq), BoolVal(False)
+        )
+
     def _fence_between(self, seq1: float, seq2: float) -> bool:
         """True when a captured tile-level fence lies strictly between the
         two program_seq positions (both orientations accepted)."""
@@ -1320,6 +1382,8 @@ class TwoCopySymbolicHBSolver:
             return BoolVal(False)
         if e1.program_seq < 0 or e2.program_seq < 0:
             return BoolVal(False)
+        if self.fence_order and self.token_order is not None:
+            return And(e1.active, e2.active, self._token_order_condition(e1, e2))
         if e1.program_seq >= e2.program_seq:
             return BoolVal(False)
         if self.fence_order and not self._fence_between(e1.program_seq, e2.program_seq):
@@ -1419,9 +1483,16 @@ class TwoCopySymbolicHBSolver:
     ) -> bool:
         if w.idx == r.idx:
             return False
-        # Same program instance cannot read from a future write.
+        # Triton's existing capture excludes future-source writers. With
+        # token-only order, distinct operations may execute independently
+        # of source order; atomic coherence and value causality constrain RF.
         if w.copy == r.copy and w.program_seq >= r.program_seq:
-            return False
+            if (
+                not self.fence_order
+                or self.token_order is None
+                or w.record is r.record
+            ):
+                return False
         return True
 
     # Cap on initial-source disjunction size. Above this, the solver falls
@@ -1787,7 +1858,26 @@ class TwoCopySymbolicHBSolver:
                 cons.append(Implies(same_op, ord_e == ord_f))
 
                 if e.copy == f.copy and e.program_seq >= 0 and f.program_seq >= 0:
-                    if e.program_seq < f.program_seq:
+                    if self.fence_order and self.token_order is not None:
+                        cons.append(
+                            Implies(
+                                And(
+                                    both_active_same_addr,
+                                    self._token_order_condition(e, f),
+                                ),
+                                ord_e < ord_f,
+                            )
+                        )
+                        cons.append(
+                            Implies(
+                                And(
+                                    both_active_same_addr,
+                                    self._token_order_condition(f, e),
+                                ),
+                                ord_f < ord_e,
+                            )
+                        )
+                    elif e.program_seq < f.program_seq:
                         cons.append(Implies(both_active_same_addr, ord_e < ord_f))
                     elif f.program_seq < e.program_seq:
                         cons.append(Implies(both_active_same_addr, ord_f < ord_e))
@@ -1872,7 +1962,11 @@ class TwoCopySymbolicHBSolver:
             for f in atomic_events:
                 if f.idx == e.idx:
                     continue
-                if e.copy == f.copy and 0 <= e.program_seq < f.program_seq:
+                if (
+                    not (self.fence_order and self.token_order is not None)
+                    and e.copy == f.copy
+                    and 0 <= e.program_seq < f.program_seq
+                ):
                     continue  # co-po already asserts this pair without the hb antecedent
                 cons.append(
                     Implies(
@@ -2448,7 +2542,7 @@ class TwoCopySymbolicHBSolver:
             for i in range(3)
         )
 
-        if reason == self._INTRA_INSTANCE_REASON:
+        if reason == self._INTRA_INSTANCE_REASON and self.token_order is None:
             reason = append_missing_fence_diagnostic(
                 reason,
                 fence_order=self.fence_order,

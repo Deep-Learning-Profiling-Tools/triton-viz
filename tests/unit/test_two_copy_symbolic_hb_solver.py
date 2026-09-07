@@ -10,9 +10,11 @@ import pytest
 import torch
 from z3 import (
     And,
+    Bool,
     BoolVal,
     Int,
     IntVal,
+    Not,
     Solver,
     sat,
     unknown,
@@ -277,6 +279,216 @@ def test_missing_fence_diagnostic_keeps_cross_position_dependency_witness():
     ).find_races()[0]
     assert report.witness_addr == 104
     assert "Missing source fence:" in report.reason
+
+
+def _token_solver(records, token_order, **kwargs):
+    return TwoCopySymbolicHBSolver(
+        records,
+        grid=kwargs.pop("grid", (1, 1, 1)),
+        fence_order=kwargs.pop("fence_order", True),
+        token_order=token_order,
+        **kwargs,
+    )
+
+
+def _report_pairs(reports):
+    return {(r.first.event_id, r.second.event_id) for r in reports}
+
+
+def test_token_order_distinguishes_empty_graph_from_triton_fences_and_dependencies():
+    records = _diagnostic_records("WAR")
+    records[1].dep_loads = (records[0].event_id,)
+    assert _token_solver(records, None).find_races() == []
+    reports = _token_solver(records, {}, fence_seqs=(0.5,)).find_races()
+    assert _report_pairs(reports) == {(0, 1)}
+    assert "Missing source fence:" not in reports[0].reason
+    assert _token_solver(records, {}, fence_order=False).find_races() == []
+
+
+def test_token_order_uses_operation_positions_and_not_event_ids():
+    records = _diagnostic_records()
+    records[0].event_id, records[1].event_id = 10, 20
+    assert _token_solver(records, {(0, 1): True}).find_races() == []
+    assert _report_pairs(_token_solver(records, {}).find_races()) == {(10, 20)}
+
+
+def test_token_order_interleaved_independent_chains_do_not_become_a_barrier():
+    records = [
+        make(IntVal(100), event_id=i, program_seq=i, elem_size=4)
+        for i, make in enumerate(
+            (_scalar_store, _scalar_store, _scalar_load, _scalar_load)
+        )
+    ]
+    reports = _token_solver(records, {(0, 2): True, (1, 3): True}).find_races()
+    assert _report_pairs(reports) == {(0, 1), (0, 3), (1, 2)}
+
+
+def test_token_join_orders_consumers_after_both_ancestors_only():
+    records = [
+        make(IntVal(100), event_id=i, program_seq=i, elem_size=4)
+        for i, make in enumerate((_scalar_store, _scalar_store, _scalar_load))
+    ]
+    reports = _token_solver(records, {(0, 2): True, (1, 2): True}).find_races()
+    assert _report_pairs(reports) == {(0, 1)}
+
+
+def test_token_transitive_path_survives_a_masked_intermediate_access():
+    records = _diagnostic_records()
+    middle = _scalar_load(IntVal(100), event_id=2, program_seq=2)
+    records.append(middle)
+    records[1].active = False
+    order = {(0, 1): True, (1, 2): True, (0, 2): True}
+    assert _token_solver(records, order).find_races() == []
+    assert _report_pairs(_token_solver(records, {}).find_races()) == {(0, 2)}
+
+
+@pytest.mark.parametrize("condition", [None, False, True])
+def test_conditional_token_order_keeps_the_unordered_execution(condition):
+    records = _diagnostic_records()
+    branch = Bool("token_branch")
+    records[0].copy_local_vars = (branch,)
+    if condition is not None:
+        records[0].local_constraints = (branch == condition,)
+    solver = _token_solver(records, {(0, 1): branch})
+    reports = solver.find_races()
+    assert bool(reports) is (condition is not True)
+    if reports:
+        for _, copied in solver.ctx_a.copy_local_substitutions:
+            assert reports[0].model[copied.decl().name()] == "False"
+
+
+def test_token_guard_pid_substitution_is_independent_between_instances():
+    records = _diagnostic_records()
+    for record in records:
+        record.addr_expr = IntVal(100) + 16 * SymbolicExpr.PID0
+    solver = _token_solver(
+        records, {(0, 1): SymbolicExpr.PID0 == 0}, grid=(2, 1, 1)
+    )
+    report = solver.find_races()[0]
+    assert report.witness_grid_a == report.witness_grid_b == (1, 0, 0)
+    assert report.witness_addr == 116
+    events_a = [e for e in solver.events if e.copy == "a"]
+    events_b = [e for e in solver.events if e.copy == "b"]
+    check = Solver()
+    check.add(solver.ctx_a.pid[0] == 0, solver.ctx_b.pid[0] == 1)
+    check.add(solver._program_order(*events_a))
+    check.add(Not(solver._program_order(*events_b)))
+    assert check.check() == sat
+
+
+def test_static_token_ids_do_not_order_distinct_instances():
+    reports = _token_solver(
+        _diagnostic_records(), {(0, 1): True}, grid=(2, 1, 1)
+    ).find_races()
+    assert reports
+    assert all(r.witness_grid_a != r.witness_grid_b for r in reports)
+
+
+def test_token_order_keeps_duplicate_store_lanes_unordered():
+    record = _diagnostic_records()[0]
+    record.addr_expr = [IntVal(100), IntVal(100)]
+    reports = _token_solver([record], {}).find_races()
+    assert len(reports) == 1 and reports[0].race_type is RaceType.WAW
+    assert "Missing source fence:" not in reports[0].reason
+
+
+@pytest.mark.parametrize("guard", ["lane", "vector", "self"])
+def test_token_order_rejects_non_scalar_or_non_operation_relations(guard):
+    lane = Int("token_lane")
+    order = {(0, 1): lane == 0}
+    if guard == "vector":
+        order = {(0, 1): [True, False]}
+    elif guard == "self":
+        order = {(0, 0): True}
+    with pytest.raises(ValueError, match="token-order:"):
+        _token_solver(
+            _diagnostic_records(),
+            order,
+            arange_dict={(0, 2): (lane, And(lane >= 0, lane < 2))},
+        )
+
+
+@pytest.mark.parametrize("ordered", [False, True])
+def test_token_independent_atomics_can_read_from_later_source_operations(ordered):
+    flag = torch.zeros(1, dtype=torch.int32)
+    addr = IntVal(flag.data_ptr())
+    first_old, second_old = Int("token_first_old"), Int("token_second_old")
+    branch = Bool("token_atomic_order")
+    records = [
+        _cas_record(
+            addr,
+            IntVal(1),
+            IntVal(1),
+            first_old,
+            event_id=0,
+            program_seq=0,
+            sem="relaxed",
+            tensor=flag,
+            extra_local_vars=(branch,),
+        ),
+        _cas_record(
+            addr,
+            IntVal(0),
+            IntVal(1),
+            second_old,
+            event_id=1,
+            program_seq=1,
+            sem="relaxed",
+            tensor=flag,
+        ),
+    ]
+    solver = _token_solver(records, {(0, 1): branch})
+    first, second = [e for e in solver.events if e.copy == "a"]
+    # Source-later CAS writes 1 after observing initial 0; source-earlier CAS
+    # then reads that 1. This is legal precisely when no token orders them
+    # the other way. Token order must constrain coherence conditionally.
+    check = solver._base_solver()
+    check.add(*solver._same_instance_constraints())
+    check.add(solver.rf_source[(second.idx, first.idx)])
+    check.add(first.old_value == 1, second.old_value == 0)
+    check.add(solver._token_order_condition(first, second) == ordered)
+    assert (check.check() == sat) is (not ordered)
+    legacy = _token_solver(records, None)
+    assert (second.idx, first.idx) not in legacy.rf_source
+
+
+@pytest.mark.parametrize("missing", [None, "producer", "consumer"])
+def test_token_order_connects_release_acquire_only_on_both_sides(missing):
+    flag = torch.zeros(1, dtype=torch.int32)
+    address = IntVal(flag.data_ptr())
+    released, acquired = Int("token_released"), Int("token_acquired")
+    records = [
+        _scalar_store(IntVal(100), event_id=0, program_seq=0, elem_size=4),
+        _cas_record(
+            address,
+            IntVal(0),
+            IntVal(1),
+            released,
+            event_id=1,
+            program_seq=1,
+            sem="release",
+            tensor=flag,
+        ),
+        _cas_record(
+            address,
+            IntVal(1),
+            IntVal(1),
+            acquired,
+            event_id=2,
+            program_seq=2,
+            sem="acquire",
+            tensor=flag,
+        ),
+        _scalar_load(IntVal(100), event_id=3, program_seq=3, elem_size=4),
+    ]
+    records[0].active = records[1].active = SymbolicExpr.PID0 == 0
+    records[2].active = SymbolicExpr.PID0 == 1
+    records[3].active = And(SymbolicExpr.PID0 == 1, acquired == 1)
+    order = {(0, 1): True, (2, 3): True}
+    if missing is not None:
+        order.pop((0, 1) if missing == "producer" else (2, 3))
+    reports = _token_solver(records, order, grid=(2, 1, 1)).find_races()
+    assert _report_pairs(reports) == (set() if missing is None else {(0, 3)})
 
 
 def test_pid_alpha_renaming_reports_race_for_same_template():
