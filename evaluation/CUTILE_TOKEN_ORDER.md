@@ -42,7 +42,7 @@ two lane roles. The reader therefore checks each write-involving pair across
 iterations, including each write's self-pair. Each temporal direction needs
 a carried slot whose continuation collects the earlier access and whose
 input reaches the later access. The two directions may use different slots.
-Each carried slot must retain its prior ancestry, so an established edge
+For repeated iterations, each carried slot must retain its prior ancestry, so an established edge
 survives intervening iterations.
 
 Unordered pairs become explicit `AccessGraph.loop_token_conflicts`
@@ -153,4 +153,33 @@ exercise actual and shifted aliases, partially overlapping intervals,
 adjacent allocations, both temporal directions, independent serial chains,
 write self-pairs, T0 premises and runtime zero/single-trip loops. An
 independent source review checks the proof paths and unchanged await rule.
-Affected-corpus successor receipts are recorded below after completion.
+The successor checks complete at source `030494c` using the same 123 cuTile
+configurations at each of L0, L1 and L2. All 369 complete without an error;
+all 220 decided results match the existing labels, and 149 abstain.
+
+| Corpus | Level | Configurations | Race-free | Race | Abstain |
+|---|---|---:|---:|---:|---:|
+| TritonRaceBench cuTile | L0 | 62 | 13 | 13 | 36 |
+| TritonRaceBench cuTile | L1 | 62 | 13 | 13 | 36 |
+| TritonRaceBench cuTile | L2 | 62 | 21 | 24 | 17 |
+| TileBench cuTile | L0 | 61 | 38 | 0 | 23 |
+| TileBench cuTile | L1 | 61 | 38 | 0 | 23 |
+| TileBench cuTile | L2 | 61 | 47 | 0 | 14 |
+
+Only the intended two configurations change verdict relative to `6e1d3eb`:
+`trb008_loop_stride_no` recovers a `this-params-any-grid` race-free proof,
+and `trb008_loop_stride_yes` recovers an exact cross-instance WAW report,
+at every level. All 369 verdicts and proof extents match their original
+`31c48f5` results. This agreement does not revert the token-order policy or
+replace the required successor measurements.
+
+The run uses unchanged captures, seed 0, fresh row subprocesses, two workers,
+a 200-second outer cap and exclusive host admission. Its raw datasets,
+manifest, hashes, per-row comparison and logs are retained in canonical
+`evaluation/results/cutile-loop-conflicts-030494c/`. These are targeted
+correctness checks, with no timing adoption. The paper's current routine
+full-corpus rerun policy remains L1/L2; the scoped L0 check does not restore
+a full L0 requirement. All repository hooks pass on the integrated change.
+Independent receipt verification confirms both capture hashes, all six
+datasets and their copied hashes, unique/matching configuration sets, the
+source pin and token-policy flags, and the unchanged earlier datasets.
