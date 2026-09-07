@@ -45,6 +45,40 @@ else:
 
 
 @pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="POSIX interval timer")
+def test_native_solver_is_interrupted_without_python_signal_delivery():
+    root = Path(__file__).resolve().parents[2]
+    code = """
+import z3
+from evaluation import harness
+
+# Isolate the native interruption from Python's alarm mechanism.
+harness.signal.signal = lambda *args: None
+harness.signal.setitimer = lambda *args: (0.0, 0.0)
+query = z3.Solver()
+values = z3.Ints(' '.join('pigeon_%d' % i for i in range(40)))
+query.add(z3.Distinct(values))
+query.add(*[z3.And(v >= 0, v < 39) for v in values])
+with harness._watchdog(0.03):
+    result = query.check()
+assert result == z3.unknown, (result, query.reason_unknown())
+assert 'cancel' in query.reason_unknown() or 'interrupt' in query.reason_unknown()
+# The joined interrupter must not cancel the following analysis.
+control = z3.Solver()
+control.add(z3.Int('following_phase') == 7)
+assert control.check() == z3.sat
+"""
+    result = subprocess.run(
+        [sys.executable, "-c", code],
+        cwd=root,
+        env=dict(os.environ, PYTHONPATH=str(root)),
+        capture_output=True,
+        text=True,
+        timeout=30,
+    )
+    assert result.returncode == 0, result.stderr
+
+
+@pytest.mark.skipif(not hasattr(signal, "SIGALRM"), reason="POSIX interval timer")
 def test_watchdog_restores_enclosing_timer_and_handler(monkeypatch):
     old_handler = object()
     handler_calls = []

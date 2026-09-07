@@ -186,6 +186,23 @@ def _watchdog(seconds: float):
     def _fire(signum, frame):  # noqa: ARG001
         raise TimeoutError(f"dynamic track exceeded {seconds}s")
 
+    # Python cannot deliver SIGALRM while a native Solver.check is running.
+    # Z3 explicitly supports interrupting a context from another thread. The
+    # worker has one analysis at a time; join before restoring the timer so
+    # this interruption cannot spill into the following static/enum phase.
+    import z3
+
+    context = z3.main_ctx()
+    stopped = threading.Event()
+
+    def _interrupt_solver():
+        if stopped.wait(seconds):
+            return
+        while not stopped.is_set():
+            context.interrupt()
+            stopped.wait(0.1)
+
+    interrupter = threading.Thread(target=_interrupt_solver, daemon=True)
     old_handler = signal.signal(signal.SIGALRM, _fire)
     # Native cleanup and best-effort fallback handlers can swallow a delivered
     # TimeoutError. Keep interrupting after the deadline until this context
@@ -193,10 +210,13 @@ def _watchdog(seconds: float):
     # alarm. The outer process watchdog remains the hard containment boundary.
     old_timer = signal.setitimer(signal.ITIMER_REAL, seconds, min(seconds, 0.1))
     started = time.monotonic()
+    interrupter.start()
     try:
         yield
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
+        stopped.set()
+        interrupter.join()
         signal.signal(signal.SIGALRM, old_handler)
         # Re-arm an enclosing SIGALRM timer with its remaining time — a
         # nested watchdog must not permanently defuse the outer one.
