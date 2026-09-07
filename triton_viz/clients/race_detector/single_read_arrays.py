@@ -83,7 +83,10 @@ def single_read_array_solver(expression: z3.BoolRef) -> z3.Solver | None:
     The solve-eqs tactic eliminates the constant-array witness bindings
     before the general SMT backend runs. Its model converter restores the
     original arrays automatically. Keeping those bindings in an ordinary
-    solver leaves the KDA query on its expensive array-solving path.
+    solver leaves the KDA query on its expensive array-solving path. A
+    second simplification exposes the resulting scalar constraints; the
+    general SMT backend uses its alternate arithmetic solver for this
+    isolated-array path. This does not assume a narrower arithmetic logic.
 
     Callers retain their existing timeout settings and unknown handling.
     Additional scalar constraints, such as the original enumeration PID
@@ -95,10 +98,10 @@ def single_read_array_solver(expression: z3.BoolRef) -> z3.Solver | None:
         if rewritten is None:
             return None
         solver = z3.Then(
-            *(
-                z3.Tactic(name, ctx=expression.ctx)
-                for name in ("simplify", "solve-eqs", "smt")
-            )
+            z3.Tactic("simplify", ctx=expression.ctx),
+            z3.Tactic("solve-eqs", ctx=expression.ctx),
+            z3.Tactic("simplify", ctx=expression.ctx),
+            z3.With(z3.Tactic("smt", ctx=expression.ctx), **{"arith.solver": 2}),
         ).solver()
         solver.add(rewritten)
     except z3.Z3Exception:

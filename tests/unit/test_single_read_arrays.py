@@ -235,3 +235,28 @@ def test_solver_factory_preparation_exception_returns_original_path(
     solver = z3.Solver()
     solver.add(original)
     assert solver.check() == z3.sat
+
+
+@pytest.mark.parametrize("kind", ["nonlinear_sat", "nonlinear_unsat", "uninterpreted"])
+def test_alternate_arithmetic_backend_retains_general_smt_and_native_models(kind):
+    array = _array()
+    x, y = z3.Ints("general_x general_y")
+    read = z3.Select(array, x)
+    if kind == "nonlinear_sat":
+        original = z3.And(x * y == 6, x > 1, y > 1, read == x + y)
+        expected = z3.sat
+    elif kind == "nonlinear_unsat":
+        original = z3.And(x * x == 2, read == x)
+        expected = z3.unsat
+    else:
+        function = z3.Function("general_function", z3.IntSort(), z3.IntSort())
+        original = z3.And(function(read) == read + 1, read > x)
+        expected = z3.sat
+    exact = single_read_array_solver(original)
+    assert exact is not None
+    exact.set(timeout=1000)
+    assert exact.check() == expected
+    if expected == z3.sat:
+        assert z3.is_true(
+            z3.simplify(exact.model().eval(original, model_completion=True))
+        )
