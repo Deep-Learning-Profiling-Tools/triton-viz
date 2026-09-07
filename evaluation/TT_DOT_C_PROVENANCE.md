@@ -11,7 +11,9 @@ computes the matrix product plus C. The contribution from C at `(i,j)` is
 to result `(i,j)`. Preserve C's existing position-preserving load provenance
 for that addition component. A/B remain non-positional. If the same source
 appears in both A/B and C, its valid C path survives; a non-positional C
-path stays non-positional. The general provenance merge is unchanged.
+path stays non-positional. This dot-specific patch leaves the general
+provenance merge unchanged; the separate frontend correction refines that
+merge for simultaneous elementwise paths and conditional alternatives.
 
 This implements the existing same-position D3 rule for a fused addition.
 The installed FLA source writes the two expressions as `b_dq += tl.dot(...)`
@@ -138,8 +140,9 @@ Do not restrict the production change to these two FLA cases. The common
 TTIR parser is used by L0/L1/L2 and the compiled sanitizer. Any supported
 dot whose C has positional loaded provenance reaching a later memory
 value/mask/compare can change the graph. A newly obtained static proof can
-also suppress a fallback and change runtime even if the selected verdict
-was already a proof. Dot-heavy kernels with a constant C need not change,
+suppress enumeration when the combined frontend verdict formerly abstained,
+and can change static requery costs. The Triton harness still runs the
+interpreter even when static analysis decides. Dot-heavy kernels with a constant C need not change,
 and cuTile's separate parser is outside this patch.
 
 The minimal selective correctness population is that graph-derived set

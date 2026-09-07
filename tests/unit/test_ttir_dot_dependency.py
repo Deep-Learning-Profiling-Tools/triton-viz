@@ -164,6 +164,24 @@ def test_elementwise_c_and_chained_c_dots_retain_provenance():
     assert not _solve(graph)
 
 
+@pytest.mark.parametrize("simultaneous", [True, False])
+def test_dot_c_combines_with_mixed_path_and_select_dependency_rules(simultaneous):
+    combine = (
+        f"arith.addf %c, %ct : {_TYPE}"
+        if simultaneous
+        else f"arith.select %active, %c, %ct : tensor<16x16xi1>, {_TYPE}"
+    )
+    graph = parse_ttir(
+        _module(
+            f"%ct = tt.trans %c {{order = array<i32: 1, 0>}} : {_TYPE} -> {_TYPE}",
+            "%mixed = " + combine,
+            "%dot = " + _dot(a="%ct", c="%mixed"),
+        )
+    )
+    assert graph.accesses[-1].deps == ((0,) if simultaneous else ())
+    assert bool(_solve(graph)) is not simultaneous
+
+
 def test_chained_dot_through_a_loses_c_provenance():
     graph = parse_ttir(_module("%d1 = " + _dot(), "%dot = " + _dot(a="%d1", c="%zero")))
     assert graph.accesses[-1].deps == ()

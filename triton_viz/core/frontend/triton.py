@@ -234,6 +234,57 @@ class FakeTensor:
         return self._element_size
 
 
+def _triton_boolean_operator(is_and: bool, *operands):
+    """Match the compiler's BoolOp rules, including constexpr short circuit.
+
+    Tensor operands are combined elementwise. Thunks keep a constexpr
+    short circuit from evaluating later operands or their side effects.
+    """
+    tensors = []
+    value = None
+    for operand in operands:
+        value = operand()
+        if isinstance(value, tl.tensor):
+            tensors.append(value)
+        else:
+            concrete = value.value if isinstance(value, tl.constexpr) else value
+            if bool(concrete) != is_and:
+                return value
+    if not tensors:
+        return value
+    while len(tensors) > 1:
+        rhs = tensors.pop()
+        lhs = tensors.pop()
+        method = lhs.logical_and if is_and else lhs.logical_or
+        tensors.append(method(rhs, _semantic=interpreter_semantic))
+    return tensors[0]
+
+
+class _TritonBooleanTransformer(ast.NodeTransformer):
+    def __init__(self, helper_name: str):
+        self.helper_name = helper_name
+
+    def visit_BoolOp(self, node):
+        node = self.generic_visit(node)
+        thunks = [
+            ast.Lambda(
+                args=ast.arguments(
+                    posonlyargs=[], args=[], kwonlyargs=[], kw_defaults=[], defaults=[]
+                ),
+                body=value,
+            )
+            for value in node.values
+        ]
+        return ast.copy_location(
+            ast.Call(
+                func=ast.Name(id=self.helper_name, ctx=ast.Load()),
+                args=[ast.Constant(value=isinstance(node.op, ast.And)), *thunks],
+                keywords=[],
+            ),
+            node,
+        )
+
+
 class TritonFrontend(Frontend):
     def __init__(self):
         definition = Frontend.from_namespaces(
@@ -253,6 +304,7 @@ class TritonFrontend(Frontend):
         self._thread_local_interpreter_state.grid_idx = None
         self._current_client_manager = None
         self._loop_wrapper_arg = "_triton_viz_loop_iter_wrapper"
+        self._boolean_wrapper_arg = "_triton_viz_boolean_operator"
         self._loop_ast_methods: dict[str, Callable | object] = {}
         self._loop_ast_patched = False
         self._patch_calls_scope = 0
@@ -355,6 +407,10 @@ class TritonFrontend(Frontend):
     def _visit_triton_function_def(
         self, transformer: ast.NodeTransformer, node: ast.FunctionDef
     ):
+        # Triton's Assign visitor does not recurse into its value. Rewrite
+        # the whole function first so BoolOps in masks and call arguments
+        # cannot silently use Python block-tensor truthiness.
+        node = _TritonBooleanTransformer(self._boolean_wrapper_arg).visit(node)
         node = cast(ast.FunctionDef, transformer.generic_visit(node))
         # Triton compiles rewritten kernels with a local namespace, but loop
         # bodies resolve names from the function defaults/globals. Add the
@@ -369,6 +425,10 @@ class TritonFrontend(Frontend):
         node.args.kwonlyargs.append(ast.arg(arg=self._loop_wrapper_arg))
         node.args.kw_defaults.append(
             ast.Name(id=self._loop_wrapper_arg, ctx=ast.Load())
+        )
+        node.args.kwonlyargs.append(ast.arg(arg=self._boolean_wrapper_arg))
+        node.args.kw_defaults.append(
+            ast.Name(id=self._boolean_wrapper_arg, ctx=ast.Load())
         )
         return ast.fix_missing_locations(node)
 
@@ -1160,6 +1220,7 @@ class TritonFrontend(Frontend):
                 rewriter.kwargs = {
                     **old_kwargs,
                     self._loop_wrapper_arg: self.loop_iter_wrapper,
+                    self._boolean_wrapper_arg: _triton_boolean_operator,
                 }
                 try:
                     return old_compile_and_exec(rewriter, transformed_ast)
