@@ -192,6 +192,7 @@ Triton-Viz uses a small set of environment variables to configure runtime behavi
 - `PROFILER_ENABLE_LOAD_STORE_SKIPPING` (default: `1`): skip redundant load/store checks to reduce profiling overhead.
 - `PROFILER_ENABLE_BLOCK_SAMPLING` (default: `1`): sample a subset of blocks to reduce profiling overhead.
 - `PROFILER_DISABLE_BUFFER_LOAD_CHECK` (default: `0`): disable buffer load checks in the profiler.
+- `TRITON_VIZ_EVAL_ALL_FRONTENDS` (default: `0`): set to `1` to run both symbolic frontends in L2 evaluation for coverage comparisons. By default, L2 runs the interpreter only after static abstention, then concrete enumeration only if both symbolic frontends abstain. L0/L1 keep their existing behavior. See [L2 frontend execution](evaluation/L2_FRONTEND_POLICY.md) for timing and provenance rules.
 
 Evaluation experiments can use [durable pinned reruns](evaluation/PINNED_RESUME.md)
 to save each row and resume after interruption. The optional
