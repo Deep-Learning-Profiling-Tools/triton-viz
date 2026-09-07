@@ -125,6 +125,7 @@ import statistics
 import sys
 import time
 from dataclasses import dataclass, field
+from functools import lru_cache
 from itertools import chain
 from typing import Any, Callable
 
@@ -278,12 +279,14 @@ class EnumOutcome:
 # ─────────────────────────── taint helpers ───────────────────────────
 
 
+@lru_cache(maxsize=1)
 def _tensor_handle_cls() -> type:
     from triton.runtime.interpreter import TensorHandle
 
     return TensorHandle
 
 
+@lru_cache(maxsize=1)
 def _composite_handle_classes() -> tuple[type, ...]:
     """Interpreter handles that carry TensorHandles as components (block
     pointers, tensor descriptors): taint flows through their fields."""
@@ -402,10 +405,23 @@ class _PositionalFootprint:
         cls, data: np.ndarray, positions: np.ndarray, shape: tuple[int, ...], elem: int
     ) -> _PositionalFootprint:
         order = np.argsort(data, kind="stable")
-        addresses = data[order].astype(np.int64, copy=False)
-        positions = positions[order]
+        return cls.from_sorted(
+            data[order].astype(np.int64, copy=False), positions[order], shape, elem
+        )
+
+    @classmethod
+    def from_sorted(
+        cls,
+        addresses: np.ndarray,
+        positions: np.ndarray,
+        shape: tuple[int, ...],
+        elem: int,
+    ) -> _PositionalFootprint:
+        """Build position runs from one stable address ordering shared by the recorder."""
         if not addresses.size:
             return cls(shape, addresses, addresses.copy(), positions)
+        if addresses.size == 1:
+            return cls(shape, addresses, addresses + elem, positions)
         breaks = np.flatnonzero(
             (np.diff(addresses) != elem) | (np.diff(positions) != 1)
         )
@@ -505,6 +521,11 @@ class ConcreteFootprintRecorder(Client):
         fence_order: bool | None = None,
     ) -> None:
         super().__init__()
+        # Interpreter classes remain fixed during one replay. Resolve them
+        # lazily once, refreshing between launches in case a frontend changed
+        # its handle classes. No values, taints, or positions are cached here.
+        _tensor_handle_cls.cache_clear()
+        _composite_handle_classes.cache_clear()
         # the caller's wall-clock budget for the run (the watchdog's
         # value); drives the projected-cost refusal, None disables it
         self.budget_s = budget_s
@@ -679,6 +700,12 @@ class ConcreteFootprintRecorder(Client):
                     args[i] for i in indices if i < len(args)
                 ]
             ret = fn(*args, **kwargs)
+            # Type constructors and side-effect-only builder methods have no
+            # output handles to tag. Their pre-call memory bookkeeping above
+            # still runs; the unused post-call union need not inspect inputs.
+            result_handles = tuple(_iter_handles(ret))
+            if not result_handles:
+                return ret
             taint, unknown = _collect_taint(list(args) + list(kwargs.values()))
             if unknown:
                 taint = taint | recorder._unknown_taint()
@@ -686,7 +713,7 @@ class ConcreteFootprintRecorder(Client):
                 taint = taint | frozenset((recorder._last_load_op_id,))
             elif kind == "atomic":
                 taint = taint | frozenset((_ATOMIC,))
-            for h in _iter_handles(ret):
+            for h in result_handles:
                 _tag(h, taint)
                 if recorder.fence_order:
                     if kind in ("load", "atomic") and recorder.op_kind:
@@ -987,6 +1014,14 @@ class ConcreteFootprintRecorder(Client):
         scope_code = (
             self._normalize_scope(scope) if kind in (_KIND_RMW, _KIND_CAS) else 0
         )
+        # One stable ordering serves positional runs, duplicate witnesses, and
+        # byte intervals. Retain ties' original position order, as capture did.
+        if self.fence_order:
+            order = np.argsort(data, kind="stable")
+            addrs = data[order].astype(np.int64, copy=False)
+            positions = positions[order]
+        else:
+            addrs = np.sort(data.astype(np.int64, copy=False))
         op_id = len(self.op_kind)
         self.op_pid_index.append(self._pid_index)
         self.op_seq.append(self._seq)
@@ -1005,7 +1040,7 @@ class ConcreteFootprintRecorder(Client):
                 possible = possible | self._unknown_taint()
             self.op_possible_deps.append(possible)
             self.op_positions.append(
-                _PositionalFootprint.capture(data, positions, shape, elem)
+                _PositionalFootprint.from_sorted(addrs, positions, shape, elem)
             )
         self._pending_dep_inputs = []
         if kind == _KIND_STORE:
@@ -1026,13 +1061,14 @@ class ConcreteFootprintRecorder(Client):
         if kind in (_KIND_RMW, _KIND_CAS):
             self._atomic_seen = True
         if data.size:
-            addrs = np.sort(data.astype(np.int64, copy=False))
+            gaps = np.diff(addrs)
             if kind == _KIND_STORE and addrs.size > 1:
-                gaps = np.diff(addrs)
                 dup = np.nonzero(gaps < elem)[0]
                 if dup.size:
                     self.intra_dups.append((op_id, int(addrs[dup[0] + 1])))
-            uniq = np.unique(addrs)
+            # The ordering above already groups equal starts; np.unique would
+            # sort a second time and discard that work for every memory op.
+            uniq = addrs[np.concatenate(([True], gaps != 0))]
             if kind in (_KIND_RMW, _KIND_CAS) or uniq.size == 1:
                 # atomics stay one interval per lane: the compatible-pair
                 # judgment is per exact (address, width), so lanes must
