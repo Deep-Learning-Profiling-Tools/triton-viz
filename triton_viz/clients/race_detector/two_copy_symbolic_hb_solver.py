@@ -580,6 +580,11 @@ class TwoCopySymbolicHBSolver:
                         s = self._new_solver()
                         s.add(self._race_expr(a, b))
                     else:
+                        from .single_read_arrays import single_read_array_solver
+
+                        exact = single_read_array_solver(normalized)
+                        if exact is not None:
+                            return exact
                         s = Solver()
                         s.add(normalized)
                     return s
@@ -878,6 +883,11 @@ class TwoCopySymbolicHBSolver:
                         s.add(lane_cond)
                         s.add(self._race_expr(a, b))
                     else:
+                        from .single_read_arrays import single_read_array_solver
+
+                        exact = single_read_array_solver(normalized)
+                        if exact is not None:
+                            return exact
                         s = Solver()
                         s.add(normalized)
                     return s

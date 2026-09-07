@@ -19,6 +19,8 @@ from typing import Any
 
 import z3
 
+from .snapshot_lemmas import snapshot_table_lemmas
+
 # Private ablation hooks for controlled diagnostics; normal analysis uses both.
 _ENABLE_SNAPSHOT_PRECHECK = True
 _ENABLE_RADIX_PRECHECK = True
@@ -327,6 +329,15 @@ def conflict_impossible(
     expression_cache=None,
 ) -> bool:
     """Cheap UNSAT-only precheck; callers retain their original query budget."""
+    if _ENABLE_SNAPSHOT_PRECHECK:
+        # These facts follow from snapshot cells ALREADY in this query.
+        # Keep all source conditions and the guards on each derived lemma.
+        try:
+            lemmas = snapshot_table_lemmas(z3.And(*conditions))
+        except (TypeError, z3.Z3Exception):
+            lemmas = ()
+        if lemmas:
+            conditions = [*conditions, *lemmas]
     relaxed = _linear_relaxation(
         conditions,
         correspondence,
