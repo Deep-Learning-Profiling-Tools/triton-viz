@@ -13,6 +13,8 @@ import subprocess
 import sys
 from pathlib import Path
 
+from evaluation.frontend_policy import ALL_FRONTENDS_ENV, frontend_policy
+
 PROTOCOL_VERSION = "pinned-resume-v1"
 ROOT = Path(__file__).resolve().parents[1]
 ENV_KEYS = (
@@ -25,6 +27,7 @@ ENV_KEYS = (
     "TRITON_CACHE_DIR",
     "TRITON_INTERPRET",
     "TRITON_VIZ_FENCE_ORDER",
+    ALL_FRONTENDS_ENV,
     "OMP_NUM_THREADS",
     "MKL_NUM_THREADS",
     "OPENBLAS_NUM_THREADS",
@@ -225,6 +228,9 @@ def build_manifest(config: dict, *, run_id: str, only_names=None) -> tuple[dict,
     roster: list[dict] = []
     headers = {}
     level = parse_ladder_level(config["ladder_level"])
+    policy = frontend_policy(level)
+    if config.get("frontend_policy", "all") != policy:
+        raise ValueError("frontend policy differs from the frozen configuration")
     for name in config["corpora"]:
         corpus = load(name)
         selected = [

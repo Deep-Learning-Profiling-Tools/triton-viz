@@ -42,7 +42,10 @@ def test_paired_summary_uses_balanced_adjacent_pairs_and_keeps_semantic_changes(
     assert summary["direct_checkpoint_fraction_of_B_wall"] == pytest.approx(0.02 / 26)
 
 
-def test_micro_persists_every_input_in_every_round_without_detector_execution(tmp_path):
+@pytest.mark.parametrize("policy", [None, "on-demand"])
+def test_micro_persists_every_input_in_every_round_without_detector_execution(
+    tmp_path, policy
+):
     pytest.importorskip("evaluation.pinned_state")
     source = tmp_path / "source.jsonl"
     header = {"header": True, "ladder_level": "L2", "row_timeout_s": 200}
@@ -58,6 +61,9 @@ def test_micro_persists_every_input_in_every_round_without_detector_execution(tm
         }
         for index in range(2)
     ]
+    if policy:
+        for value in [header, *rows]:
+            value["frontend_policy"] = policy
     source.write_text("\n".join(json.dumps(row) for row in [header, *rows]) + "\n")
     output = tmp_path / "measurement"
     output.mkdir()
@@ -80,3 +86,7 @@ def test_micro_persists_every_input_in_every_round_without_detector_execution(tm
             accepted = con.execute("SELECT row_json FROM results").fetchall()
         assert len(accepted) == 2
         assert {json.loads(row[0])["wall_s"] for row in accepted} == {1.25}
+        manifest = json.loads(
+            (output / f"micro-{round_index}" / "manifest.json").read_text()
+        )
+        assert manifest["config"]["frontend_policy"] == (policy or "all")

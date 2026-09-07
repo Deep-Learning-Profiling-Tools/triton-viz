@@ -18,6 +18,7 @@ import time
 from pathlib import Path
 from typing import Any, Callable
 
+from evaluation.frontend_policy import frontend_policy
 from triton_viz.core.config import config as cfg
 from triton_viz.clients.race_detector.ladder import (
     LADDER_LEVEL_NAMES,
@@ -367,6 +368,7 @@ def _run_one_reused(
         except OSError:
             pass
     row.setdefault("ladder_level", ladder_level.name)
+    row.setdefault("frontend_policy", frontend_policy(ladder_level))
     # a row the runner synthesized (timeout, crash) carries the switch the
     # parent ran under: the child inherited this environment
     row.setdefault("fence_order", bool(cfg.race_detector_fence_order))
@@ -555,6 +557,7 @@ def _run_one(
     finally:
         os.unlink(tmp)
     row.setdefault("ladder_level", ladder_level.name)
+    row.setdefault("frontend_policy", frontend_policy(ladder_level))
     # a row the runner synthesized (timeout, crash) carries the switch the
     # parent ran under: the child inherited this environment
     row.setdefault("fence_order", bool(cfg.race_detector_fence_order))
@@ -580,6 +583,7 @@ def results_header(
         "corpus": corpus_name,
         "seed": seed,
         "ladder_level": ladder_level.name,
+        "frontend_policy": frontend_policy(ladder_level),
         "row_timeout_s": timeout
         if timeout is not None
         else row_timeout_s(ladder_level),
@@ -628,9 +632,11 @@ def run_corpus(
     # ``out_suffix`` names a subset run (a change-surface slice); it is
     # APPENDED to the level suffix, so no subset run can overwrite a recorded
     # dataset of another level, and no run at all can overwrite the paper's
-    # L0 file unless it is a full L0 run.
+    # L0 file unless it is a full L0 run. On-demand L2 has its own name,
+    # preserving the historical all-frontends dataset at the same level.
     level_suffix = "" if ladder_level == LadderLevel.L0 else f"_{ladder_level.name}"
-    suffix = level_suffix + (out_suffix or "")
+    policy_suffix = "_on-demand" if frontend_policy(ladder_level) == "on-demand" else ""
+    suffix = level_suffix + policy_suffix + (out_suffix or "")
     out_path = RESULTS_DIR / f"{corpus_name}{suffix}.jsonl"
 
     reuse = (
