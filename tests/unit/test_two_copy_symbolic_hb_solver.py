@@ -260,9 +260,7 @@ def test_missing_fence_diagnostic_uses_source_order_without_reordering_report():
     ).find_races()[0]
     assert report.first.event_id == 0 and report.second.event_id == 1
     assert report.race_type is RaceType.WAR  # existing canonical report order
-    assert (
-        "write at diagnostic.py:10 and the read at diagnostic.py:11" in report.reason
-    )
+    assert "write at diagnostic.py:10 and the read at diagnostic.py:11" in report.reason
 
 
 def test_missing_fence_diagnostic_keeps_cross_position_dependency_witness():
@@ -361,9 +359,7 @@ def test_token_guard_pid_substitution_is_independent_between_instances():
     records = _diagnostic_records()
     for record in records:
         record.addr_expr = IntVal(100) + 16 * SymbolicExpr.PID0
-    solver = _token_solver(
-        records, {(0, 1): SymbolicExpr.PID0 == 0}, grid=(2, 1, 1)
-    )
+    solver = _token_solver(records, {(0, 1): SymbolicExpr.PID0 == 0}, grid=(2, 1, 1))
     report = solver.find_races()[0]
     assert report.witness_grid_a == report.witness_grid_b == (1, 0, 0)
     assert report.witness_addr == 116

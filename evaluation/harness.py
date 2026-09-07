@@ -341,11 +341,14 @@ def _run_one_cutile(
         # cuda.tile has no interpreter, so the L1 rung can never run on
         # these rows; the level is still stamped (provenance discipline).
         "ladder_level": ladder_level.name,
-        # the memory-model switch this process ran under; cuTile graphs keep
-        # the legacy reading regardless (the reader does not yet turn tokens
-        # into fences, design-fence-order.md stage 1d), stamped explicitly
+        # Token reachability is the cuTile instance's ordering discipline
+        # when the memory-model switch is enabled. Preserve the switch in
+        # the receipt so legacy runs cannot be mistaken for token runs.
         "fence_order": bool(cfg.race_detector_fence_order),
-        "fence_order_applies": False,
+        "fence_order_applies": True,
+        "intra_instance_order": (
+            "token" if cfg.race_detector_fence_order else "legacy-program-order"
+        ),
     }
     try:
         row["static"] = _static_track_cutile(spec, seed, ladder_level)

@@ -1330,9 +1330,7 @@ class TwoCopySymbolicHBSolver:
         guards: dict[str, dict[tuple[int, int], BoolRef]] = {"a": {}, "b": {}}
         if not self.fence_order or self.token_order is None:
             return guards
-        lane_keys = {
-            _z3_var_key(var) for var, _ in self.ctx_a.arange_substitutions
-        }
+        lane_keys = {_z3_var_key(var) for var, _ in self.ctx_a.arange_substitutions}
         for pair, condition in self.token_order.items():
             if (
                 not isinstance(pair, tuple)
@@ -1487,11 +1485,7 @@ class TwoCopySymbolicHBSolver:
         # token-only order, distinct operations may execute independently
         # of source order; atomic coherence and value causality constrain RF.
         if w.copy == r.copy and w.program_seq >= r.program_seq:
-            if (
-                not self.fence_order
-                or self.token_order is None
-                or w.record is r.record
-            ):
+            if not self.fence_order or self.token_order is None or w.record is r.record:
                 return False
         return True
 

@@ -1437,3 +1437,16 @@ needs; none blocks submission.
       sequence completes and exclusive host admission is acquired. No cuTile
       token-order work or measurement rerun is included. Scope, compatibility
       and verification: `evaluation/MISSING_FENCE_DIAGNOSTICS.md`.
+
+## cuTile token-order capture (completed 2026-09-07)
+
+- [x] Preserve guarded token ancestry through memory operations, joins,
+      branch results and verified loop summaries. Use operation-pair token
+      order in HB, same-instance queries, atomic reads-from and coherence,
+      without inheriting Triton fences or positional dependency order.
+      Refuse unsupported token recurrences explicitly. Preserve ordering
+      metadata on every compiled proof/requery path, including the repaired
+      content-free attempt. All 366 integrated unit/capture regressions pass;
+      the prior missing-fence diagnostic coverage is included. Full scope,
+      semantic boundary and successor verification provenance are in
+      `evaluation/CUTILE_TOKEN_ORDER.md`; frozen measurement pins are preserved.

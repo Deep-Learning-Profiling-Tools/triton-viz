@@ -221,9 +221,7 @@ class GlobalEncoding:
     # between the dense access seqs); the two-copy solver reads them under
     # fence-ordered semantics (paper design-fence-order.md, option A).
     fence_seqs: tuple[float, ...] = ()
-    # False for graphs whose reader does not yet expose the instance's
-    # ordering constructs as fences (the cuTile reader: tokens are opaque
-    # to it), so the legacy full program order stays in force there.
+    # Whether the frontend supplies its memory-ordering discipline.
     fence_order_applies: bool = True
     # event_ids of records built from over-approximated accesses
     # (mask_dropped / guarded): SAT reports touching them are not witnesses.
@@ -256,6 +254,9 @@ class GlobalEncoding:
     # True when any record's terms went through a snapshot Select: the
     # proof holds for this launch's tensor CONTENTS (content-qualified).
     content_qualified: bool = False
+    # cuTile's explicit operation-pair relation, in pre-copy Z3 symbols.
+    # None keeps the Triton discipline; {} means no token-ordered pairs.
+    token_order: dict[tuple[int, int], Any] | None = None
 
 
 @dataclass
@@ -1322,6 +1323,49 @@ def _pre_exit_representative(poll: Any, access: AccessEvent, event_id: int) -> A
     )
 
 
+def _encode_token_order(
+    graph: AccessGraph, env: _RaceEnv, records: list[Any]
+) -> dict[tuple[int, int], Any] | None:
+    """Lower exact scalar token guards without widening their truth set.
+
+    Widening an access can conservatively lose precision; widening an
+    ordering guard can instead hide a race. Unmodeled token guards must
+    therefore refuse, including guards whose observations are not part of
+    this encoder's token fragment. Reachability is already transitive in
+    the reader, so filtering T0 groups cannot drop an intermediate token.
+    """
+    relation = graph.token_order
+    if relation is None:
+        if graph.frontend == "cutile":
+            raise UnsupportedTTIR(
+                "cuTile graph has no captured token order", kind="token-order"
+            )
+        return None
+
+    def validate(term: Term | None) -> None:
+        if term is None:
+            return
+        if isinstance(term, (Arange, DataDep, Observed, Loaded, IterArgOffset)):
+            raise UnsupportedTTIR(
+                "token order requires an exact scalar control predicate",
+                kind="token-order",
+            )
+        for attr in ("a", "b", "cond", "t", "f"):
+            sub = getattr(term, attr, None)
+            if sub is not None:
+                validate(sub)
+
+    present = {r.program_seq for r in records}
+    out: dict[tuple[int, int], Any] = {}
+    for (source, target), guard in relation.items():
+        if not (0 <= source < target < len(graph.accesses)):
+            raise UnsupportedTTIR("invalid token-order access pair", kind="token-order")
+        validate(guard)
+        if source in present and target in present:
+            out[source, target] = True if guard is None else _as_bool(env.eval(guard))
+    return out
+
+
 def encode_graph(
     graph: AccessGraph,
     params: dict[str, int],
@@ -1398,7 +1442,7 @@ def encode_graph(
             next_rep_id += 1
     return GlobalEncoding(
         fence_seqs=tuple(graph.fences),
-        fence_order_applies=getattr(graph, "frontend", "triton") != "cutile",
+        token_order=_encode_token_order(graph, env, records),
         records=records,
         arange_dict=env.arange_dict,
         uncertain_event_ids=uncertain,
@@ -1723,8 +1767,7 @@ def encode_graph_t0(
                 name,
                 GlobalEncoding(
                     fence_seqs=tuple(graph.fences),
-                    fence_order_applies=getattr(graph, "frontend", "triton")
-                    != "cutile",
+                    token_order=_encode_token_order(graph, env, records),
                     records=records,
                     arange_dict=env.arange_dict,
                     uncertain_event_ids=uncertain,

@@ -1269,6 +1269,7 @@ class CompiledRaceDetector(Client):
             solver = TwoCopySymbolicHBSolver(
                 enc.records,
                 fence_seqs=enc.fence_seqs,
+                token_order=enc.token_order,
                 fence_order=cfg.race_detector_fence_order and enc.fence_order_applies,
                 grid=symbolic_grid(enc, lg),
                 arange_dict=enc.arange_dict,
@@ -1394,6 +1395,9 @@ class CompiledRaceDetector(Client):
             grid = symbolic_grid(enc, lg)
             solver = TwoCopySymbolicHBSolver(
                 enc.records,
+                fence_seqs=enc.fence_seqs,
+                token_order=enc.token_order,
+                fence_order=cfg.race_detector_fence_order and enc.fence_order_applies,
                 grid=grid,
                 arange_dict=enc.arange_dict,
                 ablations=self.ablations,
@@ -1461,6 +1465,7 @@ class CompiledRaceDetector(Client):
             return TwoCopySymbolicHBSolver(
                 enc.records,
                 fence_seqs=enc.fence_seqs,
+                token_order=enc.token_order,
                 fence_order=cfg.race_detector_fence_order and enc.fence_order_applies,
                 grid=grid,
                 arange_dict=enc.arange_dict,
@@ -1519,6 +1524,7 @@ class CompiledRaceDetector(Client):
                 solver = TwoCopySymbolicHBSolver(
                     enc.records,
                     fence_seqs=enc.fence_seqs,
+                    token_order=enc.token_order,
                     fence_order=cfg.race_detector_fence_order
                     and enc.fence_order_applies,
                     grid=symbolic_grid(enc, launch_grid, t0=True),
