@@ -38,15 +38,29 @@ appropriate incoming/outgoing token paths.
 ## Loop boundary
 
 The existing same-instance query shares each symbolic iterator between its
-two lane roles. For loops with potentially conflicting iterations, the
-reader therefore requires a carried token that orders every body memory
-operation before the next iteration, and it checks actual continuation
-operands. Each carried slot must retain its prior ancestry. Token-independent
-write iterations, reset/swapped ancestry, and unsupported token control
-structures produce a named `token-order` abstention. Read-only loops have
-no conflicting pair between their iterations; zero-trip and single-trip
-loops require no cross-iteration ordering. Loop exits preserve actual output
-slots and the zero-trip initial token.
+two lane roles. The reader therefore checks each write-involving pair across
+iterations, including each write's self-pair. Each temporal direction needs
+a carried slot whose continuation collects the earlier access and whose
+input reaches the later access. The two directions may use different slots.
+For repeated iterations, each carried slot must retain its prior ancestry, so an established edge
+survives intervening iterations.
+
+Unordered pairs become explicit `AccessGraph.loop_token_conflicts`
+obligations. Before any solver path or tensor partition can omit them, the
+encoder checks that their allocations cannot overlap. T1 uses verified
+allocation byte intervals under the existing in-bounds premise. T0 uses its
+explicit non-aliasing premise; the public client checks the actual allocation
+intervals before accepting a T0 proof. Different formal names or different
+view pointers alone do not establish separation. Overlapping or unavailable
+intervals cause a named `token-order` abstention, including disjoint views of
+one allocation that would need finer footprint reasoning. This check applies
+to the L2 content-free proof path as well.
+
+Read/read pairs have no conflict, and zero-trip or single-trip loops have
+no pair of distinct iterations. Loop exits preserve actual output slots and
+the zero-trip initial token. Reset/swapped ancestry and unsupported token
+control structures still refuse. No allocation check introduces a token or
+happens-before edge.
 
 Await summaries additionally require token-serialized polls, preserving the
 justification for the pre-exit representative. The actual break operands
@@ -75,7 +89,7 @@ directories resolved all nine environmental failures. All 366 then pass
 together in 19.23 seconds. Repository hooks pass after formatting; an AST
 comparison confirms that the formatter changed no Python semantics.
 
-The affected-corpus checks completed at source commit `6e1d3eb` on
+The first affected-corpus checks completed at source commit `6e1d3eb` on
 2026-09-07 at 15:31:28 UTC, under exclusive host admission. Each configuration
 used a fresh subprocess, seed 0, a 200-second outer cap, and two workers.
 These are successor correctness checks, not paper performance measurements
@@ -99,7 +113,12 @@ match the existing labels; the benchmark's one unscored row abstains at
 every level. Relative to the frozen `31c48f5` datasets, the only verdict
 changes are `trb008_loop_stride_no` (race-free to abstain) and
 `trb008_loop_stride_yes` (race to abstain), at all three levels. Their
-token-independent write iterations lie outside the verified loop summary.
+mixed read/write loops fail that pin's stronger requirement for one boundary
+covering every body access. Inspection of the actual captured IR corrects
+the earlier "token-independent write iterations" description: stores already
+consume a carried token and return their output on the backedge; loads use
+the external root token. Their separate input/output allocations discharge
+the remaining load/store obligations under the refined check above.
 Four unchanged abstentions, the L0/L1 `trb018_lookback_no` and
 `trb018_lookback_cta_yes` rows, now name `token-order` rather than
 `control-flow`. All other verdicts are unchanged.
@@ -118,3 +137,49 @@ Because the content-free proof-path repair also affects Triton L2, a final
 common-pin paper adoption must cover the full required experiment set at
 this or a successor implementation pin. The affected cuTile receipts do not
 replace that submission requirement.
+
+## Conflict-aware loop refinement (2026-09-07)
+
+The user authorized recovery of the two loop-stride configurations by
+requiring token ordering only for pairs that can conflict. The reader and
+encoder implement the pairwise checks and allocation obligations described
+above. The original captures and expected labels are preserved.
+
+All 433 integrated regression tests pass in 19.97 seconds, including 41
+dedicated allocation/loop cases. The selection covers the cuTile reader,
+token encoding, shared solver, storage extents, compiled capture, Route 2,
+multipath analysis and the previous fence/diagnostic regressions. New cases
+exercise actual and shifted aliases, partially overlapping intervals,
+adjacent allocations, both temporal directions, independent serial chains,
+write self-pairs, T0 premises and runtime zero/single-trip loops. An
+independent source review checks the proof paths and unchanged await rule.
+The successor checks complete at source `030494c` using the same 123 cuTile
+configurations at each of L0, L1 and L2. All 369 complete without an error;
+all 220 decided results match the existing labels, and 149 abstain.
+
+| Corpus | Level | Configurations | Race-free | Race | Abstain |
+|---|---|---:|---:|---:|---:|
+| TritonRaceBench cuTile | L0 | 62 | 13 | 13 | 36 |
+| TritonRaceBench cuTile | L1 | 62 | 13 | 13 | 36 |
+| TritonRaceBench cuTile | L2 | 62 | 21 | 24 | 17 |
+| TileBench cuTile | L0 | 61 | 38 | 0 | 23 |
+| TileBench cuTile | L1 | 61 | 38 | 0 | 23 |
+| TileBench cuTile | L2 | 61 | 47 | 0 | 14 |
+
+Only the intended two configurations change verdict relative to `6e1d3eb`:
+`trb008_loop_stride_no` recovers a `this-params-any-grid` race-free proof,
+and `trb008_loop_stride_yes` recovers an exact cross-instance WAW report,
+at every level. All 369 verdicts and proof extents match their original
+`31c48f5` results. This agreement does not revert the token-order policy or
+replace the required successor measurements.
+
+The run uses unchanged captures, seed 0, fresh row subprocesses, two workers,
+a 200-second outer cap and exclusive host admission. Its raw datasets,
+manifest, hashes, per-row comparison and logs are retained in canonical
+`evaluation/results/cutile-loop-conflicts-030494c/`. These are targeted
+correctness checks, with no timing adoption. The paper's current routine
+full-corpus rerun policy remains L1/L2; the scoped L0 check does not restore
+a full L0 requirement. All repository hooks pass on the integrated change.
+Independent receipt verification confirms both capture hashes, all six
+datasets and their copied hashes, unique/matching configuration sets, the
+source pin and token-policy flags, and the unchanged earlier datasets.

@@ -60,12 +60,13 @@ TTIR reader's multipath mode does, and is byte-identical otherwise:
   accesses are ``guarded``, value results bind to :class:`DataDep`. Token
   results instead require an exact scalar condition and merge the actual
   yielded tokens under their arm predicates; unknown or lane conditions refuse.
-Loops with writes require a verified serial token boundary between iterations,
-because the shared solver compares one iteration per same-instance access.
-Each carried token must preserve its own ancestry, and a common carried slot
-must precede all body accesses and collect them before the backedge. Read-only
-``for`` loops need only the slot-preservation check. Statically zero-trip bodies
-are skipped, and a single-trip loop needs no recurrence proof.
+Each carried token must preserve its own ancestry. For ordinary ``for`` loops,
+each potentially conflicting access pair must be ordered in both iteration
+directions or proved non-aliasing by the encoder's allocation-interval checks.
+Unordered pairs are retained in ``AccessGraph.loop_token_conflicts`` rather
+than discarded on the basis of different formal names. Read-only pairs need
+no iteration order. Statically zero-trip bodies are skipped, and a single-trip
+loop needs no recurrence proof.
 The while-form ``loop`` carrying data values (a data-dependent trip
 count over real values) is refused; the token-only while-form is the
 AWAIT shape (the TTIR reader's ``scf.while`` spin contract, spec C1.1:
@@ -95,6 +96,7 @@ from .ttir_reader import (
     DataDep,
     FuncArg,
     LoopInfo,
+    LoopTokenConflict,
     LoopVar,
     Not,
     Observed,
@@ -331,6 +333,7 @@ class _State:
     in_spin: bool = False
     token_order: dict[tuple[int, int], Term | None] = field(default_factory=dict)
     token_inputs: dict[int, _Token] = field(default_factory=dict)
+    loop_token_conflicts: list[LoopTokenConflict] = field(default_factory=list)
 
 
 def _as_term(v: Any, ctx: str) -> Term:
@@ -401,6 +404,7 @@ def parse_cutile_ir(
             multipath=True,
             frontend="cutile",
             token_order=st.token_order,
+            loop_token_conflicts=st.loop_token_conflicts,
         )
     return AccessGraph(
         kernel_name=kernel_name,
@@ -411,6 +415,7 @@ def parse_cutile_ir(
         pid_axes=st.pid_axes,
         frontend="cutile",
         token_order=st.token_order,
+        loop_token_conflicts=st.loop_token_conflicts,
     )
 
 
@@ -716,6 +721,7 @@ def _serial_loop_boundary(
     where: str,
     *,
     require_serial: bool = False,
+    loop_ssa: str | None = None,
 ) -> None:
     if len(continued) != len(carried):
         _token_failure(
@@ -736,22 +742,49 @@ def _serial_loop_boundary(
         slots.append((marker, value))
     if not body:
         return
-    if not require_serial and all(st.accesses[index].kind == "load" for index in body):
-        # Distinct iterations contain reads only, so there is no omitted
-        # intra-instance write conflict. The slot-preservation checks above
-        # keep initializer ancestry and accumulated result tokens sound.
-        return
-    for marker, value in slots:
-        if all(
-            _token_contains(st.token_inputs[index], marker, _access_control(st, index))
-            and _token_contains(value, index, _access_control(st, index))
-            for index in body
-        ):
-            return
-    _token_failure(
-        f"{where}: independent iteration token topology has no verified serial "
-        "memory boundary (write iterations without a shared token boundary are not modeled)"
-    )
+    if require_serial:
+        # Await representatives stand for every failed poll, even plain
+        # loads. Their retained edges still require one serial boundary.
+        for marker, value in slots:
+            if all(
+                _token_contains(
+                    st.token_inputs[index], marker, _access_control(st, index)
+                )
+                and _token_contains(value, index, _access_control(st, index))
+                for index in body
+            ):
+                return
+        _token_failure(
+            f"{where}: independent iteration token topology has no verified "
+            "serial memory boundary"
+        )
+
+    assert loop_ssa is not None
+    controls = {index: _access_control(st, index) for index in body}
+
+    def orders_next_iteration(first: int, second: int) -> bool:
+        # First feeds the carried value in an earlier iteration; second
+        # consumes that slot in a later iteration. Slot preservation above
+        # carries the edge through any intervening iterations. These two
+        # path implications apply independently in their own iterations.
+        return any(
+            _token_contains(value, first, controls[first])
+            and _token_contains(st.token_inputs[second], marker, controls[second])
+            for marker, value in slots
+        )
+
+    for offset, first in enumerate(body):
+        for second in body[offset:]:
+            if not (st.accesses[first].is_write or st.accesses[second].is_write):
+                continue
+            if orders_next_iteration(first, second) and orders_next_iteration(
+                second, first
+            ):
+                continue
+            # A write's self-pair matters too: the shared-iterator query
+            # cannot see two executions of that operation at different
+            # iterations. All unproved pairs survive to the encoder.
+            st.loop_token_conflicts.append(LoopTokenConflict(loop_ssa, first, second))
 
 
 def _access_control(st: _State, index: int) -> Term | None:
@@ -876,6 +909,7 @@ def _handle_for(
             range(first_access, len(st.accesses)),
             st,
             where,
+            loop_ssa=iv,
         )
     nonempty = Cmp("slt", bounds[0], bounds[1])
     st.env = saved_env

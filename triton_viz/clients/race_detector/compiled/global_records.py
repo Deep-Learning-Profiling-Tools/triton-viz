@@ -1366,6 +1366,76 @@ def _encode_token_order(
     return out
 
 
+def _check_loop_token_conflicts(
+    graph: AccessGraph,
+    env: _RaceEnv,
+    tensors: dict[str, GlobalTensor] | None = None,
+) -> None:
+    """Discharge cross-iteration pairs not ordered by carried tokens.
+
+    The reader checks both temporal directions, including write self-pairs.
+    Its remaining obligations must be settled before any proof path or
+    tensor partition can omit them. T1 uses verified allocation byte bounds
+    under the encoder's existing in-bounds premise. T0 has no launch and
+    relies on its explicit distinct-allocation premise; the public client
+    checks that premise against real allocations before accepting a proof.
+    Overlapping allocations remain unsupported even when finer footprint
+    reasoning could separate their accesses. No new ordering edge is added.
+    """
+    loops = {loop.loop_ssa for loop in _graph_loops(graph)}
+    for conflict in graph.loop_token_conflicts:
+        if (
+            conflict.loop_ssa not in loops
+            or not 0 <= conflict.first <= conflict.second < len(graph.accesses)
+        ):
+            raise UnsupportedTTIR(
+                "invalid cross-iteration token obligation", kind="token-order"
+            )
+        first = graph.accesses[conflict.first]
+        second = graph.accesses[conflict.second]
+        for access in (first, second):
+            enclosing = access.loops or (
+                (graph.loop.loop_ssa,) if access.in_loop and graph.loop else ()
+            )
+            if conflict.loop_ssa not in enclosing:
+                raise UnsupportedTTIR(
+                    "token obligation refers to an access outside its loop",
+                    kind="token-order",
+                )
+        binding = env._binding(conflict.loop_ssa)
+        if (
+            binding.zero_trip
+            or binding.single_trip
+            or env.zero_trip_for(first)
+            or env.zero_trip_for(second)
+        ):
+            # There is no pair of active accesses in different iterations.
+            continue
+        if not first.is_write and not second.is_write:
+            continue
+        if first.base_param != second.base_param:
+            if env.symbolic_params:
+                # Explicit T0 non-alias premise, before per-tensor grouping.
+                continue
+            first_meta = (tensors or {}).get(first.base_param)
+            second_meta = (tensors or {}).get(second.base_param)
+            first_bounds = first_meta.allocation_interval() if first_meta else None
+            second_bounds = second_meta.allocation_interval() if second_meta else None
+            if first_bounds is not None and second_bounds is not None:
+                if (
+                    first_bounds[1] <= second_bounds[0]
+                    or second_bounds[1] <= first_bounds[0]
+                ):
+                    continue
+        raise UnsupportedTTIR(
+            f"loop {conflict.loop_ssa}: cross-iteration accesses at lines "
+            f"{first.line_no} ({first.base_param}) and "
+            f"{second.line_no} ({second.base_param}) may overlap without a "
+            "verified serial memory boundary",
+            kind="token-order",
+        )
+
+
 def encode_graph(
     graph: AccessGraph,
     params: dict[str, int],
@@ -1393,6 +1463,7 @@ def encode_graph(
             )
 
     env = _RaceEnv(graph, params, multipath=multipath, tensors=tensors)
+    _check_loop_token_conflicts(graph, env, tensors)
     await_prems, await_obs = _await_premises(graph, env)
     records = []
     uncertain: set[int] = set()
@@ -1727,6 +1798,7 @@ def encode_graph_t0(
     # (the widening Route 3 applied), and an address built on one refuses
     # inside _record_for; the T1 rung is where the snapshot enters.
     env = _RaceEnv(graph, {}, symbolic_params=True, multipath=multipath)
+    _check_loop_token_conflicts(graph, env)
     await_prems, await_obs = _await_premises(graph, env)
     # NO pre-exit representative at T0 — sound for a verified reason: T0
     # has no launch, hence no initial values, so the closed-world escape

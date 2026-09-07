@@ -433,6 +433,20 @@ class LoopInfo:
     step: Term
 
 
+@dataclass(frozen=True)
+class LoopTokenConflict:
+    """A cross-iteration pair whose non-aliasing remains to be established.
+
+    Access indices refer to the original graph, including a write paired
+    with itself. The reader cannot discharge these pairs from formal names:
+    encoding must prove the applicable allocation non-aliasing premise.
+    """
+
+    loop_ssa: str
+    first: int
+    second: int
+
+
 @dataclass
 class AccessGraph:
     kernel_name: str
@@ -472,6 +486,10 @@ class AccessGraph:
     # is unconditional; otherwise it is a scalar per-instance condition.
     # Memory masks do not gate token propagation through an operation.
     token_order: dict[tuple[int, int], Term | None] | None = None
+    # cuTile pairs not serialized across this loop's iteration boundary.
+    # Consumers must discharge every pair before using shared iterators in
+    # same-instance queries; distinct formal names alone are insufficient.
+    loop_token_conflicts: list[LoopTokenConflict] = field(default_factory=list)
 
     def arg(self, name: str) -> FuncArg | None:
         for a in self.func_args:
