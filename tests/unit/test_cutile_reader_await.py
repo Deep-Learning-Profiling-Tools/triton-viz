@@ -188,7 +188,14 @@ def test_free_standing_cas_is_recorded_and_refused_by_the_encoder():
     Triton static track's boundary for tt.atomic_cas."""
     text = (
         _HDR
-        + "\n".join([_CAS_POLL.strip().replace("$token.14", "$token"), *_TAIL])
+        # This fixture removes the loop, so its former result token must
+        # also be replaced; unresolved token references now refuse.
+        + "\n".join(
+            [
+                _CAS_POLL.strip().replace("$token.14", "$token"),
+                *[line.replace("$token.13", "$153") for line in _TAIL],
+            ]
+        )
         + "\n"
     )
     g = parse_cutile_ir(text, "t")
@@ -326,3 +333,39 @@ def test_benchmark_free_standing_cas_twins_refuse_as_cas_synchronization(
     res = _static_track_cutile(_cutile_bench[row], 0, LadderLevel.L2)
     assert res["status"] == "unsupported"
     assert res["reason"].startswith("cas-synchronization:"), res["reason"]
+
+
+def test_await_token_result_uses_the_actual_break_operand_slot():
+    normal = parse_cutile_ir(_ir(), "t")
+    assert normal.token_order == {(0, 1): None}
+    # The tail consumes the second result. Returning the initial token in
+    # that slot must not invent a dependency on the successful poll.
+    exit = tuple(
+        line.replace("break $153, $153", "break $153, $token") for line in _EXIT_ELSE
+    )
+    bypass = parse_cutile_ir(_ir(exit=exit), "t")
+    assert bypass.token_order == {}
+
+
+def test_nonserial_plain_load_poll_refuses_even_with_readonly_body():
+    poll = "    $152: Tile[int32,(1)], $153: Token = load_pointer(pointer=$150, mask=$148, padding_value=$151, token=$token, latency=None)"
+    # Both carried slots retain their own ancestry, but the next poll does
+    # not consume that recurrence. It cannot order all failed-poll copies.
+    body = ("    $joined: Token = join_tokens(tokens=($token.14, $153))",)
+    exit = tuple(
+        line.replace("continue $153, $153", "continue $joined, $joined")
+        for line in _EXIT_ELSE
+    )
+    with pytest.raises(UnsupportedTTIR, match="serial memory boundary") as exc:
+        parse_cutile_ir(_ir(*body, poll=poll, exit=exit), "t")
+    assert exc.value.kind == "token-order"
+
+
+def test_await_cannot_reset_its_continued_tokens():
+    exit = tuple(
+        line.replace("continue $153, $153", "continue $token, $token")
+        for line in _EXIT_ELSE
+    )
+    with pytest.raises(UnsupportedTTIR, match="drops or swaps") as exc:
+        parse_cutile_ir(_ir(exit=exit), "t")
+    assert exc.value.kind == "token-order"

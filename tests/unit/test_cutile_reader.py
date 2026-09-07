@@ -43,7 +43,12 @@ def _solve(ir: str, n: int = 256, grid: tuple = (4, 1, 1)):
     }
     enc = encode_graph(g, params, tensors)
     solver = TwoCopySymbolicHBSolver(
-        enc.records, grid=symbolic_grid(enc, grid), arange_dict=enc.arange_dict
+        enc.records,
+        grid=symbolic_grid(enc, grid),
+        arange_dict=enc.arange_dict,
+        fence_order=True,
+        fence_seqs=enc.fence_seqs,
+        token_order=enc.token_order,
     )
     return g, solver.find_races()
 

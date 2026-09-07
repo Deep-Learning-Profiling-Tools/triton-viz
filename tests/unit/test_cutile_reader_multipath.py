@@ -66,6 +66,9 @@ def _t1(g, params, numel=1 << 14, grid=(4, 1, 1)):
         grid=symbolic_grid(enc, grid),
         arange_dict=enc.arange_dict,
         enum_fallback_grid=grid,
+        fence_order=True,
+        fence_seqs=enc.fence_seqs,
+        token_order=enc.token_order,
     )
     return solver.find_races()
 
@@ -77,44 +80,45 @@ def _pids(rep):
 # ───────────────────── fixtures ─────────────────────
 
 SEQ_LOOPS = _ir(
-    "for $i in range($c0, n, $c1) (with )",
-    "do ($i: Tile[int32,()])",
-    "    ($i: Tile[int32,()]):",
+    "$done_i: Token = for $i in range($c0, n, $c1) (with $ti: Token = $token)",
+    "do ($i: Tile[int32,()], $ti: Token)",
+    "    ($i: Tile[int32,()], $ti: Token):",
     "    $5: Tile[int32,()] = " + _ARITH.format(a="$1", b="n", fn="mul"),
     "    $6: Tile[int32,()] = " + _ARITH.format(a="$5", b="$i", fn="add"),
-    "    $7: Token = " + _STORE.format(idx="$6"),
-    "    continue ",
-    "for $j in range($c0, m, $c1) (with )",
-    "do ($j: Tile[int32,()])",
-    "    ($j: Tile[int32,()]):",
-    "    $8: Token = " + _STORE.format(idx="$j"),
-    "    continue ",
+    "    $7: Token = " + _STORE.format(idx="$6").replace("token=$token", "token=$ti"),
+    "    continue $7",
+    "$done_j: Token = for $j in range($c0, m, $c1) (with $tj: Token = $done_i)",
+    "do ($j: Tile[int32,()], $tj: Token)",
+    "    ($j: Tile[int32,()], $tj: Token):",
+    "    $8: Token = " + _STORE.format(idx="$j").replace("token=$token", "token=$tj"),
+    "    continue $8",
 )
 
 NESTED_LOOPS = _ir(
-    "for $i in range($c0, n, $c1) (with )",
-    "do ($i: Tile[int32,()])",
-    "    ($i: Tile[int32,()]):",
+    "$done_i: Token = for $i in range($c0, n, $c1) (with $ti: Token = $token)",
+    "do ($i: Tile[int32,()], $ti: Token)",
+    "    ($i: Tile[int32,()], $ti: Token):",
     "    $5: Tile[int32,()] = " + _ARITH.format(a="$1", b="n", fn="mul"),
     "    $6: Tile[int32,()] = " + _ARITH.format(a="$5", b="$i", fn="add"),
     "    $7: Tile[int32,()] = " + _ARITH.format(a="$6", b="m", fn="mul"),
-    "    for $j in range($c0, m, $c1) (with )",
-    "    do ($j: Tile[int32,()])",
-    "        ($j: Tile[int32,()]):",
+    "    $done_j: Token = for $j in range($c0, m, $c1) (with $tj: Token = $ti)",
+    "    do ($j: Tile[int32,()], $tj: Token)",
+    "        ($j: Tile[int32,()], $tj: Token):",
     "        $8: Tile[int32,()] = " + _ARITH.format(a="$7", b="$j", fn="add"),
-    "        $9: Token = " + _STORE.format(idx="$8"),
-    "        continue ",
-    "    continue ",
+    "        $9: Token = "
+    + _STORE.format(idx="$8").replace("token=$token", "token=$tj"),
+    "        continue $9",
+    "    continue $done_j",
 )
 
 SINGLE_LOOP = _ir(
-    "for $i in range($c0, n, $c1) (with )",
-    "do ($i: Tile[int32,()])",
-    "    ($i: Tile[int32,()]):",
+    "$done_i: Token = for $i in range($c0, n, $c1) (with $ti: Token = $token)",
+    "do ($i: Tile[int32,()], $ti: Token)",
+    "    ($i: Tile[int32,()], $ti: Token):",
     "    $5: Tile[int32,()] = " + _ARITH.format(a="$1", b="n", fn="mul"),
     "    $6: Tile[int32,()] = " + _ARITH.format(a="$5", b="$i", fn="add"),
-    "    $7: Token = " + _STORE.format(idx="$6"),
-    "    continue ",
+    "    $7: Token = " + _STORE.format(idx="$6").replace("token=$token", "token=$ti"),
+    "    continue $7",
 )
 
 
@@ -330,19 +334,20 @@ def test_unmodelable_condition_widens_the_continuation():
 
 def test_if_inside_a_loop_body_conjoins_the_iteration_and_the_condition():
     text = _ir(
-        "for $i in range($c0, n, $c1) (with )",
-        "do ($i: Tile[int32,()])",
-        "    ($i: Tile[int32,()]):",
+        "$done: Token = for $i in range($c0, n, $c1) (with $ti: Token = $token)",
+        "do ($i: Tile[int32,()], $ti: Token)",
+        "    ($i: Tile[int32,()], $ti: Token):",
         '    $8: Tile[bool_,()] = raw_cmp(lhs=$i, rhs=$c0, fn="eq")',
-        "    if(cond=$8)",
+        "    $branch: Token = if(cond=$8)",
         "    then",
         "        ():",
-        "        $10: Token = " + _STORE.format(idx="$1"),
-        "        yield ",
+        "        $10: Token = "
+        + _STORE.format(idx="$1").replace("token=$token", "token=$ti"),
+        "        yield $10",
         "    else",
         "        ():",
-        "        yield ",
-        "    continue ",
+        "        yield $ti",
+        "    continue $branch",
     )
     g = _mp(text)
     (store,) = g.accesses
@@ -505,19 +510,21 @@ def test_if_result_with_a_loaded_yield_refuses_in_address_position():
 def test_for_loop_as_the_last_statement_of_an_if_arm():
     text = _ir(
         '$8: Tile[bool_,()] = raw_cmp(lhs=$1, rhs=$c0, fn="eq")',
-        "if(cond=$8)",
+        "$branch: Token = if(cond=$8)",
         "then",
         "    ():",
-        "    for $i in range($c0, n, $c1) (with )",
-        "    do ($i: Tile[int32,()])",
-        "        ($i: Tile[int32,()]):",
-        "        $10: Token = " + _STORE.format(idx="$i"),
-        "        continue ",
-        "    yield ",
+        "    $done: Token = for $i in range($c0, n, $c1) (with $ti: Token = $token)",
+        "    do ($i: Tile[int32,()], $ti: Token)",
+        "        ($i: Tile[int32,()], $ti: Token):",
+        "        $10: Token = "
+        + _STORE.format(idx="$i").replace("token=$token", "token=$ti"),
+        "        continue $10",
+        "    yield $done",
         "else",
         "    ():",
-        "    yield ",
-        "$11: Token = " + _STORE.format(idx="$1"),
+        "    yield $token",
+        "$11: Token = "
+        + _STORE.format(idx="$1").replace("token=$token", "token=$branch"),
     )
     g = _mp(text)
     in_loop, after = g.accesses
@@ -534,17 +541,18 @@ def test_inner_loop_iterates_independently_of_the_outer():
     {1,2,3} (a race); binding the inner iterator to the outer loop's
     range would shrink it to {0} / {1} and prove."""
     text = _ir(
-        "for $i in range($c0, n, $c1) (with )",
-        "do ($i: Tile[int32,()])",
-        "    ($i: Tile[int32,()]):",
+        "$done_i: Token = for $i in range($c0, n, $c1) (with $ti: Token = $token)",
+        "do ($i: Tile[int32,()], $ti: Token)",
+        "    ($i: Tile[int32,()], $ti: Token):",
         "    $5: Tile[int32,()] = " + _ARITH.format(a="$1", b="$i", fn="add"),
-        "    for $j in range($c0, m, $c1) (with )",
-        "    do ($j: Tile[int32,()])",
-        "        ($j: Tile[int32,()]):",
+        "    $done_j: Token = for $j in range($c0, m, $c1) (with $tj: Token = $ti)",
+        "    do ($j: Tile[int32,()], $tj: Token)",
+        "        ($j: Tile[int32,()], $tj: Token):",
         "        $8: Tile[int32,()] = " + _ARITH.format(a="$5", b="$j", fn="add"),
-        "        $9: Token = " + _STORE.format(idx="$8"),
-        "        continue ",
-        "    continue ",
+        "        $9: Token = "
+        + _STORE.format(idx="$8").replace("token=$token", "token=$tj"),
+        "        continue $9",
+        "    continue $done_j",
     )
     g = _mp(text)
     reports = _t1(g, {"n": 1, "m": 3})
@@ -555,19 +563,20 @@ def test_inner_loop_iterates_independently_of_the_outer():
 def test_loop_var_in_path_gates_the_iteration():
     def kernel(cmp_rhs):
         return _ir(
-            "for $i in range($c0, n, $c1) (with )",
-            "do ($i: Tile[int32,()])",
-            "    ($i: Tile[int32,()]):",
+            "$done: Token = for $i in range($c0, n, $c1) (with $ti: Token = $token)",
+            "do ($i: Tile[int32,()], $ti: Token)",
+            "    ($i: Tile[int32,()], $ti: Token):",
             f'    $8: Tile[bool_,()] = raw_cmp(lhs=$i, rhs={cmp_rhs}, fn="eq")',
-            "    if(cond=$8)",
+            "    $branch: Token = if(cond=$8)",
             "    then",
             "        ():",
-            "        $10: Token = " + _STORE.format(idx="$c0"),
-            "        yield ",
+            "        $10: Token = "
+            + _STORE.format(idx="$c0").replace("token=$token", "token=$ti"),
+            "        yield $10",
             "    else",
             "        ():",
-            "        yield ",
-            "    continue ",
+            "        yield $ti",
+            "    continue $branch",
         )
 
     # iteration 0 of every pid writes tile 0: a race
@@ -646,6 +655,9 @@ def test_corpus_multi_loop_rows_parse_only_at_l2(row):
         enc.records,
         grid=symbolic_grid(enc, tuple(spec.grid)),
         arange_dict=enc.arange_dict,
+        fence_order=True,
+        fence_seqs=enc.fence_seqs,
+        token_order=enc.token_order,
     )
     assert solver.find_races() == []
     groups = encode_graph_t0(g, multipath=True)

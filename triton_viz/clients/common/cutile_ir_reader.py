@@ -26,14 +26,19 @@ Semantic mapping (why this is a thin front-end, not a new model):
   :class:`LoopInfo` slot with Term bounds; loop-carried non-token values
   bind to :class:`DataDep` (they are tile VALUES — cuTile advances
   addresses by index arithmetic, not carried pointers).
+- Tokens contribute a guarded SSA partial order in ``AccessGraph.token_order``:
+  memory operations inherit their input token's ancestors and add themselves;
+  ``join_tokens`` merges ancestors without ordering its independent inputs.
+  Fully masked operations still transmit their token ancestry.
 - Scalar params keep their python names; an array param ``p`` arrives
   flattened as ``p_0`` (base pointer), ``p_1..p_r`` (shape dims) and
   ``p_{r+1}..p_{2r}`` (strides). Metadata slots become :class:`Param`
   terms under their FLATTENED names — the harness binds their values
   from the captured descriptors.
 
-Uncertainty discipline is inherited verbatim: an unmodeled op binds its
-results to :class:`DataDep` (never an exception); DataDep reaching an
+Unmodeled value operations bind their results to :class:`DataDep`;
+unresolved tokens and unfamiliar token operations refuse with ``token-order``.
+DataDep reaching an
 address raises :class:`UnsupportedTTIR` (kind="indirect-address"),
 reaching a mask drops it and flags ``mask_dropped`` (widened, proof-only),
 reaching an atomic update clears ``atomic_val``. Unknown BLOCK structure
@@ -52,21 +57,31 @@ TTIR reader's multipath mode does, and is byte-identical otherwise:
   the ``if`` carries the other arm's condition; an ``if`` with results
   binds them to a Select over the two ``yield``s. An unmodelable
   condition (loaded data) widens: both arms stay reachable, their
-  accesses are ``guarded``, results bind to :class:`DataDep`.
+  accesses are ``guarded``, value results bind to :class:`DataDep`. Token
+  results instead require an exact scalar condition and merge the actual
+  yielded tokens under their arm predicates; unknown or lane conditions refuse.
+Loops with writes require a verified serial token boundary between iterations,
+because the shared solver compares one iteration per same-instance access.
+Each carried token must preserve its own ancestry, and a common carried slot
+must precede all body accesses and collect them before the backedge. Read-only
+``for`` loops need only the slot-preservation check. Statically zero-trip bodies
+are skipped, and a single-trip loop needs no recurrence proof.
 The while-form ``loop`` carrying data values (a data-dependent trip
 count over real values) is refused; the token-only while-form is the
 AWAIT shape (the TTIR reader's ``scf.while`` spin contract, spec C1.1:
 one non-mutating re-read of one location, compared against a
 loop-invariant value, exited on it) and becomes one awaited access
-carrying the loop's exit predicate, at every ladder level. The other
+carrying the loop's exit predicate, at every ladder level. Await polls always
+require the serial boundary, including plain loads, and loop result tokens
+come from the corresponding ``break`` operands. The other
 ``break`` stay refused by name.
 """
 
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass, field, replace
-from typing import Any
+from dataclasses import dataclass, field, fields, is_dataclass, replace
+from typing import Any, NoReturn
 
 from .ttir_reader import (
     AccessEvent,
@@ -122,11 +137,98 @@ _RMW_MODE = {
 _SCOPE = {"DEVICE": "gpu", "BLOCK": "cta", "SYSTEM": "sys", "NONE": "gpu"}
 
 
+@dataclass(frozen=True)
 class _Token:
-    """Memory-ordering token — opaque to footprints."""
+    """SSA token ancestors, guarded by scalar control-flow predicates.
+
+    Integer origins identify memory operations; string origins identify loop
+    token arguments while checking the loop's iteration-order contract.
+    Maps are copied on construction and never mutated after binding.
+    """
+
+    predecessors: dict[int | str, Term | None] = field(default_factory=dict)
 
 
 _TOKEN = _Token()
+
+
+def _token_failure(detail: str) -> NoReturn:
+    raise UnsupportedTTIR(f"token order: {detail}", kind="token-order")
+
+
+def _token_value(value: Any, where: str) -> _Token:
+    if not isinstance(value, _Token):
+        _token_failure(f"{where} is not a resolved token")
+    return value
+
+
+def _token_scalar(term: Any) -> bool:
+    if isinstance(term, (Arange, DataDep, Observed)):
+        return False
+    if is_dataclass(term):
+        return all(_token_scalar(getattr(term, f.name)) for f in fields(term))
+    if isinstance(term, (tuple, list)):
+        return all(_token_scalar(t) for t in term)
+    return True
+
+
+def _token_and(a: Term | None, b: Term | None) -> Term | None:
+    if a is None:
+        return b
+    if b is None or a == b:
+        return a
+    return BoolBin("and", a, b)
+
+
+def _token_or(a: Term | None, b: Term | None) -> Term | None:
+    if a is None or b is None:
+        return None
+    if a == b:
+        return a
+    if (isinstance(a, Not) and a.a == b) or (isinstance(b, Not) and b.a == a):
+        return None
+    # Preserve a common enclosing path when both arms yield its dependency.
+    if isinstance(a, BoolBin) and isinstance(b, BoolBin) and a.op == b.op == "and":
+        if a.a == b.a and _token_or(a.b, b.b) is None:
+            return a.a
+    return BoolBin("or", a, b)
+
+
+def _token_union(tokens: list[tuple[_Token, Term | None]]) -> _Token:
+    predecessors: dict[int | str, Term | None] = {}
+    for token, guard in tokens:
+        if not _token_scalar(guard):
+            _token_failure(
+                "a token selection has a lane-dependent or unknown predicate"
+            )
+        for origin, inherited in token.predecessors.items():
+            value = _token_and(inherited, guard)
+            predecessors[origin] = (
+                _token_or(predecessors[origin], value)
+                if origin in predecessors
+                else value
+            )
+    return _Token(predecessors)
+
+
+def _path_implies(path: Term | None, guard: Term | None) -> bool:
+    """A syntactic sufficient implication check; uncertainty refuses loops."""
+    if guard is None or path == guard:
+        return True
+    if isinstance(guard, BoolBin):
+        if guard.op == "and":
+            return _path_implies(path, guard.a) and _path_implies(path, guard.b)
+        if guard.op == "or":
+            return _path_implies(path, guard.a) or _path_implies(path, guard.b)
+    if isinstance(path, BoolBin) and path.op == "and":
+        return _path_implies(path.a, guard) or _path_implies(path.b, guard)
+    return False
+
+
+def _token_contains(token: _Token, origin: int | str, path: Term | None) -> bool:
+    return origin in token.predecessors and _path_implies(
+        path, token.predecessors[origin]
+    )
 
 
 @dataclass
@@ -227,6 +329,8 @@ class _State:
     ptr_meta: dict[str, tuple[int, bool]] = field(default_factory=dict)
     # inside a spin loop's body (the await shape admits no nesting)
     in_spin: bool = False
+    token_order: dict[tuple[int, int], Term | None] = field(default_factory=dict)
+    token_inputs: dict[int, _Token] = field(default_factory=dict)
 
 
 def _as_term(v: Any, ctx: str) -> Term:
@@ -296,6 +400,7 @@ def parse_cutile_ir(
             loops=list(st.loops),
             multipath=True,
             frontend="cutile",
+            token_order=st.token_order,
         )
     return AccessGraph(
         kernel_name=kernel_name,
@@ -305,6 +410,7 @@ def parse_cutile_ir(
         iter_args={},
         pid_axes=st.pid_axes,
         frontend="cutile",
+        token_order=st.token_order,
     )
 
 
@@ -458,7 +564,65 @@ def _handle_line(lines: list[str], i: int, indent: int, line: str, st: _State) -
             f"line {i + 1}: unrecognized op form {rhs[:60]!r}", kind="parse"
         )
     op, kwargs = om.group(1), _parse_kwargs(om.group(2))
+    if op == "make_token":
+        if len(results) != 1:
+            _token_failure("make_token must have exactly one result")
+        for rname, rtyp in results:
+            if rtyp.strip() != "Token":
+                _token_failure("make_token has a non-token result")
+            st.env[rname] = _TOKEN
+        return i + 1
+    if op == "join_tokens":
+        if len(results) != 1:
+            _token_failure("join_tokens must have exactly one result")
+        if "tokens" not in kwargs:
+            _token_failure(f"line {i + 1}: join_tokens has no token operands")
+        joined = _token_union(
+            [
+                (_token_value(v, f"line {i + 1} join operand"), None)
+                for v in _tuple_vals(st, kwargs.get("tokens", "()"))
+            ]
+        )
+        for rname, rtyp in results:
+            if rtyp.strip() != "Token":
+                _token_failure("join_tokens has a non-token result")
+            st.env[rname] = joined
+        return i + 1
+    memory = op in {
+        "tile_load",
+        "tile_store",
+        "load_pointer",
+        "store_pointer",
+        "tile_atomic_rmw",
+        "tile_atomic_cas",
+    }
+    incoming = _TOKEN
+    if memory:
+        if "token" not in kwargs:
+            _token_failure(f"line {i + 1}: memory operation has no token operand")
+        if sum(t.strip() == "Token" for _, t in results) != 1:
+            _token_failure(f"line {i + 1}: memory operation must have one token result")
+        incoming = _token_value(_val(st, kwargs["token"]), f"line {i + 1} input")
+    if not memory and (
+        "token" in kwargs
+        or "tokens" in kwargs
+        or any(t.strip() == "Token" for _, t in results)
+        or any(_has_token_operand(st, value) for value in kwargs.values())
+    ):
+        _token_failure(f"line {i + 1}: unsupported token operation {op}")
+    n_before = len(st.accesses)
     _handle_op(op, results, kwargs, i + 1, st)
+    if memory:
+        if len(st.accesses) != n_before + 1:
+            _token_failure(f"line {i + 1}: memory operation has no unique access")
+        st.token_inputs[n_before] = incoming
+        for origin, guard in incoming.predecessors.items():
+            if isinstance(origin, int):
+                st.token_order[origin, n_before] = guard
+        outgoing = _Token({**incoming.predecessors, n_before: None})
+        for rname, rtyp in results:
+            if rtyp.strip() == "Token":
+                st.env[rname] = outgoing
     return i + 1
 
 
@@ -482,6 +646,14 @@ def _tuple_vals(st: _State, s: str) -> list[Any]:
     return [_val(st, t) for t in _split_top(s) if t]
 
 
+def _has_token_operand(st: _State, text: str) -> bool:
+    """Do not erase unfamiliar token consumers through the value fallback."""
+    text = text.strip()
+    if text.startswith(("(", "[")) and text.endswith((")", "]")):
+        return any(_has_token_operand(st, item) for item in _split_top(text[1:-1]))
+    return isinstance(_val(st, text), _Token)
+
+
 def _tile_shape_of(typ: str) -> list[int] | None:
     m = _RE_TILE_TYPE.match(typ)
     if not m:
@@ -498,6 +670,106 @@ def _tile_shape_of(typ: str) -> list[int] | None:
 def _new_arange(st: _State, size: int, dim: int) -> Term:
     st.arange_n += 1
     return Arange(f"ct_ar{st.arange_n}", 0, size, dim)
+
+
+def _carried_values(text: str, st: _State, where: str) -> list[tuple[str, str, Any]]:
+    carried = []
+    for item in _split_top(text):
+        if not item.strip():
+            continue
+        lhs, sep, rhs = item.partition(" = ")
+        match = _RE_TYPED_NAME.match(lhs)
+        if not sep or match is None:
+            _token_failure(f"{where}: malformed loop-carried binding")
+        name, typ = _strip_prov(match.group(1)), match.group(2).strip()
+        value = _val(st, rhs)
+        if typ == "Token":
+            value = _token_value(value, f"{where} initializer")
+        carried.append((name, typ, value))
+    return carried
+
+
+def _bind_loop_tokens(
+    carried: list[tuple[str, str, Any]], st: _State, where: str
+) -> dict[str, str]:
+    markers = {}
+    for name, typ, initial in carried:
+        if typ == "Token":
+            marker = f"{where}:{name}"
+            markers[name] = marker
+            st.env[name] = _Token({**initial.predecessors, marker: None})
+    return markers
+
+
+def _terminator_values(line: str, head: str, st: _State) -> list[Any]:
+    if line.split(" ", 1)[0] != head:
+        _token_failure(f"expected {head} loop terminator")
+    return [_val(st, t) for t in _split_top(line[len(head) :].strip()) if t]
+
+
+def _serial_loop_boundary(
+    carried: list[tuple[str, str, Any]],
+    markers: dict[str, str],
+    continued: list[Any],
+    body: range,
+    st: _State,
+    where: str,
+    *,
+    require_serial: bool = False,
+) -> None:
+    if len(continued) != len(carried):
+        _token_failure(
+            f"{where}: loop continue arity does not match its carried values"
+        )
+    slots = []
+    for index, (name, typ, _initial) in enumerate(carried):
+        if typ != "Token":
+            continue
+        value = _token_value(continued[index], f"{where} continue")
+        marker = markers[name]
+        # Initial dependencies may stand for all iterations only when each
+        # carried token preserves its own ancestry on every backedge.
+        if not _token_contains(value, marker, st.path):
+            _token_failure(
+                f"{where}: a carried token drops or swaps its prior ancestry"
+            )
+        slots.append((marker, value))
+    if not body:
+        return
+    if not require_serial and all(st.accesses[index].kind == "load" for index in body):
+        # Distinct iterations contain reads only, so there is no omitted
+        # intra-instance write conflict. The slot-preservation checks above
+        # keep initializer ancestry and accumulated result tokens sound.
+        return
+    for marker, value in slots:
+        if all(
+            _token_contains(st.token_inputs[index], marker, _access_control(st, index))
+            and _token_contains(value, index, _access_control(st, index))
+            for index in body
+        ):
+            return
+    _token_failure(
+        f"{where}: independent iteration token topology has no verified serial "
+        "memory boundary (write iterations without a shared token boundary are not modeled)"
+    )
+
+
+def _access_control(st: _State, index: int) -> Term | None:
+    """Reachability of an operation, excluding its per-element mask."""
+    access = st.accesses[index]
+    path = access.path
+    loops = st.loops if st.multipath else ([st.loop] if st.loop is not None else [])
+    for loop in loops:
+        if loop.loop_ssa in access.loops or (not st.multipath and access.in_loop):
+            path = _token_and(path, Cmp("slt", loop.lower, loop.upper))
+    return path
+
+
+def _without_markers(token: _Token, markers: dict[str, str]) -> _Token:
+    removed = set(markers.values())
+    return _Token(
+        {key: value for key, value in token.predecessors.items() if key not in removed}
+    )
 
 
 def _handle_for(
@@ -520,6 +792,28 @@ def _handle_for(
         raise UnsupportedTTIR(
             f"line {i + 1}: range() with {len(bounds)} bounds", kind="parse"
         )
+    where = f"line {i + 1} (for {iv})"
+    saved_env = st.env.copy()
+    carried = _carried_values(fm.group(3) or "", st, where)
+    if len(results) != len(carried):
+        _token_failure(f"{where}: loop result arity does not match carried values")
+    trip_count = None
+    if all(isinstance(b, Const) for b in bounds):
+        lower, upper, step = (b.value for b in bounds if isinstance(b, Const))
+        if step <= 0:
+            _token_failure(f"{where}: non-positive loop step")
+        trip_count = max(0, (upper - lower + step - 1) // step)
+    if trip_count == 0:
+        # No body operation or token result is evaluated by a zero-trip loop.
+        for (name, _typ), (_arg, typ, initial) in zip(results, carried):
+            st.env[name] = initial if typ == "Token" else DataDep("loop result")
+        j = i + 1
+        if j < len(lines) and lines[j].strip().startswith("do ("):
+            j += 1
+        while j < len(lines) and len(lines[j]) - len(lines[j].lstrip()) > indent:
+            j += 1
+        return j
+    markers = _bind_loop_tokens(carried, st, where)
     info = LoopInfo(
         loop_ssa=iv, induction_var=iv, lower=bounds[0], upper=bounds[1], step=bounds[2]
     )
@@ -545,13 +839,15 @@ def _handle_for(
                 if pname == iv:
                     st.env[pname] = LoopVar(iv)
                 elif ptyp.strip() == "Token":
-                    st.env[pname] = _TOKEN
+                    if pname not in markers:
+                        _token_failure(f"{where}: unknown token body parameter {pname}")
                 else:
                     st.env[pname] = DataDep("loop-carried value")
             j += 1
     st.in_loop = True
     saved_path, saved_guarded = st.path, st.guarded
     st.loop_stack.append(iv)
+    first_access = len(st.accesses)
     j = _walk(lines, j, body_indent, st)
     st.loop_stack.pop()
     st.path, st.guarded = saved_path, saved_guarded
@@ -567,8 +863,39 @@ def _handle_for(
             "body is not modeled",
             kind="control-flow",
         )
-    for rname, rtyp in results:
-        st.env[rname] = _TOKEN if rtyp.strip() == "Token" else DataDep("loop result")
+    if j == 0 or lines[j - 1].strip().split(" ", 1)[0] != "continue":
+        _token_failure(f"{where}: missing top-level continue token operands")
+    continued = _terminator_values(lines[j - 1].strip(), "continue", st)
+    if len(continued) != len(carried):
+        _token_failure(f"{where}: loop continue arity does not match carried values")
+    if trip_count != 1:
+        _serial_loop_boundary(
+            carried,
+            markers,
+            continued,
+            range(first_access, len(st.accesses)),
+            st,
+            where,
+        )
+    nonempty = Cmp("slt", bounds[0], bounds[1])
+    st.env = saved_env
+    for index, (rname, rtyp) in enumerate(results):
+        if rtyp.strip() == "Token":
+            current = _without_markers(
+                _token_value(continued[index], f"{where} result"), markers
+            )
+            st.env[rname] = (
+                current
+                if trip_count is not None
+                else _token_union(
+                    [
+                        (current, nonempty),
+                        (carried[index][2], Not(nonempty)),
+                    ]
+                )
+            )
+        else:
+            st.env[rname] = DataDep("loop result")
     return j
 
 
@@ -614,6 +941,11 @@ def _handle_loop(
             f"line {line_no}: {_WHILE_FORM_REFUSAL}", kind="control-flow"
         )
     where = f"line {line_no} (loop)"
+    saved_env = st.env.copy()
+    carried_values = _carried_values(lm.group(1) or "", st, where)
+    if len(carried_values) != len(results):
+        _token_failure(f"{where}: loop result arity does not match carried tokens")
+    markers = _bind_loop_tokens(carried_values, st, where)
     if st.in_spin:
         raise UnsupportedTTIR(
             f"{where}: nested spin loops are not the await shape",
@@ -630,10 +962,13 @@ def _handle_loop(
             for item in _split_top(hdr[1:-2]):
                 tm = _RE_TYPED_NAME.match(item)
                 if tm:
-                    st.env[_strip_prov(tm.group(1))] = _TOKEN  # tokens only
+                    if _strip_prov(tm.group(1)) not in markers:
+                        _token_failure(f"{where}: unknown token body parameter")
             j += 1
     n_before = len(st.accesses)
     exit_pred: Term | None = None
+    exit_tokens: list[Any] | None = None
+    continued: list[Any] | None = None
     st.in_spin = True
     try:
         closed = False
@@ -651,6 +986,7 @@ def _handle_loop(
                     kind="spin-shape",
                 )
             if head == "continue":
+                continued = _terminator_values(line, "continue", st)
                 closed = True
                 j += 1
                 break
@@ -661,7 +997,9 @@ def _handle_loop(
                         f"line {j + 1}: a spin loop has exactly one exit test",
                         kind="spin-shape",
                     )
-                j, exit_pred = _spin_exit_test(lines, j, body_indent, im.group(1), st)
+                j, exit_pred, exit_tokens = _spin_exit_test(
+                    lines, j, body_indent, im.group(1), st
+                )
                 continue
             _lhs, eq, rhs = line.partition(" = ")
             nested = (
@@ -709,14 +1047,27 @@ def _handle_loop(
     finally:
         st.in_spin = False
     _finalize_await(where, n_before, exit_pred, st)
-    for rname, _ in results:
-        st.env[rname] = _TOKEN
+    assert continued is not None
+    _serial_loop_boundary(
+        carried_values,
+        markers,
+        continued,
+        range(n_before, len(st.accesses)),
+        st,
+        where,
+        require_serial=True,
+    )
+    if exit_tokens is None or len(exit_tokens) != len(results):
+        _token_failure(f"{where}: break token operands do not match loop results")
+    st.env = saved_env
+    for (rname, _), value in zip(results, exit_tokens):
+        st.env[rname] = _without_markers(_token_value(value, f"{where} break"), markers)
     return j
 
 
 def _spin_exit_test(
     lines: list[str], j: int, indent: int, cond_token: str, st: _State
-) -> tuple[int, Term]:
+) -> tuple[int, Term, list[Any]]:
     """The spin loop's exit test: ``if(cond=$c)`` whose two arms are one
     terminator each, ``yield`` (poll again) or ``break`` (exit). Returns
     (index past the block, EXIT predicate): ``cond`` when the then-arm
@@ -725,6 +1076,7 @@ def _spin_exit_test(
     n = len(lines)
     cv = _as_term(_val(st, cond_token), "spin exit test")
     breaks: dict[str, bool] = {}
+    exit_tokens: list[Any] = []
     k = j + 1
     for label in ("then", "else"):
         at = (
@@ -758,6 +1110,11 @@ def _spin_exit_test(
                 kind="spin-shape",
             )
         breaks[label] = term == "break"
+        operands = _terminator_values(lines[k].strip(), term, st)
+        if term == "break":
+            exit_tokens = operands
+        elif operands:
+            _token_failure(f"line {k + 1}: result-free spin test yields token operands")
         k += 1
     n_break = sum(breaks.values())
     if n_break != 1:
@@ -767,7 +1124,7 @@ def _spin_exit_test(
             kind="spin-shape",
         )
     exit_pred: Term = cv if breaks.get("then") else Not(cv)
-    return k, exit_pred
+    return k, exit_pred, exit_tokens
 
 
 def _finalize_await(
@@ -897,7 +1254,12 @@ def _handle_if(
         cv, (Const, Pid, Param, Arange, LoopVar, Bin, Cmp, BoolBin, Select, Not)
     ) and not _has_datadep(cv):
         cond = cv  # type: ignore[assignment]
+    if any(t.strip() == "Token" for _, t in results) and (
+        cond is None or not _token_scalar(cond)
+    ):
+        _token_failure(f"line {i + 1}: token-valued if needs an exact scalar predicate")
     saved_path, saved_guarded = st.path, st.guarded
+    saved_env = st.env.copy()
     n = len(lines)
     j = i + 1
     arms: dict[str, tuple[str, list[Any]]] = {}
@@ -931,6 +1293,7 @@ def _handle_if(
             j += 1  # the arm's (empty) parameter header
         st.guarded = saved_guarded or cond is None
         st.path = _conj(saved_path, arm_conds[label])
+        st.env = saved_env.copy()
         j, term, toks = _walk_arm(lines, j, body_indent, st)
         vals = [_val(st, t) for t in toks]  # resolved inside the arm's scope
         arms[label] = (term, vals)
@@ -974,10 +1337,24 @@ def _handle_if(
     # results: a Select over the two yields when everything is modelable
     then_vals = arms.get("then", ("", []))[1]
     else_vals = arms.get("else", ("", []))[1]
+    st.env = saved_env
     for idx, (rname, rtyp) in enumerate(results):
         bound: Any = DataDep("if result")
         if rtyp.strip() == "Token":
-            bound = _TOKEN
+            choices = []
+            for label in through:
+                term, values = arms.get(label, ("", []))
+                if term != "yield" or idx >= len(values):
+                    _token_failure(
+                        f"line {i + 1}: token-valued if has no matching yield"
+                    )
+                choices.append(
+                    (
+                        _token_value(values[idx], f"line {i + 1} {label} yield"),
+                        ends[label][0],
+                    )
+                )
+            bound = _token_union(choices)
         elif (
             cond is not None
             and idx < len(then_vals)
