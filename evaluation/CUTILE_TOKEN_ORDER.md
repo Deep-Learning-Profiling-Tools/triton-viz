@@ -75,10 +75,46 @@ directories resolved all nine environmental failures. All 366 then pass
 together in 19.23 seconds. Repository hooks pass after formatting; an AST
 comparison confirms that the formatter changed no Python semantics.
 
-The affected-corpus receipt index will be appended after the committed
-implementation is checked. These are successor implementation checks,
-not relabelings of `31c48f5` results.
+The affected-corpus checks completed at source commit `6e1d3eb` on
+2026-09-07 at 15:31:28 UTC, under exclusive host admission. Each configuration
+used a fresh subprocess, seed 0, a 200-second outer cap, and two workers.
+These are successor correctness checks, not paper performance measurements
+or relabelings of `31c48f5` results.
 The harness stamps cuTile receipts with `fence_order_applies: true` and
 `intra_instance_order: token` when the fence-order configuration is enabled.
 The existing full common-pin paper measurements remain tied to their
 original detector pin until the submission rerun is adopted.
+
+| Corpus | Level | Configurations | Race-free | Race | Abstain |
+|---|---|---:|---:|---:|---:|
+| TritonRaceBench cuTile | L0 | 62 | 12 | 12 | 38 |
+| TritonRaceBench cuTile | L1 | 62 | 12 | 12 | 38 |
+| TritonRaceBench cuTile | L2 | 62 | 20 | 23 | 19 |
+| TileBench cuTile | L0 | 61 | 38 | 0 | 23 |
+| TileBench cuTile | L1 | 61 | 38 | 0 | 23 |
+| TileBench cuTile | L2 | 61 | 47 | 0 | 14 |
+
+All 369 configurations completed without an error. All 214 decided results
+match the existing labels; the benchmark's one unscored row abstains at
+every level. Relative to the frozen `31c48f5` datasets, the only verdict
+changes are `trb008_loop_stride_no` (race-free to abstain) and
+`trb008_loop_stride_yes` (race to abstain), at all three levels. Their
+token-independent write iterations lie outside the verified loop summary.
+Four unchanged abstentions, the L0/L1 `trb018_lookback_no` and
+`trb018_lookback_cta_yes` rows, now name `token-order` rather than
+`control-flow`. All other verdicts are unchanged.
+
+Raw receipts, both capture hashes, the run manifest, per-row comparison,
+test output and hook output are retained under
+`evaluation/results/cutile-token-order-6e1d3eb/` in the canonical detector
+checkout. The same directory in the isolated worktree preserves the original
+run location. `summary.json` records all six dataset hashes and baseline
+hashes; `manifest.json` records original paths, commit, commands' policy and
+timestamps. Independent verification confirms unique and matching names,
+all six result hashes, both capture hashes, token-policy flags and labels.
+The old datasets still match their frozen completion hashes.
+
+Because the content-free proof-path repair also affects Triton L2, a final
+common-pin paper adoption must cover the full required experiment set at
+this or a successor implementation pin. The affected cuTile receipts do not
+replace that submission requirement.

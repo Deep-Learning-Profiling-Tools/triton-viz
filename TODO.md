@@ -1450,3 +1450,6 @@ needs; none blocks submission.
       the prior missing-fence diagnostic coverage is included. Full scope,
       semantic boundary and successor verification provenance are in
       `evaluation/CUTILE_TOKEN_ORDER.md`; frozen measurement pins are preserved.
+      All 369 affected-cuTile checks complete without errors or decided-label
+      mismatches. Two independent-write-loop configurations now abstain at
+      every level; the remaining verdicts match the frozen baseline.
