@@ -264,6 +264,8 @@ def merge(
     retry_timeout: int,
     seed: int,
     fence_order: bool = True,
+    *,
+    frontend_policy: str | None = None,
 ) -> tuple[dict, list[dict]]:
     """The merged, stamped dataset. Every per-corpus file must be a
     protocol dataset (never the debugging worker-reuse kind) produced
@@ -288,6 +290,18 @@ def merge(
     merged: list[dict] = []
     for corpus, path in files.items():
         per_corpus_header = assert_protocol_dataset(path)
+        policy = per_corpus_header.get("frontend_policy", "all")
+        if policy not in ("all", "on-demand"):
+            raise ValueError(f"{path}: invalid frontend policy {policy!r}")
+        if policy == "on-demand" and level != LadderLevel.L2:
+            raise ValueError(f"{path}: on-demand frontend policy requires L2")
+        if frontend_policy is None:
+            frontend_policy = policy
+        if policy != frontend_policy:
+            raise ValueError(
+                f"{path}: frontend policy {policy!r} in a {frontend_policy!r} pinned run"
+            )
+        header["frontend_policy"] = frontend_policy
         if per_corpus_header.get("ladder_level") != level.name:
             raise ValueError(
                 f"{path}: ladder level {per_corpus_header.get('ladder_level')} "
@@ -307,6 +321,10 @@ def merge(
         for row in rows:
             row = dict(row)
             row["corpus"] = corpus
+            if row.get("frontend_policy", "all") != frontend_policy:
+                raise ValueError(
+                    f"{path}: row {row.get('name')!r} frontend policy differs from the header"
+                )
             if row.get("fence_order") is not fence_order:
                 raise ValueError(
                     f"{path}: row {row.get('name')!r} ran under "
@@ -314,6 +332,13 @@ def merge(
                     f"fence_order={fence_order} pinned run"
                 )
             retry = retried.get((corpus, row["name"]))
+            if (
+                retry is not None
+                and retry.get("frontend_policy", "all") != frontend_policy
+            ):
+                raise ValueError(
+                    f"{path}: retry {row.get('name')!r} frontend policy differs from the header"
+                )
             if retry is not None and retry.get("verdict") not in (None, "error"):
                 row = dict(retry)
                 row["corpus"] = corpus
@@ -428,6 +453,7 @@ def summary_markdown(
         f"Rows {len(merged)}, seed {header['seed']}, jobs 1, row budget "
         f"{header['row_timeout_s']} s, retry budget {header['retry_timeout_s']} s, "
         f"fence order {'ON' if header.get('fence_order', True) else 'OFF (legacy)'}, "
+        f"frontend policy {header.get('frontend_policy', 'all')}, "
         "one subprocess per row (no worker reuse).",
         "",
         "## Overhead (evaluation.md section 6 recipe, real-code corpora)",

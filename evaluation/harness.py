@@ -2,9 +2,13 @@
 
 Runs INSIDE the per-spec subprocess (see runner.py). Phase order is fixed
 and load-bearing: the REAL host compile happens before anything engages the
-interpreter (static C2/C3 replay, then the dynamic-mode comparison) — the
+interpreter (static C2/C3 replay, then any standalone dynamic analysis) — the
 reverse order trips the interpreter-patching hazard documented in
 core/trace.py.
+
+L2 runs the standalone interpreter only after static abstention. Set
+TRITON_VIZ_EVAL_ALL_FRONTENDS=1 to collect both frontend results for comparison.
+L0/L1 retain the every-frontend protocol. Static C2/C3 checks are unchanged.
 
 Verdict mapping for DRB-style scoring (plan S5):
   static ok            -> "race-free"  (terminal = provenance rung; the §3c
@@ -34,6 +38,7 @@ from contextlib import contextmanager
 from types import FrameType
 from typing import Any
 
+from evaluation.frontend_policy import frontend_policy
 from evaluation.spec import LaunchSpec
 from triton_viz.core.config import config as cfg
 from triton_viz.clients.race_detector.ladder import (
@@ -411,6 +416,7 @@ def _run_one_cutile(
         # cuda.tile has no interpreter, so the L1 rung can never run on
         # these rows; the level is still stamped (provenance discipline).
         "ladder_level": ladder_level.name,
+        "frontend_policy": frontend_policy(ladder_level),
         # Token reachability is the cuTile instance's ordering discipline
         # when the memory-model switch is enabled. Preserve the switch in
         # the receipt so legacy runs cannot be mistaken for token runs.
@@ -840,6 +846,7 @@ def run_one(
     # interpreter (so no L1 rung); at L2 its reader runs in multipath mode.
     if spec.frontend == "cutile":
         return _run_one_cutile(spec, seed, ladder_level)
+    policy = frontend_policy(ladder_level)
     row_started = time.perf_counter()
     kernel_fn = getattr(spec.kernel_fn, "fn", spec.kernel_fn)
     row: dict[str, Any] = {
@@ -855,6 +862,7 @@ def run_one(
         # mix levels unnoticed); also carried in verdict_attrs by the
         # clients, which receive the same level.
         "ladder_level": ladder_level.name,
+        "frontend_policy": policy,
         # The memory-model switch this row's process ran under (fence-
         # ordered intra-instance semantics, design-fence-order.md; False
         # only for TRITON_VIZ_FENCE_ORDER=0 attribution runs).
@@ -894,19 +902,31 @@ def run_one(
         )
         return row
 
-    try:
-        row["dynamic"] = _dynamic_track(spec, seed, ladder_level)
-    except Exception as e:  # noqa: BLE001
-        row["dynamic"] = {"error": f"{type(e).__name__}: {e}"}
-        from evaluation.dynamic_subprocess import DynamicSubprocessError
+    static_decides = _classify_symbolic(row["static"])[0] != "abstain"
+    if policy == "on-demand" and static_decides:
+        # A skipped frontend supplies neither a verdict nor a measured clock.
+        # Keep the row shape explicit for timing and complementarity consumers.
+        row["dynamic"] = {
+            "status": "not-run",
+            "reason": "static-decided",
+            "time_s": None,
+            "n_reports": 0,
+            "witnesses": [],
+        }
+    else:
+        try:
+            row["dynamic"] = _dynamic_track(spec, seed, ladder_level)
+        except Exception as e:  # noqa: BLE001
+            row["dynamic"] = {"error": f"{type(e).__name__}: {e}"}
+            from evaluation.dynamic_subprocess import DynamicSubprocessError
 
-        if isinstance(e, DynamicSubprocessError):
-            row.update(
-                verdict="error",
-                terminal="harness-error",
-                harness_error=f"dynamic child: {type(e).__name__}: {e}",
-            )
-            return row
+            if isinstance(e, DynamicSubprocessError):
+                row.update(
+                    verdict="error",
+                    terminal="harness-error",
+                    harness_error=f"dynamic child: {type(e).__name__}: {e}",
+                )
+                return row
 
     row["verdict"], row["terminal"] = _classify(row["static"], row.get("dynamic"))
     if row["terminal"] == "proved@interp" and "race-unconfirmed" in (
@@ -920,11 +940,10 @@ def run_one(
         va["content_fragile"] = True
         row["static"]["verdict_attrs"] = va
 
-    # The ladder switch: ONE gate. At L0 the rung does not run and the row
-    # keeps today's abstention; at L1+ every symbolic rung has refused
+    # At L0 enumeration does not run and the row keeps its abstention;
+    # at L1+ every symbolic rung has refused
     # (the composed verdict is an abstention), so the bottom rung decides
-    # the launch by exhaustive per-instance concrete evaluation. Nothing
-    # else in the pipeline consults the level.
+    # the launch by exhaustive per-instance concrete evaluation.
     if ladder_level >= LadderLevel.L1 and row["verdict"] == "abstain":
         try:
             row["enum"] = _enum_track(

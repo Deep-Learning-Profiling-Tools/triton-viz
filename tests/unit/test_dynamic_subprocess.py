@@ -221,12 +221,22 @@ def test_deadline_includes_finalization_and_process_exit(monkeypatch, mode):
         assert execution["hooks"]["diagnostic"]["payload"]["partial"]
 
 
-def test_transport_failure_does_not_silently_fall_through_to_enumeration(monkeypatch):
+@pytest.mark.parametrize(
+    "policy,static_status", [("all", "ok"), ("on-demand", "unsupported")]
+)
+def test_transport_failure_does_not_silently_fall_through_to_enumeration(
+    monkeypatch, policy, static_status
+):
+    monkeypatch.setenv("TRITON_VIZ_EVAL_ALL_FRONTENDS", "1" if policy == "all" else "0")
     monkeypatch.setattr(harness, "_host_compile_ttir", lambda spec: "control IR")
     monkeypatch.setattr(
         harness,
         "_static_track",
-        lambda *args: {"status": "unsupported", "reason": "test"},
+        lambda *args: {
+            "status": static_status,
+            "provenance": "proved@T0" if static_status == "ok" else None,
+            "reason": "test",
+        },
     )
 
     def fail(*args):
@@ -241,11 +251,16 @@ def test_transport_failure_does_not_silently_fall_through_to_enumeration(monkeyp
     result = harness.run_one(_spec(), 0, ladder_level=LadderLevel.L2)
     assert result["verdict"] == "error"
     assert result["terminal"] == "harness-error"
+    assert result["frontend_policy"] == policy
+    assert "enum" not in result
     assert "input transport mismatch" in result["harness_error"]
 
 
 @pytest.mark.parametrize("failure", ["serialize", "save"])
 def test_plain_transport_failure_is_a_harness_error(monkeypatch, failure):
+    # This probe intentionally requests dynamic even after a static proof.
+    # Default L2 on-demand correctly skips transport for that proof.
+    monkeypatch.setenv("TRITON_VIZ_EVAL_ALL_FRONTENDS", "1")
     monkeypatch.setattr(harness, "_host_compile_ttir", lambda spec: "control IR")
     monkeypatch.setattr(
         harness,

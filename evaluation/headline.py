@@ -29,9 +29,11 @@ COVERAGE_CORPORA = ("tutorials", "liger")
 
 def _rows(path: Path) -> list[dict]:
     out = []
+    header = {}
     for line in path.read_text().splitlines():
         d = json.loads(line)
         if d.get("header"):
+            header = d
             if d.get("worker_reuse"):
                 # a debugging dataset (runner --debug-reuse-workers):
                 # never aggregated into a quoted number
@@ -41,7 +43,15 @@ def _rows(path: Path) -> list[dict]:
                 )
                 return []
             continue
-        d["_corpus"] = path.stem
+        policy = header.get("frontend_policy", "all")
+        if policy not in ("all", "on-demand"):
+            raise ValueError(f"{path}: invalid frontend policy {policy!r}")
+        if d.get("frontend_policy", "all") != policy:
+            raise ValueError(
+                f"{path}: row {d.get('name')!r} frontend policy differs from header"
+            )
+        d["_corpus"] = d.get("corpus") or header.get("corpus") or path.stem
+        d.setdefault("frontend_policy", policy)
         out.append(d)
     return out
 
@@ -56,8 +66,22 @@ def _kind(r: dict) -> str | None:
     return head if head and " " not in head else "other"
 
 
+def _dyn_available(r: dict) -> bool:
+    return (
+        r.get("frontend") != "cutile"
+        and r.get("_corpus") not in ("tilebench_cutile", "tritonracebench_cutile")
+        and "cuda.tile has no interpreter"
+        not in str((r.get("dynamic") or {}).get("reason", ""))
+    )
+
+
+def _dyn_measured(r: dict) -> bool:
+    dyn = r.get("dynamic") or {}
+    return _dyn_available(r) and bool(dyn) and dyn.get("status") != "not-run"
+
+
 def _dyn_abstains(r: dict) -> bool:
-    return (r.get("dynamic") or {}).get("status") not in ("ok",)
+    return _dyn_measured(r) and (r.get("dynamic") or {}).get("status") != "ok"
 
 
 def _static_verdicts(r: dict) -> bool:
@@ -66,12 +90,27 @@ def _static_verdicts(r: dict) -> bool:
 
 def headline(results_dir: Path) -> str:
     all_rows = [r for p in sorted(results_dir.glob("*.jsonl")) for r in _rows(p)]
+    if len({r["frontend_policy"] for r in all_rows}) > 1:
+        raise ValueError(
+            "mixed frontend policies: use separate results directories for "
+            "on-demand and all-frontends runs"
+        )
     coverage = [r for r in all_rows if r["_corpus"] in COVERAGE_CORPORA]
     lines = ["# RQ2 headline numbers", ""]
 
     def block(title: str, rows: list[dict]) -> None:
         lines.append(f"## {title} ({len(rows)} rows)")
         lines.append("")
+        policies = Counter(r.get("frontend_policy", "all") for r in rows)
+        lines.append(
+            "- frontend policies: "
+            + (
+                ", ".join(
+                    f"{policy}={count}" for policy, count in sorted(policies.items())
+                )
+                or "none"
+            )
+        )
         terminals = Counter(r.get("terminal") for r in rows)
         lines.append(
             "- terminal states: "
@@ -110,6 +149,20 @@ def headline(results_dir: Path) -> str:
             )
         )
         # static-vs-dynamic delta
+        measured = [r for r in rows if _dyn_measured(r)]
+        unavailable = sum(not _dyn_available(r) for r in rows)
+        skipped = sum((r.get("dynamic") or {}).get("status") == "not-run" for r in rows)
+        lines.append(
+            f"- frontend comparison: {len(measured)} rows with recorded dynamic results, "
+            f"{skipped} not run after a static decision, "
+            f"{len(rows) - len(measured) - skipped - unavailable} without dynamic results, "
+            f"{unavailable} with no interpreter frontend"
+        )
+        if skipped:
+            lines.append(
+                "  On-demand execution does not measure full frontend complementarity; "
+                "use an all-frontends run for that comparison."
+            )
         s_not_d = [r["name"] for r in rows if _static_verdicts(r) and _dyn_abstains(r)]
         d_not_s = [
             r["name"]

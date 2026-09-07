@@ -121,6 +121,7 @@ def official_config(
     level, corpora, seed, row_timeout, retry_timeout, rehearsal, guard, purpose
 ):
     from evaluation.pinned_run import ALL_CORPORA, RETRY_TIMEOUT_S
+    from evaluation.frontend_policy import frontend_policy
     from evaluation.runner import row_timeout_s
     from triton_viz.core.config import config as cfg
 
@@ -154,6 +155,7 @@ def official_config(
             raise SystemExit("the tracked execution tree is dirty")
     return {
         "ladder_level": level.name,
+        "frontend_policy": frontend_policy(level),
         "corpora": list(corpora),
         "seed": seed,
         "row_timeout_s": budget,
@@ -280,6 +282,7 @@ def publish(store, run_dir: Path) -> Path:
         config["retry_timeout_s"],
         config["seed"],
         config["fence_order"],
+        frontend_policy=config.get("frontend_policy", "all"),
     )
     header.update(extra, retried_rows=len(retry), jobs=1, purpose=config["purpose"])
     records = {slot: store.result_records(slot) for slot in ("main", "retry")}

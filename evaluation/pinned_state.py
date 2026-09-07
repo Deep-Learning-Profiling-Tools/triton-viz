@@ -160,6 +160,10 @@ def _validate_manifest(manifest: dict) -> None:
         raise StateError("manifest requires config.ladder_level")
     if not isinstance(config.get("fence_order"), bool):
         raise StateError("manifest requires config.fence_order")
+    if config.get("frontend_policy", "all") not in ("all", "on-demand"):
+        raise StateError("manifest has an invalid frontend policy")
+    if config.get("frontend_policy") == "on-demand" and config["ladder_level"] != "L2":
+        raise StateError("on-demand frontend policy requires L2")
     for key in ("row_timeout_s", "retry_timeout_s"):
         _positive_number(config.get(key), key)
     rows = manifest.get("rows")
@@ -557,6 +561,10 @@ class RunStore:
         config = self._manifest["config"]
         if row.get("ladder_level") != config["ladder_level"]:
             raise StateError("raw result ladder level differs from the manifest")
+        # Unstamped historical datasets ran every frontend. Never interpret
+        # missing provenance using today's level-dependent default.
+        if row.get("frontend_policy", "all") != config.get("frontend_policy", "all"):
+            raise StateError("raw result frontend policy differs from the manifest")
         if (
             not isinstance(row.get("fence_order"), bool)
             or row["fence_order"] != config["fence_order"]

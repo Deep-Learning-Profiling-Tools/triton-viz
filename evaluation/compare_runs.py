@@ -76,11 +76,15 @@ class Dataset:
             "commit": h.get("pinned_commit") or h.get("commit"),
             "ladder_level": h.get("ladder_level"),
             "fence_order": h.get("fence_order"),
+            "frontend_policy": h.get("frontend_policy", "all"),
             "rows": len(self.rows),
         }
-        for key in ("ladder_level", "fence_order"):
-            vals = Counter(r.get(key) for r in self.rows.values())
-            if len(vals) > 1:
+        for key in ("ladder_level", "fence_order", "frontend_policy"):
+            default = "all" if key == "frontend_policy" else None
+            vals = Counter(r.get(key, default) for r in self.rows.values())
+            if len(vals) > 1 or (
+                key == "frontend_policy" and vals and out[key] not in vals
+            ):
                 out[key + "_rows"] = "MIXED " + ", ".join(
                     f"{v}:{n}" for v, n in sorted(vals.items(), key=str)
                 )
@@ -246,15 +250,16 @@ def write_names(cmp: Comparison, out_dir: Path) -> list[Path]:
 
 def _stamp_table(datasets: list[tuple[str, Dataset]]) -> list[str]:
     lines = [
-        "| dataset | file | commit | ladder | fence order | rows |",
-        "|---|---|---|---|---|---|",
+        "| dataset | file | commit | ladder | fence order | rows | frontend policy |",
+        "|---|---|---|---|---|---|---|",
     ]
     for role, ds in datasets:
         s = ds.stamps()
         fence = s.get("fence_order_rows") or s.get("fence_order")
         ll = s.get("ladder_level_rows") or s.get("ladder_level")
+        policy = s.get("frontend_policy_rows") or s["frontend_policy"]
         lines.append(
-            f"| {role} | `{ds.path.name}` | {s['commit']} | {ll} | {fence} | {s['rows']} |"
+            f"| {role} | `{ds.path.name}` | {s['commit']} | {ll} | {fence} | {s['rows']} | {policy} |"
         )
     return lines
 

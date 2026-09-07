@@ -175,6 +175,7 @@ def provenance(output_dir):
         "PYTHONPATH",
         "TRITON_INTERPRET",
         "TRITON_VIZ_FENCE_ORDER",
+        "TRITON_VIZ_EVAL_ALL_FRONTENDS",
         "OMP_NUM_THREADS",
         "MKL_NUM_THREADS",
         "OPENBLAS_NUM_THREADS",
@@ -202,7 +203,7 @@ def provenance(output_dir):
     }
 
 
-def manifest(rows, budget, label):
+def manifest(rows, budget, label, frontend_policy="all"):
     return {
         "protocol_version": PROTOCOL,
         "run_id": str(uuid.uuid4()),
@@ -212,6 +213,7 @@ def manifest(rows, budget, label):
         "rows": rows,
         "config": {
             "ladder_level": "L2",
+            "frontend_policy": frontend_policy,
             "row_timeout_s": budget,
             "retry_timeout_s": 320,
             "seed": 0,
@@ -284,11 +286,21 @@ def micro(output_dir, input_paths, rounds, samples):
                 raise ValueError(
                     "micro input must be the original L2/200-second raw rows"
                 )
+            if row.get("frontend_policy", "all") != header.get(
+                "frontend_policy", "all"
+            ):
+                raise ValueError(
+                    f"micro input frontend policy differs from header: {path}:{number}"
+                )
             source.append((path, number, row, len(line) + 1))
         input_info["header"] = header
         inputs.append(input_info)
     if not source:
         raise ValueError("micro input contains no rows")
+    policies = {row.get("frontend_policy", "all") for _, _, row, _ in source}
+    if len(policies) != 1:
+        raise ValueError("micro inputs mix frontend policies")
+    policy = policies.pop()
     plan = {
         "kind": "REHEARSAL",
         "phase": "micro",
@@ -316,7 +328,7 @@ def micro(output_dir, input_paths, rounds, samples):
         ]
         store = RunStore.create(
             output_dir / f"micro-{round_index}",
-            manifest(roster, 200, f"micro-{round_index}"),
+            manifest(roster, 200, f"micro-{round_index}", policy),
         )
         session = store.new_session({"rehearsal": True, "phase": "micro"})
         try:
@@ -489,6 +501,7 @@ def semantic_reasons(row):
 
 
 def paired(output_dir, blocks, samples):
+    from evaluation.frontend_policy import frontend_policy
     from evaluation.kernels import load
     from evaluation.pinned_run import load_guard
     from evaluation.pinned_state import RunStore
@@ -506,6 +519,7 @@ def paired(output_dir, blocks, samples):
             )
     if not cfg.race_detector_fence_order:
         raise ValueError("paired measurement requires fence order enabled")
+    policy = frontend_policy(LadderLevel.L2)
     plan = {
         "kind": "REHEARSAL",
         "phase": "paired",
@@ -515,6 +529,7 @@ def paired(output_dir, blocks, samples):
         "timeout_probe": [{"corpus": c, "name": n} for c, n in TIMEOUT_PROBE],
         "timeout_probe_budget_s": 15,
         "level": "L2",
+        "frontend_policy": policy,
         "seed": 0,
         "fresh_subprocess": True,
         "load_guard": "before each block",
@@ -552,7 +567,8 @@ def paired(output_dir, blocks, samples):
             block_before = snapshot()
             store = (
                 RunStore.create(
-                    output_dir / f"ledger-{label}", manifest(roster, budget, label)
+                    output_dir / f"ledger-{label}",
+                    manifest(roster, budget, label, policy),
                 )
                 if mode == "B"
                 else None
