@@ -108,6 +108,8 @@ silently:
                     by name, like the solver's ``ENUM_MAX_CASES``).
   no-grid           the launch grid is not a concrete tuple.
   no-contents       fake-tensor storage (no memory to evaluate against).
+  clone-error       tensor storage or views could not be cloned faithfully
+                    (refused before executing any program instance).
   scope             an atomic carries a memory scope outside cta/gpu/sys.
   timeout           the watchdog fired (a spin the taint did not see, or
                     a launch too slow for the budget).
@@ -1806,36 +1808,36 @@ def enumerate_launch(
     def _clone(v: Any) -> Any:
         if not (hasattr(v, "data_ptr") and hasattr(v, "untyped_storage")):
             return v
-        try:
-            storage = v.untyped_storage()
-            key = int(storage.data_ptr())
-            cloned_storage = storage_clones.get(key)
-            if cloned_storage is None:
-                cloned_storage = storage.clone()
-                storage_clones[key] = cloned_storage
-                clone_spans.append(
-                    (
-                        int(cloned_storage.data_ptr()),
-                        int(cloned_storage.data_ptr()) + int(storage.nbytes()),
-                        key,
-                    )
+        storage = v.untyped_storage()
+        key = int(storage.data_ptr())
+        cloned_storage = storage_clones.get(key)
+        if cloned_storage is None:
+            cloned_storage = storage.clone()
+            storage_clones[key] = cloned_storage
+            clone_spans.append(
+                (
+                    int(cloned_storage.data_ptr()),
+                    int(cloned_storage.data_ptr()) + int(storage.nbytes()),
+                    key,
                 )
-            c = v.detach().new_empty(0)
-            c.set_(cloned_storage, v.storage_offset(), v.size(), v.stride())
-            return c
-        except Exception:  # noqa: BLE001
-            c = v.detach().clone()
-            try:
-                nbytes = int(c.numel()) * int(c.element_size())
-                clone_spans.append(
-                    (int(c.data_ptr()), int(c.data_ptr()) + nbytes, int(v.data_ptr()))
-                )
-            except Exception:  # noqa: BLE001
-                pass
-            return c
+            )
+        c = v.detach().new_empty(0)
+        c.set_(cloned_storage, v.storage_offset(), v.size(), v.stride())
+        return c
 
-    cloned_args = tuple(_clone(a) for a in args)
-    cloned_kwargs = {k: _clone(v) for k, v in kwargs.items()}
+    try:
+        cloned_args = tuple(_clone(a) for a in args)
+        cloned_kwargs = {k: _clone(v) for k, v in kwargs.items()}
+    except Exception as e:  # noqa: BLE001
+        # A per-argument logical clone can discard aliases or layout and
+        # turn a racy launch into a different, clean launch. Refuse before
+        # constructing the recorder or installing any interpreter patches.
+        return EnumOutcome(
+            "unsupported",
+            f"clone-error: {type(e).__name__}: {e}",
+            grid=g,
+            time_s=time.perf_counter() - t_start,
+        )
 
     recorder = ConcreteFootprintRecorder(
         budget_s=timeout_s, bounds=[(lo, hi) for lo, hi, _ in clone_spans]

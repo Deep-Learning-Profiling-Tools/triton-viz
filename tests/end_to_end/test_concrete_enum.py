@@ -604,6 +604,59 @@ def test_views_of_one_storage_keep_their_offsets_on_the_clone():
     assert hi.data_ptr() <= o.reports[0].witness_addr < hi.data_ptr() + 16 * 4
 
 
+@pytest.mark.parametrize("failure", ["storage-clone", "view-rebuild"])
+@pytest.mark.parametrize("keyword_args", [False, True])
+def test_failed_alias_preserving_clone_refuses_before_execution(
+    monkeypatch, failure, keyword_args
+):
+    """Failure to clone an in-place input must never separate its aliases."""
+    import importlib
+
+    trace_mod = importlib.import_module("triton_viz.core.trace")
+    x = torch.arange(16, dtype=torch.float32)
+    before = x.clone()
+
+    def run():
+        if keyword_args:
+            return _run(_shift_kernel, (4,), in_ptr=x, out_ptr=x, n=16, BLOCK=4)
+        return _run(_shift_kernel, (4,), x, x, 16, BLOCK=4)
+
+    normal = run()
+    assert normal.status == "races"
+    assert any(r.witness_grid_a != r.witness_grid_b for r in normal.reports)
+    assert torch.equal(x, before)
+
+    if failure == "storage-clone":
+        source_ptr = x.untyped_storage().data_ptr()
+        original_clone = torch.UntypedStorage.clone
+
+        def fail_storage_clone(storage, *args, **kwargs):
+            if storage.data_ptr() == source_ptr:
+                raise RuntimeError("injected storage clone failure")
+            return original_clone(storage, *args, **kwargs)
+
+        monkeypatch.setattr(torch.UntypedStorage, "clone", fail_storage_clone)
+    else:
+
+        def fail_view_rebuild(*args, **kwargs):
+            raise RuntimeError("injected view rebuild failure")
+
+        monkeypatch.setattr(torch.Tensor, "set_", fail_view_rebuild)
+
+    trace_calls = []
+    monkeypatch.setattr(
+        trace_mod, "trace_source", lambda *args: trace_calls.append(args)
+    )
+    refused = run()
+    assert refused.status == "unsupported"
+    assert refused.reason.startswith("clone-error: RuntimeError: injected")
+    assert refused.grid == (4, 1, 1)
+    assert refused.n_instances == refused.n_ops == 0
+    assert refused.reports == []
+    assert trace_calls == []
+    assert torch.equal(x, before)
+
+
 # ── taint through memory within an instance ─────────────────────────
 
 
