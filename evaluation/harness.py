@@ -31,6 +31,7 @@ import sys
 import threading
 import time
 from contextlib import contextmanager
+from types import FrameType
 from typing import Any
 
 from evaluation.spec import LaunchSpec
@@ -173,19 +174,78 @@ def _static_result(det: Any, elapsed: float, t0_gate: bool | None) -> dict[str, 
 # The watchdog turns that into an honest "timeout" status — itself a
 # dynamic-comparison data point for await-bearing kernels.
 DYNAMIC_TIMEOUT_S = 60
+# Declarative child observers. Evaluation adapters install their optimization
+# switches and profilers in the fresh child explicitly, never by inheritance.
+DYNAMIC_CHILD_HOOKS: tuple[dict[str, Any], ...] = ()
+
+
+class _DynamicDeadlineExceeded(BaseException):
+    """Cancellation, not an interpreter/solver failure eligible for fallback."""
+
+
+def _inside_finalizer(frame):
+    # An exception raised by a signal while __del__ is running is ignored by
+    # Python, and may prevent Z3_dec_ref from releasing the native AST. Defer
+    # cancellation until a Python checkpoint outside the finalizer stack.
+    while frame is not None:
+        if frame.f_code.co_name == "__del__":
+            return True
+        frame = frame.f_back
+    return False
 
 
 @contextmanager
 def _watchdog(seconds: float):
+    timing = {
+        "budget_s": seconds,
+        "armed_at": None,
+        "first_signal_at": None,
+        "cancellation_at": None,
+        "scope_exit_at": None,
+        "finalizer_deferrals": 0,
+        "native_interrupts": 0,
+        "checkpoint_armed": False,
+    }
     if (
         not hasattr(signal, "SIGALRM")
         or threading.current_thread() is not threading.main_thread()
     ):
-        yield
+        yield timing
         return
 
+    previous_trace = sys.gettrace()
+    previous_frame_traces = {}
+
+    def _checkpoint(frame, event, arg):  # noqa: ARG001
+        if timing["cancellation_at"] is not None:
+            return None
+        if _inside_finalizer(frame):
+            timing["finalizer_deferrals"] += 1
+            return _checkpoint
+        timing["cancellation_at"] = time.perf_counter()
+        stopped.set()
+        # Raise at a Python execution checkpoint, never asynchronously in a
+        # ctypes call or __del__. BaseException bypasses ordinary best-effort
+        # interpreter handlers. CPython disables this trace when it raises,
+        # so exception unwinding and subsequent destructors are undisturbed.
+        raise _DynamicDeadlineExceeded(f"dynamic track exceeded {seconds}s")
+
     def _fire(signum, frame):  # noqa: ARG001
-        raise TimeoutError(f"dynamic track exceeded {seconds}s")
+        if timing["first_signal_at"] is None:
+            timing["first_signal_at"] = time.perf_counter()
+        if timing["checkpoint_armed"]:
+            return
+        timing["checkpoint_armed"] = True
+        # No tracing cost before expiry. Existing frames need f_trace as well
+        # as the global hook; all original hooks are restored in finally.
+        while frame is not None:
+            # Do not retain frame objects: that would keep large native AST
+            # graphs alive through unwinding and move their destruction into
+            # watchdog teardown. Only surviving frames need hook restoration.
+            previous_frame_traces[id(frame)] = frame.f_trace
+            frame.f_trace = _checkpoint
+            frame = frame.f_back
+        sys.settrace(_checkpoint)
 
     # Python cannot deliver SIGALRM while a native Solver.check is running.
     # Z3 explicitly supports interrupting a context from another thread. The
@@ -201,23 +261,32 @@ def _watchdog(seconds: float):
             return
         while not stopped.is_set():
             context.interrupt()
+            timing["native_interrupts"] += 1
             stopped.wait(0.1)
 
     interrupter = threading.Thread(target=_interrupt_solver, daemon=True)
     old_handler = signal.signal(signal.SIGALRM, _fire)
-    # Native cleanup and best-effort fallback handlers can swallow a delivered
-    # TimeoutError. Keep interrupting after the deadline until this context
-    # exits, rather than spending the rest of the row budget after one lost
-    # alarm. The outer process watchdog remains the hard containment boundary.
-    old_timer = signal.setitimer(signal.ITIMER_REAL, seconds, min(seconds, 0.1))
+    # The signal only requests cancellation; the trace checkpoint finds a
+    # Python safe point after native work/finalizers. Native work and cleanup
+    # can still delay return; the outer process is the containment boundary.
+    timing["armed_at"] = time.perf_counter()
+    old_timer = signal.setitimer(signal.ITIMER_REAL, seconds)
     started = time.monotonic()
     thread_started = False
     try:
         interrupter.start()
         thread_started = True
-        yield
+        yield timing
     finally:
         signal.setitimer(signal.ITIMER_REAL, 0)
+        if timing["checkpoint_armed"]:
+            sys.settrace(previous_trace)
+            frame: FrameType | None = sys._getframe()
+            while frame is not None:
+                if id(frame) in previous_frame_traces:
+                    frame.f_trace = previous_frame_traces[id(frame)]
+                frame = frame.f_back
+            previous_frame_traces.clear()
         stopped.set()
         if thread_started:
             interrupter.join()
@@ -227,6 +296,7 @@ def _watchdog(seconds: float):
         if old_timer and old_timer[0] > 0:
             remaining = old_timer[0] - (time.monotonic() - started)
             signal.setitimer(signal.ITIMER_REAL, max(0.001, remaining), old_timer[1])
+        timing["scope_exit_at"] = time.perf_counter()
 
 
 def _cutile_bindings(args: list[dict]) -> tuple[dict, dict, bool]:
@@ -375,6 +445,25 @@ def _run_one_cutile(
 def _dynamic_track(
     spec: LaunchSpec, seed: int, ladder_level: LadderLevel = LadderLevel.L0
 ) -> dict[str, Any]:
+    from evaluation.dynamic_subprocess import DynamicSubprocessError, run_dynamic
+
+    try:
+        return run_dynamic(
+            spec, seed, ladder_level, DYNAMIC_TIMEOUT_S, DYNAMIC_CHILD_HOOKS
+        )
+    except DynamicSubprocessError:
+        raise
+    except Exception as exc:
+        raise DynamicSubprocessError(f"{type(exc).__name__}: {exc}") from exc
+
+
+def _dynamic_track_local(
+    spec: LaunchSpec,
+    seed: int,
+    ladder_level: LadderLevel = LadderLevel.L0,
+    *,
+    ready=None,
+) -> dict[str, Any]:
     import triton_viz
     from triton_viz.clients import RaceDetector
     from triton_viz.clients.race_detector.hb_common import (
@@ -389,14 +478,17 @@ def _dynamic_track(
     # exactly as the mark-and-continue mode would have.
     det = RaceDetector(abort_on_error=True, ladder_level=ladder_level)
     args = spec.make_args(seed)  # fresh tensors; the interpreter mutates them
+    if ready is not None:
+        ready()
     t0 = time.perf_counter()
     error = None
     timed_out = False
+    deadline = None
     try:
         traced = triton_viz.trace(det)(spec.kernel_fn)
-        with _watchdog(DYNAMIC_TIMEOUT_S):
+        with _watchdog(DYNAMIC_TIMEOUT_S) as deadline:
             traced[spec.grid](**_launch_binding(spec, args))
-    except TimeoutError as e:
+    except (_DynamicDeadlineExceeded, TimeoutError) as e:
         error = str(e)
         timed_out = True
     except UnsupportedSymbolicRaceQuery:
@@ -418,17 +510,26 @@ def _dynamic_track(
             "pids": [list(rep.witness_grid_a or ()), list(rep.witness_grid_b or ())],
             "reason": getattr(rep, "reason", ""),
         }
-        for rep in (getattr(det, "last_reports", []) or [])
+        for rep in ([] if timed_out else (getattr(det, "last_reports", []) or []))
     ]
-    return {
+    result: dict[str, Any] = {
         "status": "timeout" if timed_out else getattr(det, "last_status", None),
         "reason": getattr(det, "unsupported_reason", None),
-        "n_reports": len(getattr(det, "last_reports", []) or []),
-        "premises": list(getattr(det, "last_premises", ()) or ()),
+        "n_reports": len(witnesses),
+        "premises": [] if timed_out else list(getattr(det, "last_premises", ()) or ()),
         "witnesses": witnesses,
         "error": error,
         "time_s": round(elapsed, 4),
     }
+    if deadline is not None:
+        result["deadline"] = {
+            key.replace("_at", "_s"): (None if value is None else value - t0)
+            if key.endswith("_at")
+            else value
+            for key, value in deadline.items()
+        }
+        result["deadline"]["internal_return_s"] = elapsed
+    return result
 
 
 # ── the L1 rung: concrete per-instance enumeration (Route 1) ────────
@@ -797,6 +898,15 @@ def run_one(
         row["dynamic"] = _dynamic_track(spec, seed, ladder_level)
     except Exception as e:  # noqa: BLE001
         row["dynamic"] = {"error": f"{type(e).__name__}: {e}"}
+        from evaluation.dynamic_subprocess import DynamicSubprocessError
+
+        if isinstance(e, DynamicSubprocessError):
+            row.update(
+                verdict="error",
+                terminal="harness-error",
+                harness_error=f"dynamic child: {type(e).__name__}: {e}",
+            )
+            return row
 
     row["verdict"], row["terminal"] = _classify(row["static"], row.get("dynamic"))
     if row["terminal"] == "proved@interp" and "race-unconfirmed" in (
