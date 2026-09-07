@@ -722,6 +722,39 @@ class ConcreteFootprintRecorder(Client):
                         # dependencies through intermediate memory operations:
                         # their masks may make the intermediate lane inactive.
                         _set_positional_deps(h, frozenset((len(recorder.op_kind) - 1,)))
+                    elif name in ("create_select", "ternary_op"):
+                        # create_select delegates to ternary_op(np.where).
+                        # Both wrappers must overwrite positional evidence;
+                        # the general value taint above remains a union.
+                        names = (
+                            ("cond", "lhs", "rhs")
+                            if name == "create_select"
+                            else ("lhs", "rhs", "other")
+                        )
+                        operands = [
+                            args[i] if i < len(args) else kwargs.get(key)
+                            for i, key in enumerate(names)
+                        ]
+                        operator = (
+                            np.where
+                            if name == "create_select"
+                            else (args[3] if len(args) > 3 else kwargs.get("op"))
+                        )
+                        shape = np.shape(h.data)
+                        if operator is np.where:
+                            condition, lhs, rhs = (
+                                _positional_deps((value,), shape) for value in operands
+                            )
+                            deps = condition | (lhs & rhs)
+                        elif operator is np.clip:
+                            # The other current interpreter ternary primitive
+                            # is an unconditional elementwise clamp.
+                            deps = _positional_deps(operands, shape)
+                        else:
+                            # A generic callable has no known positional
+                            # contract. Do not infer one from its arity.
+                            deps = frozenset()
+                        _set_positional_deps(h, deps)
                     elif name in recorder._POSITIONAL_METHODS:
                         _set_positional_deps(
                             h,
@@ -763,7 +796,7 @@ class ConcreteFootprintRecorder(Client):
     # taint wrapper (which intentionally follows every operation). Shape must
     # also remain identical. Dot/reduce/scan/reshape/trans/broadcast are absent.
     _POSITIONAL_METHODS = frozenset(
-        "binary_op ternary_op unary_op cast_impl "
+        "binary_op unary_op cast_impl "
         "create_fp_to_fp create_bitcast create_int_to_ptr create_ptr_to_int "
         "create_si_to_fp create_ui_to_fp create_fp_to_si create_fp_to_ui "
         "create_fp_ext create_fp_trunc create_int_cast "
@@ -772,7 +805,7 @@ class ConcreteFootprintRecorder(Client):
         "create_add create_sub create_shl create_lshr create_minsi create_minui "
         "create_minimumf create_minnumf create_maxsi create_maxui create_maximumf "
         "create_maxnumf create_and create_xor create_or create_idiv create_ashr "
-        "create_umulhi create_clampf create_select create_fma create_fabs "
+        "create_umulhi create_clampf create_fma create_fabs "
         "create_cos create_exp create_exp2 create_iabs create_floor create_ceil "
         "create_log create_log2 create_precise_sqrt create_sqrt create_sin "
         "create_erf create_rsqrt create_addptr "

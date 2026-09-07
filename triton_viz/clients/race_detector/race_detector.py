@@ -1497,23 +1497,45 @@ class SymbolicRaceDetector(RaceDetector, SymbolicClient):
             | set(SymbolicExpr.UNARY_OPS)
             | set(SymbolicExpr.BINARY_OPS)
         )
-        found: set[int] = set()
-        seen: set[int] = set()
-        stack = list(roots)
+        # Evaluate sets bottom-up rather than walking a union of all leaves:
+        # only one `where` value arm contributes at a given position. Its
+        # condition is unconditional, while an arm-derived anchor must be
+        # present in BOTH alternatives (the static arith.select contract).
+        # An explicit stack preserves support for deep, shared expression DAGs.
+        dependencies: dict[int, frozenset[int]] = {}
+        empty: frozenset[int] = frozenset()
+        stack = [(root, False) for root in roots]
         while stack:
-            node = stack.pop()
-            if id(node) in seen or not hasattr(node, "op"):
+            node, expanded = stack.pop()
+            key = id(node)
+            if key in dependencies:
                 continue
-            seen.add(id(node))
-            if node.op in self._DEP_ANCHOR_OPS:
-                eid = self._dep_anchor_ids.get(id(node))
-                if eid is not None:
-                    found.add(eid)
-                continue  # the anchor's own operands are not this record's dependence
-            if node.op not in elementwise:
-                continue  # position-changing op: the chain is not positional
-            stack.extend(c for c in node.children.values() if c is not None)
-        return tuple(sorted(found))
+            op = getattr(node, "op", None)
+            if op in self._DEP_ANCHOR_OPS:
+                eid = self._dep_anchor_ids.get(key)
+                dependencies[key] = frozenset((eid,)) if eid is not None else empty
+                continue  # stop at the anchor, excluding its own operands
+            if op not in elementwise:
+                dependencies[key] = empty
+                continue  # position-changing or unknown operation
+            children = node.children
+            if op == "where" and set(children) != {"cond", "lhs", "rhs"}:
+                dependencies[key] = empty
+                continue  # do not guess the arms of an unfamiliar selection
+            if not expanded:
+                stack.append((node, True))
+                stack.extend((child, False) for child in children.values())
+                continue
+            if op == "where":
+                condition = dependencies[id(children["cond"])]
+                lhs = dependencies[id(children["lhs"])]
+                rhs = dependencies[id(children["rhs"])]
+                dependencies[key] = condition | (lhs & rhs)
+            else:
+                dependencies[key] = empty.union(
+                    *(dependencies[id(child)] for child in children.values())
+                )
+        return tuple(sorted(empty.union(*(dependencies[id(root)] for root in roots))))
 
     def _record_access_event(
         self,
