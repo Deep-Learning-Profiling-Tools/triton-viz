@@ -1,6 +1,6 @@
 # Dynamic-stage deadline and process accounting
 
-The evaluation interpreter now runs in a fresh subprocess. Its parent accepts a result only after the child exits within the requested budget. If the deadline expires, the parent requests cancellation, allows 0.05 s of cleanup grace, kills a remaining child, and reaps it before returning a timeout. The reported `dynamic.time_s` is the measured parent READY/GO-to-reap interval, including actual cancellation and termination cost. It is never replaced by the requested budget.
+When the selected frontend policy invokes the evaluation interpreter, it runs in a fresh subprocess. Its parent accepts a result only after the child exits within the requested budget. If the deadline expires, the parent requests cancellation, allows 0.05 s of cleanup grace, kills a remaining child, and reaps it before returning a timeout. The reported `dynamic.time_s` is the measured parent READY/GO-to-reap interval, including actual cancellation and termination cost. It is never replaced by the requested budget.
 
 The implementation is in `dynamic_subprocess.py` and the `_dynamic_track` / `_dynamic_track_local` split in `harness.py`. The validated candidate is `b10b8f8`, following the cancellation repair in `c812712` and the frame-lifetime correction in `66d0dba`. This is process containment with observed return slack, not a real-time scheduling guarantee for every host state. The existing evaluation rule still flags a returned dynamic time more than 0.5 s beyond its requested deadline.
 
@@ -18,7 +18,7 @@ The parent creates the same fresh CPU arguments that the former dynamic stage re
 
 The `LaunchSpec.make_args` closure is removed from the callable payload. The child uses the transported arguments directly and does not execute another factory. `cloudpickle` transports the kernel and launch metadata. A custom JIT reducer reconstructs callable source and options without transferring compiled caches, runtime locks or device handles. Source, source locations, referenced JIT helpers and referenced module files are checked after deserialization. The parent also verifies the child's detector tree, harness and transport source hashes, Python version, dependency versions and module origins, and effective runtime configuration.
 
-Serialization, child startup, imports, observer installation, tensor loading, identity validation and detector construction precede READY. They remain inside the full dynamic wrapper and whole-worker wall time. After READY the parent starts its clock and writes GO. The child begins its declared observers, executes the local dynamic stage, finishes its observers, writes its result and exits. A result message followed by a late exit is a timeout, even if the message contains a proof. Transport, source, configuration or observer failures are named harness errors; they cannot silently fall through to enumeration or retain a static proof as a successful complete row.
+Serialization, child startup, imports, observer installation, tensor loading, identity validation and detector construction precede READY. They remain inside the full dynamic wrapper and whole-worker wall time. After READY the parent starts its clock and writes GO. The child begins its declared observers, executes the local dynamic stage, finishes its observers, writes its result and exits. A result message followed by a late exit is a timeout, even if the message contains a proof. Transport, source/configuration validation and child-reported failures before timeout are named harness errors. An observer snapshot error followed by forced timeout remains explicit incomplete instrumentation evidence in the timeout receipt; normal static/enum selection may still occur, but the profile cannot qualify for complete-stage cost summaries.
 
 There is no fork of initialized CUDA, Torch or Z3 state. The child retains its parent's process group so the existing outer row-group kill also contains it. The per-row outer budget remains an additional boundary. Child setup has a separately named 60 s cap.
 
@@ -90,8 +90,76 @@ PYTHONPATH=/tmp/triton-viz-fix-dynamic-deadline:/tmp/tilerace-deadline-deps \
 
 All repository commit checks, including Ruff, formatting and mypy, passed for the candidate.
 
+## Transport admission follow-up
+
+The final integration's READY-only corpus admission found one mismatch in
+twenty representative inputs. All input bytes and layouts matched. The
+FLA varlen kernel calls `tl.exp`, but `co_names` also included the attribute
+name `exp` and incorrectly treated an unused imported JIT helper as a
+global dependency. Cloudpickle correctly omitted the unused helper.
+The initial failure is preserved as
+`evaluation/results/conformance-integration-20260907/transport-admission-7b8393e.json`.
+
+Correction `bb0a88a` (integration cherry-pick `8f4d6ad`) fingerprints actual
+global bytecode reads and captured closure bindings, including reads in
+nested code objects. Module file hashes, real JIT helper sources and
+captured constants remain checked. A failing-before regression reproduces
+the attribute/global collision; positive controls retain sensitivity to
+real helper and constant changes. All 24 focused tests pass, and the
+affected production FLA READY admission succeeds with identical input
+identity. This corrects source-binding admission, not the deadline clocks
+or solver behavior. READY admission never sends GO and supplies no
+analysis or performance observation.
+
+The complete before/after identity maps, exact diff, failed-row binding,
+passed production admission, helper and test/check evidence are archived in
+`evaluation/results/dynamic-deadline-fix-20260907/identity-followup-bb0a88a/`.
+Its separate `MANIFEST.json` binds 15 files and has SHA-256
+`344d4623e2f36ae5a450b9b9874b4c21f37fb0565f1f857847f8bfb989bf593a`;
+the original deadline `SUMMARY.json` is unchanged.
+
+The canonical venv now includes only the added `cloudpickle==3.1.1`
+dependency. All three installed Python source files match the development
+receipt's source hashes; its canonical module origin is recorded separately
+in `evaluation/results/conformance-integration-20260907/cloudpickle-canonical-source.json`.
+The earlier temporary-origin receipts and frozen manifests are unchanged.
+
+## Final combined-source confirmation
+
+After the shared dynamic/enum select correction, the exact integrated
+`55adc887dcd5a4f6a5b2399f437fca4d0bfbcaf8` source repeats one 60-second
+context-attention control and one successful golden profile with canonical
+cloudpickle. Context returns at **60.407444575 s**, including child kill
+and reap, within the original 0.5-second tolerance. Its full wrapper is
+66.110283 s and whole worker is 95.504648 s; the terminal remains
+`race@enum`, with no late dynamic result credited. Sampled child RSS is
+8,417,728 KiB and the sampled simultaneous parent/child sum is 9,173,400
+KiB, with the sampling/shared-page qualifications above.
+
+All named inputs match. The freshly compiled TTIR differs from the
+historical file only in 88 source-filename occurrences in location
+metadata; all other bytes match. Both raw hashes and the exact path-only
+diff are retained, rather than claiming raw TTIR equality. The successful
+golden control is `proved@T0`, dynamic `ok` at 0.3004 s, with a complete
+nine-check child profile and no open spans. The detector/transport/
+observer source hashes and HEAD agree before and after both observations.
+
+Separate immutable archive:
+`evaluation/results/dynamic-deadline-fix-20260907/final-source-55adc887/`.
+Its `MANIFEST.json` binds 27 files and has SHA-256
+`7b99af5aea3f315d382205c9b9490cc4ed93f9689c17b9c9eedda3f97309c637`.
+The original `SUMMARY.json` and earlier observations remain unchanged.
+
 ## Affected rerun scope
 
-The detector's memory model and solver conclusions are unchanged by isolation, but startup, cleanup, process memory and dynamic timing boundaries change for every Triton row. Remaining-budget allocation to enumeration includes those real costs and can change which launch analyses finish. A new formal pin must therefore rerun the affected full-corpus and selected-study measurements, with successor ablation/budget/phase adapters explicitly installing their child observers. Archived study scripts and old receipts remain immutable.
+Isolation leaves the memory model and solver rules unchanged, but startup, cleanup, process memory and dynamic timing boundaries change whenever the Triton dynamic stage runs. It does not guarantee identical verdicts for invalid captured footprints or budget-limited runs. Remaining-budget allocation to enumeration includes the real process costs and can change which launch analyses finish. A new formal pin must therefore rerun the affected full-corpus and selected-study measurements, with successor ablation/budget/phase adapters explicitly installing their child observers. Archived study scripts and old receipts remain immutable.
+
+The final merge `5c4622f` additionally integrates demo `e5d917d`'s on-demand
+L2 policy. A static decision can now skip the child entirely, leaving
+`dynamic.status=not-run` and `time_s=null`. The `55adc88` successful golden
+profile above belongs to its earlier every-frontend policy. Future required
+child-observer and frontend-complementarity probes explicitly set
+`TRITON_VIZ_EVAL_ALL_FRONTENDS=1`; operating-cost runs record the on-demand
+policy. See `L2_FRONTEND_POLICY.md` and `CONFORMANCE_INTEGRATION.md`.
 
 Under the user policy recorded on 2026-09-07, routine full-corpus reruns run L1 and then L2; there is no new full L0 pass. Selected L0 controls and regressions remain where their experiments require them. Historical three-level data remain historical and must not be mixed with new subprocess timing as a paired comparison. This four-observation diagnostic validates the repaired return behavior; it does not replace a full formal rerun or recalibrate corpus-wide duration estimates.

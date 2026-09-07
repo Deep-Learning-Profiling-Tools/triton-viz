@@ -54,8 +54,12 @@ to the corrected frontend results.
 
 ## Exact real-case diagnostics
 
-Raw diagnostic JSON and logs live in the isolated worktree at
-`evaluation/results/frontend-conformance-20260907/`. Each successful probe
+Raw diagnostic JSON and logs are retained in the canonical detector checkout
+and the original isolated worktree at
+`evaluation/results/frontend-conformance-20260907/`. The integration audit
+verifies the summary hash and all 51 bound files, plus the two completed
+Hadamard pairs' matching sources, inputs and 3-to-0 report transitions.
+Each successful probe
 records the kernel-source SHA-256, seed, grid, scalar arguments, tensor
 shape/stride/dtype and logical-byte hashes. Static probes consume the exact
 saved TTIR selected by its full SHA-256 matching the published prefix.
@@ -74,7 +78,7 @@ tensor byte or alias relation.
 | aiter THD forward | L1 enum proof, L2 same-instance WAR | `proved@T1+content`, zero reports |
 | FlagGems embedding | Static proof, interpreter phantom WAW | Interpreter `ok`, zero reports, contents-snapshot premise retained |
 | FlagGems weight norm first | Static proof, interpreter WAW across PIDs | Interpreter `ok`, zero reports |
-| Recurrent-retention backward | Static proof, 24 interpreter same-PID WAWs | Interpreter `ok`, zero reports |
+| Recurrent-retention backward | Static proof, 24 interpreter same-PID WAWs | Earlier zero reports; final integration exposes invalid backing-storage geometry, so this captured launch receives no accuracy credit (see below) |
 | TorchAO Hadamard QKV | Interpreter reports or budget-driven enum fallback | Full 32-instance enum proof; source-matched S4/D8 interpreter control changes three RAWs to zero |
 | TorchAO Hadamard V | Interpreter reports or budget-driven enum fallback | Full 32-instance enum proof; source-matched S4/D8 interpreter control changes three RAWs to zero |
 | GDN2 fused recurrent sentinel | Main L2 selects static proof before enum | Direct enum freshly exercises all eight captured instances and proves clean |
@@ -97,9 +101,29 @@ norm has two instances covering 32 rows each; its mask now restricts the
 2048-column tile to the actual 128 columns. Retention backward has grid
 `(1,1,8)`, `T=8` and `DK=DV=16`: the three output arrays use disjoint
 instance/time slices and the separate range calls denote the same within-row
-coordinate. These source facts explain why the removed reports were
-fabricated by the frontend, without treating arbitrary real-kernel labels
-as ground truth.
+coordinate. These source facts explain the corrected output-access
+geometry, without treating arbitrary real-kernel labels as ground truth.
+
+The final integration qualifies the retention observation: its `do` view
+has all-zero strides and only one element of backing storage, but the
+kernel uses `s_vo_h=128` and `s_vo_t=16`, accessing offsets 0 through 1,023.
+The final `55adc88` source/input-matched subprocess probe reports 13
+conflicts (five WAR and eight RAW) involving these invalid reads. The
+output-slice argument above does not establish legal `do` reads; neither
+the older zero reports nor the new 13 can establish captured-launch
+accuracy. The compiled in-bounds model boundary is not a per-launch
+memory-safety certificate. This is recorded separately in the final
+integration ledger; no frozen fixture is silently materialized or replaced.
+
+A separately named legal control materializes only `do`, changing its
+strides to `(512,128,16,1)` and backing storage from four to 4,096 bytes.
+It preserves source, grid, scalars and logical tensor values. The identical
+legal control and probe at frozen `31c48f5` produces 24 same-instance WAWs;
+at final `55adc88` it produces zero. Complete materialized layout/storage
+and byte metadata match within this pair. The old in-process and new
+subprocess boundary are explicit, so these are correctness controls with
+no timing adoption. Their legal geometry is not substituted into the
+immutable captured-input record.
 
 Two initial fused-cache attempts failed in diagnostic input hashing on
 zero-dimensional floating tensors before invoking analysis. The serializer
@@ -138,6 +162,35 @@ completing at S4/D8). The production source hashes are recorded separately
 from the evolving diagnostic harness; the archived final probe is a
 reproduction aid, not a claim that every earlier diagnostic used identical
 serializer source bytes.
+
+## Select dependencies across the dynamic and enum frontends
+
+The final integration audit found that the static select rule above was
+not yet shared by the interpreter and enumerator. Dynamic `where` traversed
+both alternative arms unconditionally. Concrete enumeration likewise
+unioned positional dependencies through `create_select` and its nested
+`ternary_op(np.where)` call. An inactive direct-load arm could therefore
+hide a conflict in the selected permuted or constant arm.
+
+Correction `b3af535` (integration `55adc88`) uses condition anchors unioned
+with the intersection of value-arm anchors in both paths. Dynamic analysis
+uses iterative memoized dependency sets, preserving deep-DAG behavior,
+pointer-root exclusion and stopping at memory anchors. Enumeration applies
+the same rule at both nested builder entry points and retains shape checks.
+Its general value taint remains a union; losing a positional anchor cannot
+erase a conservative footprint-source obligation. Elementwise `np.clip`
+keeps its ordinary dependency union; an unknown ternary callback supplies
+no positional evidence.
+
+All 31 new unit/end-to-end tests and the 91-test focused selection pass.
+Before the fix, four actual four-element interpreter controls missed
+read/write conflicts and all four corresponding enum controls returned
+`ok`. Afterwards, the interpreter reports the conflicts and enumeration
+conservatively refuses `dependency-order`. This is not exact per-lane
+selection tracking. Common anchors present in both value arms and anchors
+from the loaded condition remain clean controls. Independent source review
+found no blocker. The correction implements the existing select contract
+and changes no benchmark label or discovery-counting rule.
 
 ## Verification and rerun scope
 

@@ -119,8 +119,12 @@ assertion failed because `dataclasses.asdict(AccessEvent)` omits dynamically
 attached `deps`. The serializer now records that field explicitly; no detector
 change was made in response to those failed diagnostic assertions.
 
-Reproduction on this installation, using the same command with `--varlen`
-and a distinct output path for the second configuration:
+Reproduce the archived dot-only candidate from an isolated `e6358a2`
+checkout with its hash-bound value sidecars and the preserved cache/input
+artifacts below. Use the same command with `--varlen` and a distinct output
+path for the second configuration. Running it from a later integrated
+checkout produces a new diagnostic with later reader bytes; it does not
+reproduce the archived candidate's exact source identity.
 
 ```bash
 env -u CUDA_VISIBLE_DEVICES -u TRITON_INTERPRET PYTHONPATH="$PWD" \
@@ -152,7 +156,9 @@ showing race/proof disagreement, need inclusion for attribution. Existing
 timeout/censored samples remain missing timing evidence.
 
 For paper adoption after the remaining fixes are integrated, create a new
-common pin and rerun the declared full ladder plus affected study panels.
+common pin and rerun the declared full L1/L2 sequence plus affected study
+panels. Hao's 2026-09-07 paper policy omits routine full L0; targeted L0
+regressions and selected-study controls remain separately scoped.
 The completed `31c48f5` publication and all prior raw data keep their original
 revision and labels. This correction itself does not decide the unrelated
 aiter, TorchAO interpreter, strict-deadline, or cuTile ordering work.
