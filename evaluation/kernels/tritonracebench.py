@@ -28,6 +28,7 @@ import triton
 import triton.language as tl
 
 from evaluation.kernels import await_sync, golden_smoke, rmw_sync
+from evaluation.kernels.tritonracebench_repairs import register as _register_repairs
 from evaluation.spec import Corpus, LaunchSpec
 
 CORPUS = Corpus("tritonracebench")
@@ -1272,3 +1273,8 @@ CORPUS.add(
         "guarded load is unordered against it (twin: trb021_guarded_acq_rel_no)",
     )
 )
+
+
+# Additional distinct repairs, registered after the historical catalog.
+
+_register_repairs(CORPUS)
