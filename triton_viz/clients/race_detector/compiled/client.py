@@ -28,6 +28,8 @@ from __future__ import annotations
 import hashlib
 import re
 from collections.abc import Callable
+from copy import copy
+from dataclasses import dataclass, fields, replace
 from typing import Any, ClassVar
 
 from ....core.callbacks import ForLoopCallbacks, OpCallbacks
@@ -54,6 +56,15 @@ _RE_TTGIR_FUNC = re.compile(r"tt\.func\s+\w+\s+@(\w+)\(")
 def _kernel_name(ttgir: str) -> str:
     m = _RE_TTGIR_FUNC.search(ttgir)
     return m.group(1) if m else "<kernel>"
+
+
+@dataclass(frozen=True)
+class _TTIRParseBinding:
+    text: str
+    ladder_level: LadderLevel
+    multipath: bool
+    graph: AccessGraph
+    snapshot: AccessGraph
 
 
 class CompiledRaceDetector(Client):
@@ -89,6 +100,7 @@ class CompiledRaceDetector(Client):
         differential_check: bool = False,
         ablations: tuple[str, ...] = (),
         ladder_level: LadderLevel = LadderLevel.L0,
+        retain_ttir_parse_binding: bool = False,
     ) -> None:
         super().__init__()
         self.collect_smtlib = collect_smtlib
@@ -140,6 +152,12 @@ class CompiledRaceDetector(Client):
         self._ttir_graph_cache: dict[str, tuple[AccessGraph | None, str | None]] = {}
         self.last_ttir_graphs: list[AccessGraph | None] = []
         self.last_ttir_unsupported: list[str | None] = []
+        # Optional evaluation telemetry; production analysis does not need
+        # or consult these bindings. Retain the original parse state so a
+        # diagnostic consumer can reject stale or subsequently edited graphs.
+        self._retain_ttir_parse_binding = retain_ttir_parse_binding
+        self._ttir_parse_bindings: dict[str, _TTIRParseBinding] = {}
+        self._last_ttir_parse_bindings: list[_TTIRParseBinding | None] = []
         # A2 gate capture (impl-spec-a2-gate): the post-Membar lowered
         # artifacts per specialization, self-contained dicts with the
         # ttir (obligation side) plus ptx (discharge side; llir kept as
@@ -491,6 +509,45 @@ class CompiledRaceDetector(Client):
 
     # ── analysis ──────────────────────────────────────────────────────
 
+    def get_last_ttir_graph(
+        self, ttir: str, *, ladder_level: LadderLevel
+    ) -> AccessGraph | None:
+        """Borrow this launch's unique, unchanged parse for read-only use.
+
+        Requires ``retain_ttir_parse_binding=True`` at construction. The
+        exact source, parse level, multipath mode, identity and graph state
+        must still match; ambiguity, parse failures and missing bindings
+        return None. This is independent of whether solving succeeded.
+        Callers must not mutate the returned graph and must retain their
+        ordinary parse fallback when no graph can be borrowed.
+        """
+        try:
+            if (
+                self._pending_ttir
+                or len(self._last_ttir_parse_bindings) != 1
+                or len(self.last_ttir_graphs) != 1
+                or self.last_ttir_unsupported != [None]
+            ):
+                return None
+            binding = self._last_ttir_parse_bindings[0]
+            graph = self.last_ttir_graphs[0]
+            level = parse_ladder_level(ladder_level)
+            if (
+                binding is not None
+                and binding.text == ttir
+                and binding.ladder_level == level == self.ladder_level
+                and binding.multipath is (level >= 2)
+                and graph is binding.graph
+                and graph.multipath is binding.multipath
+                and graph == binding.snapshot
+            ):
+                return graph
+        except Exception:  # noqa: BLE001
+            # Diagnostic reuse must never turn a malformed or deeply
+            # edited graph into an error that bypasses the parse fallback.
+            pass
+        return None
+
     def _consume_pending_ttir(self) -> None:
         """Parse this launch's TTIR into AccessGraphs (Track 2 capture).
 
@@ -504,6 +561,7 @@ class CompiledRaceDetector(Client):
         """
         self.last_ttir_graphs = []
         self.last_ttir_unsupported = []
+        self._last_ttir_parse_bindings = []
         for text in self._pending_ttir:
             # errors="replace": a hash key must never raise (lone surrogates
             # in a hostile string would otherwise escape finalize).
@@ -523,9 +581,43 @@ class CompiledRaceDetector(Client):
                     # Reader bug or printer drift: degrade to unsupported,
                     # never crash the launch.
                     self._ttir_graph_cache[key] = (None, f"{type(e).__name__}: {e}")
+                graph, reason = self._ttir_graph_cache[key]
+                if (
+                    self._retain_ttir_parse_binding
+                    and graph is not None
+                    and reason is None
+                ):
+                    try:
+                        # All AST nodes below AccessGraph are frozen
+                        # dataclasses with immutable children. Copy each
+                        # graph field so its mutable lists/dicts/sets do
+                        # not alias the snapshot; no AST walk or gate runs
+                        # here. Keep this FIRST parse state on cache hits.
+                        snapshot = replace(
+                            graph,
+                            **{
+                                f.name: copy(getattr(graph, f.name))
+                                for f in fields(graph)
+                            },
+                        )
+                        self._ttir_parse_bindings[key] = _TTIRParseBinding(
+                            text,
+                            self.ladder_level,
+                            self.ladder_level >= 2,
+                            graph,
+                            snapshot,
+                        )
+                    except Exception:  # noqa: BLE001
+                        # Telemetry allocation must not change parsing or
+                        # the production verdict if it cannot be retained.
+                        pass
             graph, reason = self._ttir_graph_cache[key]
             self.last_ttir_graphs.append(graph)
             self.last_ttir_unsupported.append(reason)
+            if self._retain_ttir_parse_binding:
+                self._last_ttir_parse_bindings.append(
+                    self._ttir_parse_bindings.get(key)
+                )
         self._pending_ttir = []
 
     def _check_lowering(self) -> None:

@@ -99,7 +99,10 @@ def _static_track(
     from triton_viz.clients.race_detector.compiled.client import CompiledRaceDetector
 
     det = CompiledRaceDetector(
-        confirm_races=True, differential_check=True, ladder_level=ladder_level
+        confirm_races=True,
+        differential_check=True,
+        ladder_level=ladder_level,
+        retain_ttir_parse_binding=True,
     )
     args = spec.make_args(seed)
     t0 = time.perf_counter()
@@ -110,8 +113,9 @@ def _static_track(
     det.finalize()
     elapsed = time.perf_counter() - t0
 
-    # tier-selector detail, recomputed via the public gate (the client does
-    # not publish it): lets the T0 stretch show up as a re-run diff.
+    # Tier-selector detail stays outside static.time_s. Reuse only the
+    # exact, unchanged parse from this launch; the client still does not
+    # publish the gate result, so run the public gate at its original site.
     t0_gate = None
     try:
         from triton_viz.clients.common.ttir_reader import parse_ttir
@@ -119,7 +123,10 @@ def _static_track(
             t0_linearity_gate,
         )
 
-        t0_gate = bool(t0_linearity_gate(parse_ttir(ttir, multipath=ladder_level >= 2)))
+        graph = det.get_last_ttir_graph(ttir, ladder_level=ladder_level)
+        if graph is None:
+            graph = parse_ttir(ttir, multipath=ladder_level >= 2)
+        t0_gate = bool(t0_linearity_gate(graph))
     except Exception:  # noqa: BLE001
         pass
 
