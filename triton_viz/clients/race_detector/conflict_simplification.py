@@ -198,13 +198,15 @@ class _PureSelectExpressionCache:
         self._abstracted[expression] = cached
         return cached
 
-    def relaxation(self, conditions):
+    def relaxation(self, conditions, *, normalized_conditions=None):
         # A diagnostic can disable this factor after a cache was populated.
         # An old memo entry must not silently re-enable the optional path.
         if not _ENABLE_SNAPSHOT_PRECHECK:
             return None
         try:
-            normalized = [self.normalize(condition) for condition in conditions]
+            normalized = normalized_conditions
+            if normalized is None:
+                normalized = [self.normalize(condition) for condition in conditions]
             for condition in normalized:
                 if z3.is_false(condition):
                     return condition
@@ -223,20 +225,29 @@ def _linear_relaxation(
     same_instance=False,
     simplify_first=False,
     expression_cache=None,
+    normalized_conditions=None,
 ):
     """Return a sound QF_LIA relaxation, or None outside the cheap pattern.
 
     ``correspondence`` maps b-copy variables onto matching a-copy variables
     for SHAPE comparison only. It never identifies actual copies in a
     cross-instance condition, and radix matching uses its original AST.
+    ``normalized_conditions`` reuses the pure-Select path's preparation;
+    it is ignored by the general path, which preserves original radix syntax.
     """
     if simplify_first and expression_cache is not None:
-        return expression_cache.relaxation(conditions)
+        return expression_cache.relaxation(
+            conditions, normalized_conditions=normalized_conditions
+        )
     if simplify_first:
         # A pure Select path has no mixed-radix syntax to preserve. Fold
         # constants and trivial conflict predicates in Z3's native rewriter
         # before walking the DAG in Python, once per condition.
-        conditions = [z3.simplify(condition) for condition in conditions]
+        conditions = (
+            normalized_conditions
+            if normalized_conditions is not None
+            else [z3.simplify(condition) for condition in conditions]
+        )
         if any(z3.is_false(condition) for condition in conditions):
             return z3.BoolVal(False)
     bounds = set() if simplify_first else _explicit_digit_bounds(conditions)
@@ -330,18 +341,38 @@ def conflict_impossible(
     snapshot_cache=None,
 ) -> bool:
     """Cheap UNSAT-only precheck; callers retain their original query budget."""
+    normalized = None
     weak_attempted = False
     if simplify_first and _ENABLE_SNAPSHOT_PRECHECK:
         # Pure Select abstraction can already rule out an address pair without
         # inspecting the snapshot cells. Only UNSAT discharges the pair; an
         # inconclusive attempt retains the original guarded-lemma check below.
+        normalize = (
+            expression_cache.normalize if expression_cache is not None else z3.simplify
+        )
         try:
-            relaxed = _linear_relaxation(
-                conditions,
-                correspondence,
-                same_instance=same_instance,
-                simplify_first=True,
-                expression_cache=expression_cache,
+            # Reuse this path's existing normalization in the guarded attempt.
+            # Snapshot certificates still receive the ORIGINAL conditions.
+            if expression_cache is None:
+                normalized = [normalize(condition) for condition in conditions]
+            else:
+                try:
+                    normalized = [normalize(condition) for condition in conditions]
+                except (TypeError, z3.Z3Exception):
+                    # The cached relaxation has always treated normalization
+                    # failure as unsupported rather than throwing to its caller.
+                    normalized = None
+            relaxed = (
+                _linear_relaxation(
+                    conditions,
+                    correspondence,
+                    same_instance=same_instance,
+                    simplify_first=True,
+                    expression_cache=expression_cache,
+                    normalized_conditions=normalized,
+                )
+                if normalized is not None
+                else None
             )
             if relaxed is not None and _relaxation_impossible(relaxed):
                 return True
@@ -365,6 +396,13 @@ def conflict_impossible(
             lemmas = ()
         if lemmas:
             conditions = [*conditions, *lemmas]
+            if normalized is not None:
+                try:
+                    normalized.extend(normalize(lemma) for lemma in lemmas)
+                except (TypeError, z3.Z3Exception):
+                    if expression_cache is None:
+                        raise
+                    return False
     if weak_attempted and not lemmas:
         # With no added facts, the original precheck is exactly the attempted
         # relaxation, including whether it is supported. When applicable, it
@@ -376,6 +414,7 @@ def conflict_impossible(
         same_instance=same_instance,
         simplify_first=simplify_first,
         expression_cache=expression_cache,
+        normalized_conditions=normalized,
     )
     if relaxed is None:
         return False
@@ -383,6 +422,8 @@ def conflict_impossible(
 
 
 def _relaxation_impossible(relaxed) -> bool:
+    if z3.is_false(relaxed):
+        return True
     solver = z3.SolverFor("QF_LIA")
     # This is only a speculative shortcut. Expiring it has no effect on
     # the full query's budget, answer, or proof scope. A weak-first attempt
