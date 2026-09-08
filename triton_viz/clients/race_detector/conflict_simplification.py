@@ -330,6 +330,28 @@ def conflict_impossible(
     snapshot_cache=None,
 ) -> bool:
     """Cheap UNSAT-only precheck; callers retain their original query budget."""
+    weak_attempted = False
+    if simplify_first and _ENABLE_SNAPSHOT_PRECHECK:
+        # Pure Select abstraction can already rule out an address pair without
+        # inspecting the snapshot cells. Only UNSAT discharges the pair; an
+        # inconclusive attempt retains the original guarded-lemma check below.
+        try:
+            relaxed = _linear_relaxation(
+                conditions,
+                correspondence,
+                same_instance=same_instance,
+                simplify_first=True,
+                expression_cache=expression_cache,
+            )
+            if relaxed is not None and _relaxation_impossible(relaxed):
+                return True
+        except (TypeError, z3.Z3Exception):
+            # The extra attempt must not prevent an original guarded query
+            # from succeeding, including when lemma extraction yields no facts.
+            pass
+        else:
+            weak_attempted = True
+    lemmas = ()
     if _ENABLE_SNAPSHOT_PRECHECK:
         # These facts follow from snapshot cells ALREADY in this query.
         # Keep all source conditions and the guards on each derived lemma.
@@ -343,6 +365,11 @@ def conflict_impossible(
             lemmas = ()
         if lemmas:
             conditions = [*conditions, *lemmas]
+    if weak_attempted and not lemmas:
+        # With no added facts, the original precheck is exactly the attempted
+        # relaxation, including whether it is supported. When applicable, it
+        # has already received the original full 500 ms precheck budget.
+        return False
     relaxed = _linear_relaxation(
         conditions,
         correspondence,
@@ -352,9 +379,14 @@ def conflict_impossible(
     )
     if relaxed is None:
         return False
+    return _relaxation_impossible(relaxed)
+
+
+def _relaxation_impossible(relaxed) -> bool:
     solver = z3.SolverFor("QF_LIA")
     # This is only a speculative shortcut. Expiring it has no effect on
-    # the full query's budget, answer, or proof scope.
+    # the full query's budget, answer, or proof scope. A weak-first attempt
+    # never consumes the original guarded-lemma check's independent budget.
     solver.set(timeout=_PRECHECK_TIMEOUT_MS)
     solver.add(relaxed)
     return solver.check() == z3.unsat
