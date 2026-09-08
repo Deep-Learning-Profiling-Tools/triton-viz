@@ -184,3 +184,56 @@ def test_disabled_factor_does_not_consult_populated_snapshot_cache(monkeypatch):
     monkeypatch.setattr(cache, "lemmas", disabled)
     monkeypatch.setattr(cs, "_ENABLE_SNAPSHOT_PRECHECK", False)
     assert not cs.conflict_impossible([*cells, *reads], snapshot_cache=cache)
+
+
+def test_literal_cells_defer_certification_until_a_current_symbolic_read(monkeypatch):
+    cells, reads, table, a, b = _case(tuple(range(64)))
+    cache = SnapshotLemmaCache()
+    original_certify = cache._certify
+    certified = []
+
+    def certify(roots):
+        certified.append(roots)
+        return original_certify(roots)
+
+    monkeypatch.setattr(cache, "_certify", certify)
+    common = z3.And(*(cell.arg(1) == cell.arg(0) for cell in cells))
+    assert cache.lemmas([common, a != b]) == ()
+    assert not certified
+    conditions = [common, *reads, a != b]
+    lemmas = cache.lemmas(conditions)
+    assert len(certified) == 1
+    expected = snapshot_table_lemmas(z3.And(*conditions))
+    assert [lemma.sexpr() for lemma in lemmas] == [lemma.sexpr() for lemma in expected]
+    _assert_entailed(conditions, lemmas)
+    # Returning to an affine pair must not reuse the previous pair's reads.
+    assert cache.lemmas([common, a < b]) == ()
+    # The fast path still keeps literal cell premises separate from guards.
+    conditional = z3.Implies(z3.Bool("cells_active"), common)
+    assert cache.lemmas([conditional, *reads]) == ()
+
+
+@pytest.mark.parametrize("array_term", ["store", "ite", "function", "constant"])
+@pytest.mark.parametrize("reversed_equation", [False, True])
+def test_literal_cells_of_complex_arrays_preserve_nested_symbolic_reads(
+    array_term, reversed_equation
+):
+    cells, _, table, a, _ = _case()
+    other = z3.Array("other_snapshot", z3.IntSort(), z3.IntSort())
+    arrays = {
+        "store": z3.Store(table, 99, table[a]),
+        "ite": z3.If(table[a] == 2, table, other),
+        "function": z3.Function("array_from_integer", z3.IntSort(), table.sort())(
+            table[a]
+        ),
+        "constant": z3.K(z3.IntSort(), table[a]),
+    }
+    literal_read = arrays[array_term][0]
+    equation = z3.IntVal(2) == literal_read if reversed_equation else literal_read == 2
+    conditions = [*cells, equation]
+    cache = SnapshotLemmaCache()
+    lemmas = cache.lemmas(conditions)
+    expected = snapshot_table_lemmas(z3.And(*conditions))
+    assert len(lemmas) == 1
+    assert [lemma.sexpr() for lemma in lemmas] == [lemma.sexpr() for lemma in expected]
+    _assert_entailed(conditions, lemmas)

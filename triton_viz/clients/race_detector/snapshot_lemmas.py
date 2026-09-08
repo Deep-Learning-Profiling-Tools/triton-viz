@@ -58,36 +58,51 @@ class SnapshotLemmaCache:
     def _cell_equation(node):
         if not z3.is_eq(node):
             return None
-        for read, value in (node.children(), tuple(reversed(node.children()))):
+        left, right = node.children()
+        for read, value in ((left, right), (right, left)):
             if not (
-                z3.is_select(read)
-                and read.num_args() == 2
-                and z3.is_int_value(read.arg(1))
-                and z3.is_int_value(value)
+                z3.is_int_value(value) and z3.is_select(read) and read.num_args() == 2
             ):
                 continue
-            array = read.arg(0)
+            array, index = read.children()
+            if not z3.is_int_value(index):
+                continue
+            array_sort = array.sort()
             if (
-                array.sort().domain().kind() == z3.Z3_INT_SORT
-                and array.sort().range().kind() == z3.Z3_INT_SORT
+                array_sort.domain().kind() == z3.Z3_INT_SORT
+                and array_sort.range().kind() == z3.Z3_INT_SORT
             ):
-                return array, read.arg(1).as_long(), value.as_long()
+                return array, index.as_long(), value.as_long()
         return None
 
     def _summary(self, expression):
         # Iterative postorder handles deep expressions without Python recursion.
-        pending = [(expression, False)]
+        pending = [(expression, False, None)]
         while pending:
-            node, visited = pending.pop()
+            node, visited, cell = pending.pop()
             if node in self._summaries:
                 continue
             if z3.is_quantifier(node):
                 self._summaries[node] = _Summary()
                 continue
+            if not visited:
+                cell = self._cell_equation(node)
+                if (
+                    cell is not None
+                    and z3.is_const(cell[0])
+                    and cell[0].decl().kind() == z3.Z3_OP_UNINTERPRETED
+                ):
+                    # A literal cell of a plain array symbol has no eligible
+                    # reads beneath it. Keep its original fact, but avoid
+                    # constructing summaries for the Select and its literals.
+                    # Store/If/function array terms may contain symbolic reads
+                    # and must follow the ordinary descendant traversal.
+                    self._summaries[node] = _Summary(_CellFacts(cell=cell))
+                    continue
             children = node.children()
             if children and not visited:
-                pending.append((node, True))
-                pending.extend((child, False) for child in children)
+                pending.append((node, True, cell))
+                pending.extend((child, False, None) for child in children)
                 continue
             summaries = [self._summaries[child] for child in children]
             facts = None
@@ -103,7 +118,6 @@ class SnapshotLemmaCache:
                             self._fact_joins[roots] = _CellFacts(roots)
                         facts = self._fact_joins[roots]
             else:
-                cell = self._cell_equation(node)
                 if cell is not None:
                     facts = _CellFacts(cell=cell)
             # Match the standalone helper's reverse-child DFS read ordering.
@@ -172,6 +186,14 @@ class SnapshotLemmaCache:
             self._context = context
         summaries = [self._summary(condition) for condition in conditions]
         roots = tuple(dict.fromkeys(s.facts for s in summaries if s.facts is not None))
+        if not roots:
+            return ()
+        actual_reads = dict.fromkeys(r for s in reversed(summaries) for r in s.reads)
+        if not actual_reads:
+            # Certificates cannot produce a lemma without a nonliteral read.
+            # Read sets come from the same cached summaries as the cell facts;
+            # no additional per-pair AST walk or solver query is needed.
+            return ()
         if roots not in self._certificates:
             self._certificates[roots] = self._certify(roots)
         certificates = self._certificates[roots]
@@ -180,7 +202,6 @@ class SnapshotLemmaCache:
         reads: dict[z3.ArrayRef, list[z3.ArithRef]] = {
             array: [] for array in certificates
         }
-        actual_reads = dict.fromkeys(r for s in reversed(summaries) for r in s.reads)
         for read in actual_reads:
             if read.arg(0) in certificates:
                 reads[read.arg(0)].append(read)
