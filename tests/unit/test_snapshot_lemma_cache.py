@@ -42,8 +42,8 @@ def test_common_table_cells_and_certificate_are_visited_once(monkeypatch):
     original_certify = SnapshotLemmaCache._certify
     cell_calls, certificate_calls = {}, []
 
-    def cell(node):
-        result = original_cell(node)
+    def cell(cache, node):
+        result = original_cell(cache, node)
         if result is not None:
             cell_calls[node] = cell_calls.get(node, 0) + 1
         return result
@@ -52,7 +52,7 @@ def test_common_table_cells_and_certificate_are_visited_once(monkeypatch):
         certificate_calls.append(roots)
         return original_certify(roots)
 
-    monkeypatch.setattr(SnapshotLemmaCache, "_cell_equation", staticmethod(cell))
+    monkeypatch.setattr(SnapshotLemmaCache, "_cell_equation", cell)
     monkeypatch.setattr(SnapshotLemmaCache, "_certify", staticmethod(certify))
     cache = SnapshotLemmaCache()
     common = z3.And(*cells)
