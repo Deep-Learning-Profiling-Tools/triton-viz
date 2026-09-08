@@ -94,7 +94,11 @@ Limitations (current):
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Any, ClassVar
+from typing import TYPE_CHECKING, Any, ClassVar
+
+if TYPE_CHECKING:
+    from .guarded_division import GuardedDivisionApplicabilityCache
+    from .snapshot_lemmas import SnapshotLemmaCache
 
 from z3 import (
     And,
@@ -550,6 +554,9 @@ class TwoCopySymbolicHBSolver:
         # alive, and limit the cache to this race-finding invocation.
         self._unsat_race_queries: dict[tuple[int, int], BoolRef] = {}
         self._guarded_query_cache: dict[BoolRef, BoolRef] = {}
+        # Structural summaries retain immutable ASTs only for this invocation.
+        self._guarded_division_applicability_cache: GuardedDivisionApplicabilityCache | None = None
+        self._snapshot_lemma_cache: SnapshotLemmaCache | None = None
 
         candidates: list[tuple[SymbolicMemoryEvent, SymbolicMemoryEvent, ModelRef, str]]
         candidates = []
@@ -765,14 +772,26 @@ class TwoCopySymbolicHBSolver:
         base = self._base_constraint_conjunction()
         if base is None:
             return None
-        from .guarded_division import guarded_division_normal_form
+        from .guarded_division import (
+            GuardedDivisionApplicabilityCache,
+            guarded_division_normal_form,
+        )
 
         original = simplify(And(base, *pair_constraints, race_expression))
         cache = getattr(self, "_guarded_query_cache", None)
         if cache is None:
             self._guarded_query_cache = cache = {}
         if original not in cache:
-            cache[original] = guarded_division_normal_form(original)
+            applicability_cache = getattr(
+                self, "_guarded_division_applicability_cache", None
+            )
+            if applicability_cache is None:
+                applicability_cache = (
+                    self._guarded_division_applicability_cache
+                ) = GuardedDivisionApplicabilityCache()
+            cache[original] = guarded_division_normal_form(
+                original, applicability_cache=applicability_cache
+            )
         return cache[original]
 
     @staticmethod
@@ -963,12 +982,18 @@ class TwoCopySymbolicHBSolver:
                 expression_cache = (
                     self._conflict_expression_cache
                 ) = _PureSelectExpressionCache()
+        from .snapshot_lemmas import SnapshotLemmaCache
+
+        snapshot_cache = getattr(self, "_snapshot_lemma_cache", None)
+        if snapshot_cache is None:
+            snapshot_cache = self._snapshot_lemma_cache = SnapshotLemmaCache()
         return conflict_impossible(
             conditions,
             common.correspondence,
             same_instance=same_instance,
             simplify_first=simplify_first,
             expression_cache=expression_cache,
+            snapshot_cache=snapshot_cache,
         )
 
     def _conflict_precheck_common(self) -> _ConflictPrecheckCommon:
