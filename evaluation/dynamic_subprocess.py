@@ -212,7 +212,8 @@ def _kernel_identity(kernel) -> dict:
                 "tuple": [primitive(item, key, framework_state=True) for item in value]
             }
         module = getattr(value, "__module__", "")
-        if not module.startswith("triton."):
+        # Root helpers such as next_power_of_2 are ConstexprFunctions too.
+        if module != "triton" and not module.startswith("triton."):
             return constant(value, key)
         from triton.runtime.jit import ConstexprFunction
 

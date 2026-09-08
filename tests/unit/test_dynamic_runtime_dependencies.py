@@ -16,6 +16,72 @@ from evaluation.spec import LaunchSpec
 from triton_viz.clients.race_detector.ladder import LadderLevel
 
 
+@triton.jit
+def _root_next_power_of_2(out, N: tl.constexpr):
+    block: tl.constexpr = triton.next_power_of_2(N)
+    offsets = tl.arange(0, block)
+    tl.store(out + offsets, 1.0, offsets < N)
+
+
+@triton.jit
+def _root_cdiv(out, N: tl.constexpr):
+    tl.store(out, triton.cdiv(N, 2))
+
+
+@pytest.mark.parametrize(
+    "kernel,helper_name",
+    [(_root_next_power_of_2, "next_power_of_2"), (_root_cdiv, "cdiv")],
+)
+def test_root_framework_helpers_survive_serialization(kernel, helper_name):
+    cloudpickle = pytest.importorskip("cloudpickle")
+    spec = LaunchSpec(
+        name="root_helper",
+        kernel_fn=kernel,
+        signature={"out": "*fp32", "N": "constexpr"},
+        constexprs={"N": 3},
+        grid=(1,),
+        make_args=lambda seed: (torch.zeros(3),),
+    )
+    before = child._kernel_identity(kernel)
+    primitive = before["dependency_sources"]["kernel.triton"]["attributes"][
+        helper_name
+    ]["constexpr_function"]
+    assert primitive["primitive"] == "triton." + helper_name
+    assert primitive["code"]
+    restored = cloudpickle.loads(child._serialize_spec(spec))
+    assert child._kernel_identity(restored.kernel_fn) == before
+
+
+def test_wrapped_root_helper_replacement_is_not_trusted(monkeypatch):
+    from triton.runtime.jit import ConstexprFunction
+
+    @functools.wraps(triton.next_power_of_2.fn)
+    def replacement(n):
+        return 1
+
+    monkeypatch.setattr(triton, "next_power_of_2", ConstexprFunction(replacement))
+    with pytest.raises(child.DynamicSubprocessError, match="primitive replacement"):
+        child._kernel_identity(_root_next_power_of_2)
+
+
+@pytest.mark.parametrize(
+    "kernel,helper_name",
+    [(_root_next_power_of_2, "next_power_of_2"), (_root_cdiv, "cdiv")],
+)
+def test_root_helper_defaults_remain_part_of_identity(monkeypatch, kernel, helper_name):
+    before = child._kernel_identity(kernel)
+    monkeypatch.setattr(getattr(triton, helper_name).fn, "__defaults__", (1,))
+    assert child._kernel_identity(kernel) != before
+
+
+def test_similar_root_module_name_is_not_trusted(monkeypatch):
+    monkeypatch.setattr(triton.next_power_of_2, "__module__", "triton_extra")
+    with pytest.raises(
+        child.DynamicSubprocessError, match="unsupported runtime dependency"
+    ):
+        child._kernel_identity(_root_next_power_of_2)
+
+
 @pytest.fixture
 def settings(tmp_path, monkeypatch):
     name = "dynamic_runtime_settings_control"

@@ -163,3 +163,47 @@ child-observer and frontend-complementarity probes explicitly set
 policy. See `L2_FRONTEND_POLICY.md` and `CONFORMANCE_INTEGRATION.md`.
 
 Under the user policy recorded on 2026-09-07, routine full-corpus reruns run L1 and then L2; there is no new full L0 pass. Selected L0 controls and regressions remain where their experiments require them. Historical three-level data remain historical and must not be mixed with new subprocess timing as a paired comparison. This four-observation diagnostic validates the repaired return behavior; it does not replace a full formal rerun or recalibrate corpus-wide duration estimates.
+
+## Root-module helper compatibility repair (2026-09-08)
+
+The runtime dependency audit introduced in `40560be` accepted `triton.*`
+module names but omitted the exact root module `triton`. This rejected
+the framework's own `next_power_of_2` before reaching the explicit
+`ConstexprFunction` handler. Request construction failed in the parent,
+before child startup, and the named harness error prevented enumeration.
+
+The repair admits the exact root module as well as its descendants.
+It retains recursive inspection of the underlying callable, source-path,
+code/default/closure fingerprints, parent/child identity checks, and fatal
+handling of actual transport mismatches. Similar names such as `triton_extra`
+remain untrusted. No solver, memory-model rule, fallback policy, or analysis
+budget changes. The candidate is based on `84b80c7`; its transport file
+SHA256 is `e823c8ee067ad093e6a07a8fef90de2e66beac29769b322af57a90f5799061e0`.
+
+Six new regression instances cover `next_power_of_2` and `cdiv`
+serialization, wrapped replacements, changed defaults, and similar module
+names. The runtime-dependency, subprocess, transport-admission, and L2
+frontend-policy suites pass together: **73 passed**.
+
+Both affected captured FLA configurations also pass actual READY admission
+with source/input/kernel identity verified, no GO issued, and the children
+reaped. Separate complete L2 checks then return `proved@enum`:
+
+| Configuration | Whole-row seconds | Dynamic stage | Enumeration |
+| --- | ---: | --- | --- |
+| `fla_gdn2_chunk_varlen__chunk_gdn2_fwd_kernel_intra_token_parallel` | 8.83 | Completed child, unsupported control flow | 128 instances, 5,064 operations, zero reports |
+| `fla_kda_chunk_varlen__chunk_kda_fwd_kernel_intra_token_parallel` | 8.73 | Completed child, unsupported control flow | 128 instances, 5,064 operations, zero reports |
+
+These are single targeted checks on the candidate source, with seed 0,
+on-demand L2, fence order enabled, the original 200 s outer cap, and the
+unchanged captured specs/value sidecar. They establish recovery of the
+captured-launch enumeration results, not new population timing statistics.
+The existing load guard and explicit coordinator marker admit these serial
+checks between formal samples; no timed worker is paused or killed.
+
+Local evidence is `/tmp/root-helper-validation-20260908/`.
+`fla-ready.json` has SHA256 `21bf115cf51720fd121dc42c4db9233ba722033151b64464a5c6fc822c53a96d`;
+`fla-complete-L2.json` has SHA256 `b985c5ff3e3be0b924bb85b19c82948ff87dbf4925e7cbddb6491bc3ff275c91`.
+The active `1f529e9` checkout, pinned results, and cumulative-ablation
+declaration remain unchanged. Adopting the repair into formal results
+requires a new declared source pin.
