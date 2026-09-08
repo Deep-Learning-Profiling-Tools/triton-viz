@@ -137,3 +137,110 @@ def test_array_constraints_and_feasibility_are_retained():
     assert not z3.eq(original, rewritten)
     assert _check(z3.Xor(original, rewritten))[0] == z3.unsat
     assert _check(rewritten, z3.Select(values, pid) == 8)[0] == z3.unsat
+
+
+def test_applicability_cache_reuses_negative_shared_dags(monkeypatch):
+    cache = gd.GuardedDivisionApplicabilityCache()
+    x = z3.Int("cache_x")
+    shared = x / 4
+    for index in range(128):
+        shared = z3.If(x == index, shared + 1, shared)
+    original = shared >= 0
+    expanded = []
+    children = z3.ExprRef.children
+
+    def record_children(node):
+        expanded.append(node.get_id())
+        return children(node)
+
+    def unexpected_full_scan(*args, **kwargs):
+        raise AssertionError("negative applicability must skip normalization")
+
+    monkeypatch.setattr(z3.ExprRef, "children", record_children)
+    monkeypatch.setattr(gd, "_guarded_division_normal_form", unexpected_full_scan)
+    assert z3.eq(
+        gd.guarded_division_normal_form(original, applicability_cache=cache), original
+    )
+    previously_expanded = set(expanded)
+    assert len(previously_expanded) > 128
+    expanded.clear()
+    assert z3.eq(
+        gd.guarded_division_normal_form(original, applicability_cache=cache), original
+    )
+    assert expanded == []
+
+    another_query = z3.And(original, x < 1000)
+    expanded.clear()
+    assert z3.eq(
+        gd.guarded_division_normal_form(another_query, applicability_cache=cache),
+        another_query,
+    )
+    assert expanded
+    assert previously_expanded.isdisjoint(expanded)
+
+
+def test_cached_applicability_does_not_reuse_original_guard_certificate():
+    cache = gd.GuardedDivisionApplicabilityCache()
+    original, _, _, _, row = _grouped()
+    rewritten = gd.guarded_division_normal_form(original, applicability_cache=cache)
+    assert not z3.eq(original, rewritten)
+    assert _check(z3.Xor(original, rewritten))[0] == z3.unsat
+
+    # Keep the same divisor DAG after removing the mask that proved its value.
+    base, (pid, lane, grid), _, size, _ = _grouped(masked=False)
+    unmasked = z3.And(base, row >= 0)
+    rewritten = gd.guarded_division_normal_form(unmasked, applicability_cache=cache)
+    assert _check(z3.Xor(unmasked, rewritten))[0] == z3.unsat
+    for instance, divisor in ((4, 0), (8, -2)):
+        result, solver = _check(rewritten, grid == 16, pid == instance, lane == 0)
+        assert result == z3.sat
+        assert solver.model().eval(size).as_long() == divisor
+        assert z3.is_true(solver.model().eval(unmasked, model_completion=True))
+
+
+def test_applicability_cache_distinguishes_contexts():
+    cache = gd.GuardedDivisionApplicabilityCache()
+    first_context, second_context = z3.Context(), z3.Context()
+    first = z3.Int("value", first_context) / 4 < 8
+    second, *_ = _grouped(context=second_context)
+    assert not cache.may_have_variable_divisor(first)
+    assert cache.may_have_variable_divisor(second)
+    rewritten = gd.guarded_division_normal_form(second, applicability_cache=cache)
+    assert not z3.eq(second, rewritten)
+    assert _check(z3.Xor(second, rewritten))[0] == z3.unsat
+    assert not cache.may_have_variable_divisor(first)
+
+
+def test_applicability_cache_walks_deep_dags_without_python_recursion():
+    cache = gd.GuardedDivisionApplicabilityCache()
+    expression = z3.Bool("deep_dag")
+    for _ in range(2500):
+        expression = z3.Not(expression)
+    assert not cache.may_have_variable_divisor(expression)
+    assert z3.eq(
+        gd.guarded_division_normal_form(expression, applicability_cache=cache),
+        expression,
+    )
+
+
+def test_cached_applicability_preserves_unsupported_syntax_fallback():
+    cache = gd.GuardedDivisionApplicabilityCache()
+    original, (pid, _, _), *_ = _grouped()
+    quantified = z3.And(original, z3.Exists(pid, original))
+    bound_variable = z3.Var(0, z3.IntSort())
+    for expression in (quantified, bound_variable):
+        assert cache.may_have_variable_divisor(expression)
+        assert z3.eq(
+            gd.guarded_division_normal_form(expression, applicability_cache=cache),
+            expression,
+        )
+
+
+def test_positive_applicability_does_not_bypass_certificate_budget(monkeypatch):
+    cache = gd.GuardedDivisionApplicabilityCache()
+    original, *_ = _grouped()
+    assert cache.may_have_variable_divisor(original)
+    monkeypatch.setattr(gd, "_CERTIFY_TIMEOUT_MS", 0)
+    assert z3.eq(
+        gd.guarded_division_normal_form(original, applicability_cache=cache), original
+    )

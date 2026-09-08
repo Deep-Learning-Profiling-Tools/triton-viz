@@ -18,6 +18,63 @@ _ENABLE_GUARDED_DIVISION = True
 _CERTIFY_TIMEOUT_MS = 200
 
 
+class GuardedDivisionApplicabilityCache:
+    """Memoize only whether an immutable AST may need divisor certification.
+
+    One solver can share this cache across conflict queries with common DAGs.
+    A negative answer avoids another complete walk of those DAGs. Positive
+    answers still run the original query-local certification, with its original
+    budget and premises. In particular, neither guards nor proven equalities
+    are cached here.
+    """
+
+    def __init__(self):
+        # Retain contexts and AST wrappers: Z3 may recycle AST identifiers once
+        # nodes are released, and identifiers alone do not distinguish contexts.
+        self._contexts = {}
+
+    def may_have_variable_divisor(self, expression):
+        context_key = id(expression.ctx)
+        context_entry = self._contexts.get(context_key)
+        if context_entry is None:
+            context_entry = (expression.ctx, {})
+            self._contexts[context_key] = context_entry
+        nodes = context_entry[1]
+
+        # Explicit postorder traversal also handles deeply nested expressions.
+        # A cached subtree costs one lookup regardless of its size.
+        pending = [(expression, None)]
+        while pending:
+            node, children = pending.pop()
+            node_id = node.get_id()
+            if node_id in nodes:
+                continue
+            if children is None:
+                if z3.is_quantifier(node) or not z3.is_app(node):
+                    # Do not infer applicability from unsupported syntax. The
+                    # original normalization pass will leave the query alone.
+                    nodes[node_id] = (node, True)
+                    continue
+                if node.decl().kind() in (
+                    z3.Z3_OP_IDIV,
+                    z3.Z3_OP_MOD,
+                ) and not z3.is_int_value(node.arg(1)):
+                    nodes[node_id] = (node, True)
+                    continue
+                children = node.children()
+                if not children:
+                    nodes[node_id] = (node, False)
+                    continue
+                pending.append((node, children))
+                pending.extend((child, None) for child in children)
+            else:
+                nodes[node_id] = (
+                    node,
+                    any(nodes[child.get_id()][1] for child in children),
+                )
+        return nodes[expression.get_id()][1]
+
+
 def _conjuncts(expression):
     pending = [expression]
     while pending:
@@ -28,9 +85,16 @@ def _conjuncts(expression):
             yield node
 
 
-def guarded_division_normal_form(expression):
+def guarded_division_normal_form(expression, *, applicability_cache=None):
     """Keep the original query if the optional certificate machinery fails."""
     try:
+        if not _ENABLE_GUARDED_DIVISION:
+            return expression
+        if (
+            applicability_cache is not None
+            and not applicability_cache.may_have_variable_divisor(expression)
+        ):
+            return expression
         return _guarded_division_normal_form(expression)
     except z3.Z3Exception:
         return expression
