@@ -327,13 +327,18 @@ def conflict_impossible(
     same_instance=False,
     simplify_first=False,
     expression_cache=None,
+    snapshot_cache=None,
 ) -> bool:
     """Cheap UNSAT-only precheck; callers retain their original query budget."""
     if _ENABLE_SNAPSHOT_PRECHECK:
         # These facts follow from snapshot cells ALREADY in this query.
         # Keep all source conditions and the guards on each derived lemma.
         try:
-            lemmas = snapshot_table_lemmas(z3.And(*conditions))
+            lemmas = (
+                snapshot_cache.lemmas(conditions)
+                if snapshot_cache is not None
+                else snapshot_table_lemmas(z3.And(*conditions))
+            )
         except (TypeError, z3.Z3Exception):
             lemmas = ()
         if lemmas:
