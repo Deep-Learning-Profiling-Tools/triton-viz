@@ -543,6 +543,22 @@ def _serialize_spec(spec) -> bytes:
     return stream.getvalue()
 
 
+def _load_inputs(path: Path):
+    """Map complete input storages privately, retaining views and aliases."""
+    import mmap
+    import torch
+
+    if not hasattr(mmap, "MAP_PRIVATE"):
+        # Platforms without an explicit private-map option retain ordinary
+        # loading, regardless of a caller's global mmap default.
+        return torch.load(path, map_location="cpu", weights_only=False, mmap=False)
+    # Input verification still reads every backing byte before READY. Private
+    # mappings avoid a loading copy without letting the interpreter modify the
+    # transport snapshot. The context restores defaults even when loading fails.
+    with torch.serialization.set_default_mmap_options(mmap.MAP_PRIVATE):
+        return torch.load(path, map_location="cpu", weights_only=False, mmap=True)
+
+
 def _rss(pid: int) -> int:
     try:
         for line in Path(f"/proc/{pid}/status").read_text().splitlines():
@@ -744,7 +760,7 @@ def run_dynamic(spec, seed, level, budget_s, hooks=()) -> dict[str, Any]:
 
 def _child(path: Path) -> None:
     import cloudpickle
-    import torch
+    import torch  # noqa: F401 — preserve import before callable reconstruction
     from evaluation import harness
     from triton_viz.clients.race_detector.ladder import LadderLevel
     from triton_viz.core.config import config
@@ -756,7 +772,7 @@ def _child(path: Path) -> None:
     if hashlib.sha256(spec_bytes).hexdigest() != request["spec_sha256"]:
         raise DynamicSubprocessError("dynamic callable transport hash mismatch")
     spec = cloudpickle.loads(spec_bytes)
-    args = torch.load(path / "inputs.pt", map_location="cpu", weights_only=False)
+    args = _load_inputs(path / "inputs.pt")
     identity = input_identity(spec, args)
     kernel = _kernel_identity(spec.kernel_fn)
     if identity != request["inputs"] or kernel != request["kernel"]:

@@ -2,6 +2,7 @@
 from dataclasses import replace
 import hashlib
 import io
+import mmap
 import sys
 
 import pytest
@@ -65,6 +66,107 @@ def test_bound_input_transport_preserves_aliases_views_and_reinterpretation():
     changed = child.input_identity(spec, inputs)
     assert changed["x"]["sha256"] == before["x"]["sha256"]
     assert changed["x"]["storage_sha256"] != before["x"]["storage_sha256"]
+
+
+@pytest.mark.parametrize("case", ["overlap", "empty", "scalar", "reinterpret"])
+def test_private_input_load_preserves_complete_transport_identity(tmp_path, case):
+    base = torch.arange(32, dtype=torch.int32)
+    inputs = {
+        "overlap": (base[2:22:2], base[4:24:2]),
+        "empty": (base[3:3], torch.empty(0, 3)),
+        "scalar": (base[2], base[3]),
+        "reinterpret": (
+            base[2:22:2],
+            triton.reinterpret(base[4:24:2], tl.uint32),
+        ),
+    }[case]
+    path = tmp_path / "inputs.pt"
+    torch.save(inputs, path)
+    expected = child.input_identity(_spec(), inputs)
+    ordinary = torch.load(path, map_location="cpu", weights_only=False, mmap=False)
+    mapped = child._load_inputs(path)
+    assert child.input_identity(_spec(), ordinary) == expected
+    assert child.input_identity(_spec(), mapped) == expected
+
+
+@pytest.mark.skipif(not hasattr(mmap, "MAP_PRIVATE"), reason="private mmap unavailable")
+def test_private_input_load_keeps_alias_writes_and_gaps_out_of_snapshot(tmp_path):
+    base = torch.arange(32, dtype=torch.int32)
+    inputs = (base[2:22:2], triton.reinterpret(base[4:24:2], tl.uint32))
+    path = tmp_path / "inputs.pt"
+    torch.save(inputs, path)
+    file_hash = hashlib.sha256(path.read_bytes()).hexdigest()
+    expected = child.input_identity(_spec(), inputs)
+    # A changed process default must not make transport storage shared.
+    with torch.serialization.set_default_mmap_options(mmap.MAP_SHARED):
+        loaded = child._load_inputs(path)
+        assert torch.serialization.get_default_mmap_options() == mmap.MAP_SHARED
+    assert child.input_identity(_spec(), loaded) == expected
+    assert loaded[0].untyped_storage()._cdata == loaded[1].base.untyped_storage()._cdata
+    loaded[0][1] = 99
+    assert loaded[1].base[0].item() == 99
+    before_gap = child.input_identity(_spec(), loaded)
+    backing = torch.empty(0, dtype=torch.int32).set_(
+        loaded[0].untyped_storage(), 0, (32,), (1,)
+    )
+    backing[3] = 1000  # Outside both strided logical views.
+    after_gap = child.input_identity(_spec(), loaded)
+    for name in ("x", "out"):
+        assert after_gap[name]["sha256"] == before_gap[name]["sha256"]
+        assert after_gap[name]["storage_sha256"] != before_gap[name]["storage_sha256"]
+    assert torch.equal(base, torch.arange(32, dtype=torch.int32))
+    assert hashlib.sha256(path.read_bytes()).hexdigest() == file_hash
+    reloaded = torch.load(path, map_location="cpu", weights_only=False, mmap=False)
+    assert child.input_identity(_spec(), reloaded) == expected
+
+
+@pytest.mark.skipif(not hasattr(mmap, "MAP_PRIVATE"), reason="private mmap unavailable")
+def test_private_input_load_restores_default_and_propagates_failure(
+    monkeypatch, tmp_path
+):
+    failure = RuntimeError("deliberate input load failure")
+    calls = []
+
+    def fail(path, **kwargs):
+        calls.append((path, kwargs))
+        assert torch.serialization.get_default_mmap_options() == mmap.MAP_PRIVATE
+        raise failure
+
+    monkeypatch.setattr(torch, "load", fail)
+    path = tmp_path / "inputs.pt"
+    with torch.serialization.set_default_mmap_options(mmap.MAP_SHARED):
+        with pytest.raises(RuntimeError) as observed:
+            child._load_inputs(path)
+        assert observed.value is failure
+        assert torch.serialization.get_default_mmap_options() == mmap.MAP_SHARED
+    assert calls == [
+        (path, {"map_location": "cpu", "weights_only": False, "mmap": True})
+    ]
+
+
+def test_input_load_uses_ordinary_storage_without_private_mapping(
+    monkeypatch, tmp_path
+):
+    monkeypatch.delattr(mmap, "MAP_PRIVATE", raising=False)
+    calls = []
+    expected = object()
+
+    def load(path, **kwargs):
+        calls.append((path, kwargs))
+        return expected
+
+    def unexpected_mapping(*args, **kwargs):
+        pytest.fail("private mapping options unavailable")
+
+    monkeypatch.setattr(torch, "load", load)
+    monkeypatch.setattr(
+        torch.serialization, "set_default_mmap_options", unexpected_mapping
+    )
+    path = tmp_path / "inputs.pt"
+    assert child._load_inputs(path) is expected
+    assert calls == [
+        (path, {"map_location": "cpu", "weights_only": False, "mmap": False})
+    ]
 
 
 def _legacy_tensor_identity(value, alias_group):
