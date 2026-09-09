@@ -396,6 +396,7 @@ def input_identity(spec, args) -> dict:
 
     groups: dict[int, int] = {}
     storage_hashes = {}
+    logical_hashes: dict[tuple[Any, ...], str] = {}
     result: dict[str, Any] = {}
     for name, value in _launch_binding(spec, args).items():
         interpreted_dtype = None
@@ -414,23 +415,61 @@ def input_identity(spec, args) -> dict:
                     .numpy()
                 )
                 storage_hashes[group] = hashlib.sha256(memoryview(backing)).hexdigest()
-            raw = (
-                value.detach()
-                .contiguous()
-                .reshape(-1)
-                .view(torch.uint8)
-                .numpy()
-                .tobytes()
+            shape, stride = tuple(value.shape), tuple(value.stride())
+            offset = value.storage_offset()
+            # Only ordinary physical views can reuse a digest. Special views
+            # and subclasses keep the original materialization and refusal
+            # behavior. Both caches live only for this identity call.
+            physical_view = (
+                type(value) is torch.Tensor
+                and value.layout == torch.strided
+                and not value.is_conj()
+                and not value.is_neg()
+                and not value.is_quantized
+                and not value.has_names()
             )
+            view_key = (
+                (group, value.dtype, offset, shape, stride) if physical_view else None
+            )
+            logical_hash = (
+                logical_hashes.get(view_key) if view_key is not None else None
+            )
+            if logical_hash is None:
+                if (
+                    physical_view
+                    and value.is_contiguous()
+                    and offset == 0
+                    and value.numel() * value.element_size() == storage.nbytes()
+                ):
+                    # The logical C-order byte sequence is the whole storage.
+                    logical_hash = storage_hashes[group]
+                else:
+                    raw = (
+                        value.detach()
+                        .contiguous()
+                        .reshape(-1)
+                        .view(torch.uint8)
+                        .numpy()
+                    )
+                    # The ordinary byte view is contiguous and remains alive
+                    # through hashing; no additional Python bytes copy is needed.
+                    buffer = (
+                        memoryview(raw)
+                        if type(value) is torch.Tensor
+                        else raw.tobytes()
+                    )
+                    logical_hash = hashlib.sha256(buffer).hexdigest()
+                if view_key is not None:
+                    logical_hashes[view_key] = logical_hash
             result[name] = {
-                "shape": list(value.shape),
-                "stride": list(value.stride()),
+                "shape": list(shape),
+                "stride": list(stride),
                 "dtype": str(value.dtype),
                 "reinterpret_dtype": interpreted_dtype,
-                "storage_offset": value.storage_offset(),
+                "storage_offset": offset,
                 "alias_group": group,
                 "storage_nbytes": storage.nbytes(),
-                "sha256": hashlib.sha256(raw).hexdigest(),
+                "sha256": logical_hash,
                 "storage_sha256": storage_hashes[group],
             }
         elif isinstance(value, bool):

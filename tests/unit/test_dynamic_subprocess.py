@@ -1,5 +1,6 @@
 """Process containment preserves the launch and never credits a late exit."""
 from dataclasses import replace
+import hashlib
 import io
 import sys
 
@@ -64,6 +65,158 @@ def test_bound_input_transport_preserves_aliases_views_and_reinterpretation():
     changed = child.input_identity(spec, inputs)
     assert changed["x"]["sha256"] == before["x"]["sha256"]
     assert changed["x"]["storage_sha256"] != before["x"]["storage_sha256"]
+
+
+def _legacy_tensor_identity(value, alias_group):
+    """The pre-P17 byte materialization is the compatibility oracle."""
+    reinterpret_dtype = None
+    if hasattr(value, "base") and isinstance(value.base, torch.Tensor):
+        reinterpret_dtype = str(value.dtype)
+        value = value.base
+    storage = value.untyped_storage()
+    backing = (
+        torch.empty(0, dtype=torch.uint8)
+        .set_(storage, 0, (storage.nbytes(),), (1,))
+        .numpy()
+        .tobytes()
+    )
+    logical = (
+        value.detach().contiguous().reshape(-1).view(torch.uint8).numpy().tobytes()
+    )
+    return {
+        "shape": list(value.shape),
+        "stride": list(value.stride()),
+        "dtype": str(value.dtype),
+        "reinterpret_dtype": reinterpret_dtype,
+        "storage_offset": value.storage_offset(),
+        "alias_group": alias_group,
+        "storage_nbytes": storage.nbytes(),
+        "sha256": hashlib.sha256(logical).hexdigest(),
+        "storage_sha256": hashlib.sha256(backing).hexdigest(),
+    }
+
+
+@pytest.mark.parametrize(
+    "make_value",
+    [
+        pytest.param(lambda: torch.arange(12).reshape(3, 4), id="contiguous"),
+        pytest.param(lambda: torch.arange(12).reshape(3, 4).T, id="transpose"),
+        pytest.param(lambda: torch.arange(4).expand(3, 4), id="expanded"),
+        pytest.param(lambda: torch.arange(12)[2:10:2], id="strided-offset"),
+        pytest.param(lambda: torch.arange(12)[2:10], id="contiguous-offset"),
+        pytest.param(lambda: torch.arange(12)[:8], id="contiguous-prefix"),
+        pytest.param(lambda: torch.tensor(1.5), id="scalar"),
+        pytest.param(lambda: torch.empty(0, 3), id="empty-storage"),
+        pytest.param(lambda: torch.arange(8)[3:3], id="empty-view"),
+        pytest.param(lambda: torch.tensor([False, True]), id="bool"),
+        pytest.param(lambda: torch.arange(4, dtype=torch.bfloat16), id="bfloat16"),
+        pytest.param(lambda: torch.tensor([1 + 2j, -3 + 4j]), id="complex"),
+        pytest.param(
+            lambda: torch.arange(24)
+            .reshape(1, 2, 3, 4)
+            .contiguous(memory_format=torch.channels_last),
+            id="channels-last",
+        ),
+        pytest.param(lambda: torch.ones(4, requires_grad=True), id="requires-grad"),
+    ],
+)
+def test_input_identity_preserves_legacy_tensor_bytes_and_layout(make_value):
+    value = make_value()
+    expected = _legacy_tensor_identity(value, 0)
+    assert child.input_identity(_spec(), (value, value)) == {
+        "x": expected,
+        "out": expected,
+        "N": 4,
+    }
+
+
+@pytest.mark.parametrize("views", ["offset", "stride", "dtype", "reinterpret"])
+def test_input_identity_distinguishes_views_of_one_storage(views):
+    base = torch.arange(16, dtype=torch.int32)
+    inputs = {
+        "offset": (base[1:9], base[2:10]),
+        "stride": (base[:8], base[::2]),
+        "dtype": (base, base.view(torch.int16)),
+        "reinterpret": (base[2:12:2], triton.reinterpret(base[2:12:2], tl.uint32)),
+    }[views]
+    assert child.input_identity(_spec(), inputs) == {
+        "x": _legacy_tensor_identity(inputs[0], 0),
+        "out": _legacy_tensor_identity(inputs[1], 0),
+        "N": 4,
+    }
+
+
+@pytest.mark.parametrize(
+    "view,expected_hashes", [("whole", 1), ("strided", 2), ("offset", 2)]
+)
+def test_input_identity_hashes_repeated_physical_views_once_without_bytes_copy(
+    monkeypatch, view, expected_hashes
+):
+    base = torch.arange(16, dtype=torch.int32)
+    value = {"whole": base, "strided": base[2:12:2], "offset": base[2:12]}[view]
+    expected = _legacy_tensor_identity(value, 0)
+    original = hashlib.sha256
+    buffers = []
+
+    def observe(buffer):
+        buffers.append(type(buffer))
+        return original(buffer)
+
+    monkeypatch.setattr(child.hashlib, "sha256", observe)
+    assert child.input_identity(_spec(), (value, value)) == {
+        "x": expected,
+        "out": expected,
+        "N": 4,
+    }
+    assert buffers == [memoryview] * expected_hashes
+
+
+def test_input_identity_does_not_reuse_mutated_input_across_calls():
+    base = torch.arange(16, dtype=torch.int32)
+    value = base[::2]
+    before = child.input_identity(_spec(), (value, value))
+    value[0] = 99
+    after = child.input_identity(_spec(), (value, value))
+    assert after["x"] == _legacy_tensor_identity(value, 0)
+    assert after["x"]["sha256"] != before["x"]["sha256"]
+    assert after["x"]["storage_sha256"] != before["x"]["storage_sha256"]
+
+
+@pytest.mark.parametrize(
+    "make_value",
+    [
+        pytest.param(lambda: torch.tensor([1 + 2j]).conj(), id="conjugate"),
+        pytest.param(lambda: torch._neg_view(torch.tensor([1.0])), id="negative"),
+    ],
+)
+def test_input_identity_keeps_lazy_view_refusal(make_value):
+    value = make_value()
+    with pytest.raises(RuntimeError) as legacy:
+        _legacy_tensor_identity(value, 0)
+    with pytest.raises(type(legacy.value)):
+        child.input_identity(_spec(), (value, value))
+
+
+def test_input_identity_keeps_tensor_subclass_materialization(monkeypatch):
+    class TensorSubclass(torch.Tensor):
+        pass
+
+    value = torch.arange(8).as_subclass(TensorSubclass)
+    expected = _legacy_tensor_identity(value, 0)
+    original = hashlib.sha256
+    buffers = []
+
+    def observe(buffer):
+        buffers.append(type(buffer))
+        return original(buffer)
+
+    monkeypatch.setattr(child.hashlib, "sha256", observe)
+    assert child.input_identity(_spec(), (value, value)) == {
+        "x": expected,
+        "out": expected,
+        "N": 4,
+    }
+    assert buffers == [memoryview, bytes, bytes]
 
 
 def test_callable_transport_discards_jit_caches_and_preserves_source():
