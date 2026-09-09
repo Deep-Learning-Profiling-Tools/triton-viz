@@ -176,14 +176,17 @@ def test_atomic_vs_plain_store_races():
     assert frozenset(("rmw", "none")) in pairs
 
 
-def test_cas_routes_to_interpreter():
-    with pytest.raises(UnsupportedTTIR) as ei:
-        encode_graph(
-            parse_ttir(_read("cas_sm80.ttir")),
-            {},
-            {"lock_ptr": _t(0x1000), "out_ptr": _t(0x2000)},
-        )
-    assert ei.value.kind == "cas-synchronization"
+def test_ordinary_cas_reaches_full_value_encoding():
+    enc = encode_graph(
+        parse_ttir(_read("cas_sm80.ttir")),
+        {},
+        {"lock_ptr": _t(0x1000), "out_ptr": _t(0x2000)},
+    )
+    cas = enc.records[0]
+    assert cas.atomic_kind == "cas" and cas.old_value is not None
+    assert cas.cas_cmp_value.as_long() == 0
+    assert cas.cas_new_value.as_long() == 1
+    assert not enc.assumes_termination
 
 
 # ─────────────────────── path conditions ───────────────────────

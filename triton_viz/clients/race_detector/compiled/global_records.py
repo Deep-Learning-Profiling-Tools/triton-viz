@@ -1019,6 +1019,39 @@ def _await_premises(
     return tuple(premises), tuple(obs_vars)
 
 
+def _supported_cas_operand(term: Term) -> bool:
+    """CAS values with no arithmetic or implicit machine-width change.
+
+    Keep values literal, an existing integer atomic observation, or a
+    selection of those values. In particular, an observed i32 + 1 must
+    not become unbounded Int addition when it controls CAS success.
+    """
+
+    def condition(t: Term) -> bool:
+        if isinstance(t, Const):
+            return True
+        if isinstance(t, Not):
+            return condition(t.a)
+        if isinstance(t, BoolBin):
+            return condition(t.a) and condition(t.b)
+        if isinstance(t, Cmp):
+            return all(
+                isinstance(v, (Const, Pid, Arange, Observed)) for v in (t.a, t.b)
+            )
+        return False
+
+    if isinstance(term, (Const, Observed)):
+        return True
+    if isinstance(term, (Cmp, BoolBin, Not)):
+        return condition(term)
+    return (
+        isinstance(term, TSelect)
+        and condition(term.cond)
+        and _supported_cas_operand(term.t)
+        and _supported_cas_operand(term.f)
+    )
+
+
 def _record_for(
     access: AccessEvent,
     seq: int,
@@ -1063,11 +1096,20 @@ def _record_for(
             except UnsupportedTTIR:
                 rmw_operand = None  # unmodelable operand: write stays open
     elif access.kind == "atomic_cas":
-        # Only the AWAITED CAS reaches here (encode_graph refuses the
-        # rest); the solver's CAS lowering needs all three value pieces.
+        if not access.awaited and env.graph.has_value_changing_integer_casts:
+            raise UnsupportedTTIR(
+                f"line {access.line_no}: ordinary CAS in a kernel with an "
+                "unmodeled value-changing integer cast",
+                kind="cas-value",
+            )
+        # Ordinary and awaited integer CAS share the solver's complete
+        # old/cmp/new lowering. Unlike an RMW's open write value, neither
+        # CAS operand may be dropped: it controls success and rf/sw.
+        # Plain loaded operands remain outside this fragment until their
+        # value and uncertainty rules are wired through CAS explicitly.
         if access.in_loop:
             raise UnsupportedTTIR(
-                f"line {access.line_no}: awaited CAS inside scf.for "
+                f"line {access.line_no}: CAS inside scf.for "
                 "(one observation cannot stand for one per iteration)",
                 kind="control-flow",
             )
@@ -1075,17 +1117,55 @@ def _record_for(
             raise UnsupportedTTIR(
                 f"line {access.line_no}: float-typed CAS is outside the "
                 "integer value model",
-                kind="spin-shape",
+                kind="cas-value",
             )
         if access.atomic_cmp is None or access.atomic_val is None:
             raise UnsupportedTTIR(
-                f"line {access.line_no}: CAS cmp/val operands are not " "modelable",
-                kind="spin-shape",
+                f"line {access.line_no}: CAS cmp/val operands are not modelable",
+                kind="cas-value",
             )
-        old_value = env.observed(seq)
-        env.modeled_obs.add(seq)
+        if not access.awaited:
+            for operand in (access.atomic_cmp, access.atomic_val):
+                if loaded_leaves(operand):
+                    raise UnsupportedTTIR(
+                        f"line {access.line_no}: CAS operand depends on a plain "
+                        "loaded value",
+                        kind="cas-value",
+                    )
+                if observed_indices(operand) - env.modeled_obs:
+                    raise UnsupportedTTIR(
+                        f"line {access.line_no}: CAS operand depends on an atomic "
+                        "observation without an integer value model",
+                        kind="cas-value",
+                    )
+                if not _supported_cas_operand(operand):
+                    raise UnsupportedTTIR(
+                        f"line {access.line_no}: CAS operand arithmetic is outside "
+                        "the modeled integer fragment",
+                        kind="cas-value",
+                    )
+                if any(
+                    env.graph.accesses[i].elem_bits != access.elem_bits
+                    for i in observed_indices(operand)
+                ):
+                    raise UnsupportedTTIR(
+                        f"line {access.line_no}: CAS operand changes an atomic "
+                        "observation's integer width",
+                        kind="cas-value",
+                    )
+        from z3 import is_bool
+
+        # Triton folds where(pid == 0, 0, 1) into a comparison followed
+        # by extui. The term reader retains the boolean; CAS consumes its
+        # integer 0/1 value, never a comparison between unlike sorts.
         cas_cmp = env.eval(access.atomic_cmp)
         cas_new = env.eval(access.atomic_val)
+        if is_bool(cas_cmp):
+            cas_cmp = If(cas_cmp, IntVal(1), IntVal(0))
+        if is_bool(cas_new):
+            cas_new = If(cas_new, IntVal(1), IntVal(0))
+        old_value = env.observed(seq)
+        env.modeled_obs.add(seq)
 
     # An address may reference an observation only when that observation is
     # value-modeled (the solver then requires its counting axiom, B.1.5);
@@ -1193,7 +1273,10 @@ def _record_for(
     # proof) for masks like ``o == 0`` vs ``o == 2``.
     ref_obs = observed_indices(access.offset)
     loaded = loaded_leaves(access.offset)
-    for t in (access.mask, access.path, access.exit_pred):
+    value_terms = (
+        (access.atomic_cmp, access.atomic_val) if access.kind == "atomic_cas" else ()
+    )
+    for t in (access.mask, access.path, access.exit_pred, *value_terms):
         if t is not None:
             ref_obs |= observed_indices(t)
             loaded += loaded_leaves(t)
@@ -1448,20 +1531,6 @@ def encode_graph(
     and loop iterations stay symbolic). Raises :class:`UnsupportedTTIR`
     (classified) when the kernel cannot be encoded. ``multipath`` enables
     the L2 pid-linear symbolic T1 bounds (see _RaceEnv)."""
-    for access in graph.accesses:
-        if access.kind == "atomic_cas" and not access.awaited:
-            # A free-standing CAS has no static value model (its cmp/new
-            # may be data-dependent and its synchronization shape open-
-            # ended). The AWAITED CAS (spec C1) is the exception: the spin
-            # contract pins cmp/new/exit, so it lowers to the solver's full
-            # CAS machinery. Everything else routes to the interpreter
-            # front-end.
-            raise UnsupportedTTIR(
-                f"line {access.line_no}: atomic_cas synchronization is not "
-                "modeled statically",
-                kind="cas-synchronization",
-            )
-
     env = _RaceEnv(graph, params, multipath=multipath, tensors=tensors)
     _check_loop_token_conflicts(graph, env, tensors)
     await_prems, await_obs = _await_premises(graph, env)
@@ -1786,14 +1855,6 @@ def encode_graph_t0(
     every trip count too. Raises UnsupportedTTIR when the kernel cannot be
     encoded at T0 (e.g. a non-constant loop STEP — symbolic k·step is
     nonlinear)."""
-    for access in graph.accesses:
-        if access.kind == "atomic_cas" and not access.awaited:
-            raise UnsupportedTTIR(
-                f"line {access.line_no}: atomic_cas synchronization is not "
-                "modeled statically",
-                kind="cas-synchronization",
-            )
-
     # Route 2 at T0: there is no launch, so every Loaded value stays FREE
     # (the widening Route 3 applied), and an address built on one refuses
     # inside _record_for; the T1 rung is where the snapshot enters.

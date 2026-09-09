@@ -1048,3 +1048,34 @@ implementation overlap rather than serialize.
 | C3 diff noise from masked lanes | align the record convention before enabling the check |
 | C2 replay of a symbolic-grid witness | replay uses the witness grid dims + captured args, executing only the two witness pids; T0-witness replay (materializing witness-shaped tensors) is stretch |
 | free-variable masks flood reports with spurious races | every SAT passes through C2; `race-unconfirmed` is a distinct terminal state, reported as *potential*, never as confirmed |
+
+## 2026-09-08: ordinary integer CAS in the compiled frontend
+
+The ordinary-CAS refusal recorded in the earlier implementation log is superseded.
+The Triton and cuTile readers now feed ordinary integer CAS to the same
+old/compare/new, conditional-write and reads-from encoding as awaited CAS.
+A failing CAS remains a read, performs no write, and can acquire a release
+through its read source. Semantic order, scope, masks and branch activity
+are retained; this change adds no happens-before edge by itself.
+
+Admission of the ordinary form is deliberately narrow. Compare and desired values may be integer
+literals, direct same-width modeled atomic observations, or selections of
+those values under simple program-id/lane/observation comparisons and boolean
+conditions. Boolean zero extension is encoded explicitly as integer 0 or 1.
+Operand arithmetic, plain loaded operands, floating-point CAS, per-iteration
+CAS, and unmodeled observations still refuse by name. Operand observations
+are included among copy-local variables even in T0's separate tensor groups.
+
+The common address readers historically treat width conversions as transparent.
+Ordinary CAS therefore also refuses kernels containing any integer width
+cast other than boolean zero extension (including narrowing then widening,
+and signed extension); the cuTile gate conservatively rejects any tile_astype.
+This is a graph-wide admission check and can reject an unrelated cast.
+It changes neither generic address parsing nor the existing awaited-CAS gate.
+
+Validation lives in tests/unit/test_compiled_cas.py and the existing cuTile,
+global-track and await suites. It includes the unchanged
+trb021_role_specific_order_no and trb017_cas_unlock_no kernels, their racy
+controls, failed-CAS nonwriting, failure-acquire, release and scope mutations,
+operand dependence/copy renaming, arithmetic overflow refusal and cast-chain
+refusal. The benchmark kernels, labels and old experiment receipts are unchanged.

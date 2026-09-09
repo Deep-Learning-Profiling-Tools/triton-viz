@@ -44,7 +44,7 @@ class UnsupportedTTIR(Exception):
     "indirect-address" | "data-dependent-bound" | "nested-loop" |
     "out-of-vocabulary" | "control-flow" | "block-pointer" |
     "unmodelable-condition" | "data-dependent-mask" |
-    "cas-synchronization" | "spin-shape" | "other".
+    "cas-value" | "spin-shape" | "other".
 
     "spin-shape" (spec C1.1): an ``scf.while`` that is not the recognized
     await form — the reason string names exactly which clause broke
@@ -490,6 +490,10 @@ class AccessGraph:
     # Consumers must discharge every pair before using shared iterators in
     # same-instance queries; distinct formal names alone are insufficient.
     loop_token_conflicts: list[LoopTokenConflict] = field(default_factory=list)
+    # The address reader treats integer width casts as transparent. CAS
+    # success needs exact values: ordinary CAS encoding may consume this
+    # conservative graph-wide fact to reject potentially changing casts.
+    has_value_changing_integer_casts: bool = False
 
     def arg(self, name: str) -> FuncArg | None:
         for a in self.func_args:
@@ -945,9 +949,30 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
     cur = entry
 
     lines = text.splitlines()
-    # Pre-scan loc table (aliases live at the bottom).
-    for line in lines:
-        locs.add(line.strip())
+    # This does not change generic address parsing. Ordinary CAS's exact
+    # value gate uses the fact, including a narrowing-then-widening chain
+    # that would otherwise look like a same-width atomic observation.
+    changing_integer_casts = False
+    has_cas = "tt.atomic_cas " in text
+    # Loc aliases live at the bottom; collect them in this same scan.
+    for raw in lines:
+        line = raw.strip()
+        locs.add(line)
+        if not has_cas:
+            continue
+        result = _RE_RESULT.match(line)
+        if result is None:
+            continue
+        body = result.group(2)
+        cast = _RE_EXT.match(body)
+        if cast is None:
+            continue
+        source = re.search(r":\s*(?:tensor<[^>]*x)?i(\d+)>?\s+to\s+", body)
+        source_bits = int(source.group(1)) if source else 0
+        # Only bool-to-integer zero extension is needed by the admitted
+        # CAS shapes. Other signedness/width changes remain conservative.
+        value_preserving = cast.group(1) == "extui" and source_bits == 1
+        changing_integer_casts |= not value_preserving
 
     def val(name: str) -> object:
         v = env.get(name)
@@ -1724,6 +1749,7 @@ def parse_ttir(text: str, *, multipath: bool = False) -> AccessGraph:
     ordered = [lp for _o, lp in sorted(loops, key=lambda t: t[0])]
     return AccessGraph(
         kernel_name=kernel_name,
+        has_value_changing_integer_casts=changing_integer_casts,
         func_args=func_args,
         accesses=accesses,
         loop=loop if len(ordered) == 1 else None,

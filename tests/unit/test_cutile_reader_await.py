@@ -182,10 +182,9 @@ def test_cas_poll_is_the_await_shape():
     assert rec.cas_cmp_value is not None and rec.cas_new_value is not None
 
 
-def test_free_standing_cas_is_recorded_and_refused_by_the_encoder():
-    """A CAS outside a spin is a memory access the reader keeps (never
-    dropped); the encoder refuses it as cas-synchronization, exactly the
-    Triton static track's boundary for tt.atomic_cas."""
+def test_free_standing_cas_is_recorded_and_value_modeled():
+    """A CAS outside a spin uses the same conditional write encoding as
+    the awaited form and does not assume termination."""
     text = (
         _HDR
         # This fixture removes the loop, so its former result token must
@@ -198,13 +197,45 @@ def test_free_standing_cas_is_recorded_and_refused_by_the_encoder():
         )
         + "\n"
     )
+    # This unit fixture uses the known one-element flag directly, so
+    # no unmodeled cast is needed to construct its address or mask.
+    text = text.replace(
+        "$145: Tile[uint64,(1)] = tile_astype(x=$32)",
+        "$145: Tile[int32,(1)] = tile_reshape(x=$131)",
+    ).replace(
+        "$146: Tile[uint64,()] = tile_astype(x=$0)",
+        "$146: const Tile[int32,()] = typed_const(value=1)",
+    )
     g = parse_cutile_ir(text, "t")
     cas = g.accesses[0]
     assert cas.kind == "atomic_cas" and not cas.awaited
     assert cas.atomic_cmp == Const(0) and cas.atomic_val == Const(1)
-    with pytest.raises(UnsupportedTTIR) as ei:
-        encode_graph(g, {"flag_1": 1, "data_1": 64}, _tensors())
-    assert ei.value.kind == "cas-synchronization"
+    enc = encode_graph(g, {"flag_1": 1, "data_1": 64}, _tensors())
+    rec = enc.records[0]
+    assert rec.atomic_kind == "cas" and rec.old_value is not None
+    assert rec.cas_cmp_value.as_long() == 0
+    assert rec.cas_new_value.as_long() == 1
+    assert not enc.assumes_termination
+
+
+def test_ordinary_cutile_cas_rejects_transparent_value_casts():
+    text = (
+        _HDR
+        + "\n".join(
+            [
+                "$900: Tile[int8,(1)] = tile_astype(x=$151, dtype=int8)",
+                _CAS_POLL.strip()
+                .replace("$token.14", "$token")
+                .replace("expected=$151", "expected=$900"),
+                *[line.replace("$token.13", "$153") for line in _TAIL],
+            ]
+        )
+        + "\n"
+    )
+    graph = parse_cutile_ir(text, "t")
+    assert graph.has_value_changing_integer_casts
+    with pytest.raises(UnsupportedTTIR, match="value-changing integer cast"):
+        encode_graph(graph, {"flag_1": 1, "data_1": 64}, _tensors())
 
 
 def test_data_carrying_while_form_keeps_the_control_flow_refusal():
@@ -322,17 +353,18 @@ def test_benchmark_cas_spin_twins_decide_like_their_triton_rows(row, _cutile_ben
 
 
 @pytest.mark.parametrize("row", _FREE_CAS_ROWS)
-def test_benchmark_free_standing_cas_twins_refuse_as_cas_synchronization(
+def test_benchmark_free_standing_cas_twins_keep_unmodeled_cast_refusal(
     row, _cutile_bench
 ):
-    """A CAS outside a spin: the static boundary the Triton track has too
-    (its twins are decided by the interpreter, which cuda.tile lacks)."""
+    """The captured cuTile twins contain transparent tile_astype
+    operations. Their existing refusal remains until casts are modeled."""
     from evaluation.harness import _static_track_cutile
     from triton_viz.clients.race_detector.ladder import LadderLevel
 
     res = _static_track_cutile(_cutile_bench[row], 0, LadderLevel.L2)
-    assert res["status"] == "unsupported"
-    assert res["reason"].startswith("cas-synchronization:"), res["reason"]
+    assert res["status"] == "unsupported", res
+    assert res["reason"].startswith("cas-value:"), res["reason"]
+    assert "value-changing integer cast" in res["reason"]
 
 
 def test_await_token_result_uses_the_actual_break_operand_slot():

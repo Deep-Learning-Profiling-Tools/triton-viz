@@ -381,6 +381,9 @@ def parse_cutile_ir(
     text: str, kernel_name: str = "cutile_kernel", *, multipath: bool = False
 ) -> AccessGraph:
     lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+    changing_integer_casts = "tile_atomic_cas(" in text and any(
+        "= tile_astype(" in ln for ln in lines
+    )
     if not lines:
         raise UnsupportedTTIR("empty CuTile IR", kind="parse")
     st = _State(kernel_name=kernel_name, multipath=multipath)
@@ -395,6 +398,7 @@ def parse_cutile_ir(
     if multipath:
         return AccessGraph(
             kernel_name=kernel_name,
+            has_value_changing_integer_casts=changing_integer_casts,
             func_args=st.func_args,
             accesses=st.accesses,
             loop=st.loops[0] if len(st.loops) == 1 else None,
@@ -408,6 +412,7 @@ def parse_cutile_ir(
         )
     return AccessGraph(
         kernel_name=kernel_name,
+        has_value_changing_integer_casts=changing_integer_casts,
         func_args=st.func_args,
         accesses=st.accesses,
         loop=st.loop,
@@ -1779,11 +1784,9 @@ def _handle_op(
         # Recorded exactly as the TTIR reader records tt.atomic_cas: the
         # compare and the desired operands as terms (None when they carry
         # loaded data), the observation of the old value bound to the
-        # integer result. The encoder decides what it can lower: the
-        # AWAITED CAS (a spin's poll, spec C1) has the full CAS machinery;
-        # a free-standing CAS refuses there as cas-synchronization, the
-        # Triton track's own boundary (its interpreter decides those rows;
-        # cuda.tile has none).
+        # integer result. Ordinary and awaited integer CAS share the
+        # solver's conditional write and reads-from machinery; the encoder
+        # rejects operand expressions outside its exact value fragment.
         ptr = _val(st, kw["pointer"])
         if not isinstance(ptr, PtrValue):
             raise UnsupportedTTIR(
