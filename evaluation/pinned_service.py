@@ -192,9 +192,26 @@ def _launch_locked(run_dir: Path, manifest: dict) -> str:
     return unit
 
 
-def assert_quiescent(unit: str | None):
+def assert_quiescent(unit: str | None, *, allowed_resident: dict | None = None):
+    """Allow only the exact live broker while a serial session is running."""
+    allowed = {os.getpid()}
+    if allowed_resident is not None:
+        from evaluation.dynamic_preload.broker_checks import proc_identity
+
+        actual = proc_identity(allowed_resident["pid"])
+        if (
+            actual is None
+            or actual["start_ticks"] != allowed_resident["start_ticks"]
+            or actual["ppid"] != os.getpid()
+            or actual["state"] in ("Z", "X")
+        ):
+            raise RuntimeError("allowed broker identity is absent, changed or not live")
+        allowed.add(actual["pid"])
     if unit:
-        remaining = set(_members(_show(unit))) - {os.getpid()}
+        members = set(_members(_show(unit)))
+        if not allowed <= members:
+            raise RuntimeError("controller or allowed broker left the owned domain")
+        remaining = members - allowed
         if remaining:
             raise RuntimeError(
                 f"row descendants remain in owned domain: {sorted(remaining)}"

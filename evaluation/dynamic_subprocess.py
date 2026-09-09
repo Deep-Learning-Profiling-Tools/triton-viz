@@ -92,6 +92,10 @@ def source_identity() -> dict:
             Path(harness.__file__).read_bytes()
         ).hexdigest(),
         "transport_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "dynamic_preload_sha256": {
+            path.name: hashlib.sha256(path.read_bytes()).hexdigest()
+            for path in sorted(Path(__file__).with_name("dynamic_preload").glob("*.py"))
+        },
         "cloudpickle_version": cloudpickle.__version__,
         "python_version": sys.version,
         "dependencies": dependencies,

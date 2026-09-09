@@ -1169,6 +1169,9 @@ def main() -> None:
     ap.add_argument("--out")
     ap.add_argument("--mutate", action="store_true")
     ap.add_argument(
+        "--dynamic-broker-socket", help="Owned controller's dynamic preloader socket"
+    )
+    ap.add_argument(
         "--ladder-level",
         choices=LADDER_LEVEL_NAMES,
         default=LadderLevel.L0.name,
@@ -1183,10 +1186,19 @@ def main() -> None:
     ns = ap.parse_args()
 
     if ns.serve:
+        if ns.dynamic_broker_socket:
+            ap.error("dynamic preloading requires a fresh row worker")
         serve(sys.stdin, sys.stdout)
         return
     if not (ns.corpus and ns.spec and ns.out):
         ap.error("--corpus, --spec and --out are required (or --serve)")
+
+    restore_launcher = None
+    if ns.dynamic_broker_socket:
+        from evaluation import dynamic_subprocess
+        from evaluation.dynamic_preload.broker_adapter import install
+
+        restore_launcher = install(dynamic_subprocess, ns.dynamic_broker_socket)
 
     from evaluation.kernels import load
 
@@ -1199,6 +1211,9 @@ def main() -> None:
         ladder_level=parse_ladder_level(ns.ladder_level),
     )
     row["corpus"] = ns.corpus
+    if restore_launcher is not None:
+        row["dynamic_launcher_info"] = restore_launcher.launcher_info
+        restore_launcher()
     with open(ns.out, "w") as f:
         json.dump(row, f)
 

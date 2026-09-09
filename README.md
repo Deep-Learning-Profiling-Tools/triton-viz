@@ -234,3 +234,8 @@ If you find this repo useful for your research, please cite our paper:
 }
 ```
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+
+### Resumable evaluation with dynamic preloading
+
+The checkout evaluation driver supports a session-owned clean preloader while retaining fresh row and analysis processes. Use `--dynamic-launcher preload` explicitly; `--prepare-only` freezes a run without starting it. See [the lifecycle, environment and timing protocol](evaluation/DYNAMIC_PRELOAD.md). The frozen environment includes `FLAGGEMS_SOURCE_DIR`, `TRITON_INTERPRET`, `TRITON_CACHE_DIR` and `TORCHINDUCTOR_CACHE_DIR`; kernel/source checks are unchanged.

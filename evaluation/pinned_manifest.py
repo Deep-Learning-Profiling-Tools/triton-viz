@@ -33,6 +33,7 @@ ENV_KEYS = (
     "OPENBLAS_NUM_THREADS",
     "NUMEXPR_NUM_THREADS",
     "TORCHINDUCTOR_CACHE_DIR",
+    "FLAGGEMS_SOURCE_DIR",
     "TRITON_HOME",
     "PYTHONDONTWRITEBYTECODE",
     "TRITON_VIZ_NUM_SMS",
@@ -74,6 +75,44 @@ def canonical(value) -> bytes:
 
 def digest(value) -> str:
     return hashlib.sha256(canonical(value)).hexdigest()
+
+
+def launcher_metadata(launcher: str = "spawn") -> dict:
+    if launcher not in ("spawn", "preload"):
+        raise ValueError(f"unknown dynamic launcher: {launcher}")
+    protocol = "subprocess-exec-v1"
+    if launcher == "preload":
+        from evaluation.dynamic_preload.broker_checks import PROTOCOL
+
+        protocol = PROTOCOL
+    return {"dynamic_launcher": launcher, "dynamic_launcher_protocol": protocol}
+
+
+def prepare_preload_environment(run_dir: Path) -> None:
+    """Fix import-time defaults before fingerprinting; resume never reselects them."""
+    if os.environ.get("TRITON_INTERPRET", "0") != "0":
+        raise ValueError("dynamic preload requires TRITON_INTERPRET=0")
+    os.environ["TRITON_INTERPRET"] = "0"
+    for key, directory in (
+        ("TORCHINDUCTOR_CACHE_DIR", "cache-inductor"),
+        ("TRITON_CACHE_DIR", "cache-triton"),
+    ):
+        # Imports can create caches before RunStore atomically creates run_dir.
+        destination = run_dir.parent / f"{run_dir.name}-{directory}"
+        os.environ[key] = str(destination)
+    if "FLAGGEMS_SOURCE_DIR" not in os.environ:
+        try:
+            distribution = importlib.metadata.distribution("flag_gems")
+        except importlib.metadata.PackageNotFoundError:
+            return
+        candidates = [
+            Path(distribution.locate_file(entry)).resolve().parent
+            for entry in distribution.files or ()
+            if str(entry).replace("\\", "/").endswith("flag_gems/__init__.py")
+        ]
+        if len(candidates) != 1 or not (candidates[0] / "__init__.py").is_file():
+            raise ValueError("cannot identify the installed FlagGems source directory")
+        os.environ["FLAGGEMS_SOURCE_DIR"] = str(candidates[0])
 
 
 def file_hash(path: Path) -> str:
@@ -229,6 +268,14 @@ def build_manifest(config: dict, *, run_id: str, only_names=None) -> tuple[dict,
     headers = {}
     level = parse_ladder_level(config["ladder_level"])
     policy = frontend_policy(level)
+    launcher = launcher_metadata(config.get("dynamic_launcher", "spawn"))
+    if (
+        config.get("dynamic_launcher_protocol", launcher["dynamic_launcher_protocol"])
+        != launcher["dynamic_launcher_protocol"]
+    ):
+        raise ValueError(
+            "dynamic launcher protocol differs from the frozen configuration"
+        )
     if config.get("frontend_policy", "all") != policy:
         raise ValueError("frontend policy differs from the frozen configuration")
     for name in config["corpora"]:
@@ -248,6 +295,8 @@ def build_manifest(config: dict, *, run_id: str, only_names=None) -> tuple[dict,
         headers[name] = results_header(
             name, config["seed"], corpus.provenance, level, config["row_timeout_s"]
         )
+        if "dynamic_launcher" in config:
+            headers[name].update(launcher)
     if (
         only_names is not None
         and {(r["corpus"], r["name"]) for r in roster} != only_names

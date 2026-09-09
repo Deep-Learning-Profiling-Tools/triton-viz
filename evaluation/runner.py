@@ -502,6 +502,7 @@ def _run_one(
     cancel_requested: Callable[[], bool] | None = None,
     on_spawn: Callable[[subprocess.Popen], None] | None = None,
     output_dir: Path | None = None,
+    dynamic_broker=None,
 ) -> dict:
     """Run one attempt and return its raw row after stopping the wall timer.
 
@@ -526,9 +527,23 @@ def _run_one(
     ]  # fmt: skip
     if mutate:
         cmd.append("--mutate")
+    spawn_callback = on_spawn
+    if dynamic_broker is not None:
+        from evaluation.dynamic_preload.broker_checks import proc_identity
+
+        cmd.extend(["--dynamic-broker-socket", dynamic_broker.socket_path])
+
+        def spawn_callback(process):
+            dynamic_broker.row_process = process
+            dynamic_broker.row_identity = proc_identity(process.pid)
+            if dynamic_broker.row_identity is None:
+                raise RuntimeError("dynamic row worker identity unavailable")
+            if on_spawn is not None:
+                on_spawn(process)
+
     row: dict
     try:
-        proc = _run_cancellable(cmd, timeout, cancel_requested, on_spawn)
+        proc = _run_cancellable(cmd, timeout, cancel_requested, spawn_callback)
         if os.path.getsize(tmp) > 0:
             with open(tmp) as f:
                 row = json.load(f)

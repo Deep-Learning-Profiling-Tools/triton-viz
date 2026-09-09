@@ -5,12 +5,14 @@ from __future__ import annotations
 import argparse
 import contextlib
 import json
+import math
 import os
 import signal
 import sys
 import time
 import uuid
 from pathlib import Path
+from typing import Any
 
 from evaluation import pinned_manifest as identity
 from evaluation.pinned_state import RunStore, atomic_write, exclusive_lock
@@ -18,6 +20,13 @@ from evaluation.pinned_state import RunStore, atomic_write, exclusive_lock
 
 def _json(path: Path, value):
     atomic_write(path, identity.canonical(value) + b"\n")
+
+
+def _note_cleanup_error(primary: BaseException, message: str) -> None:
+    if hasattr(primary, "add_note"):
+        primary.add_note(message)
+    else:
+        print(f"[pinned] {message}", file=sys.stderr, flush=True)
 
 
 class PauseRequested(Exception):
@@ -118,7 +127,15 @@ def _load_guard(control: Control, enabled: bool, label: str):
 
 
 def official_config(
-    level, corpora, seed, row_timeout, retry_timeout, rehearsal, guard, purpose
+    level,
+    corpora,
+    seed,
+    row_timeout,
+    retry_timeout,
+    rehearsal,
+    guard,
+    purpose,
+    dynamic_launcher="spawn",
 ):
     from evaluation.pinned_run import ALL_CORPORA, RETRY_TIMEOUT_S
     from evaluation.frontend_policy import frontend_policy
@@ -154,6 +171,7 @@ def official_config(
         if identity.git("status", "--porcelain", "--untracked-files=no"):
             raise SystemExit("the tracked execution tree is dirty")
     return {
+        **identity.launcher_metadata(dynamic_launcher),
         "ladder_level": level.name,
         "frontend_policy": frontend_policy(level),
         "corpora": list(corpora),
@@ -186,13 +204,25 @@ def start_run(
     run_dir=None,
     foreground=False,
     only_names=None,
+    dynamic_launcher="spawn",
+    prepare_only=False,
 ):
     from evaluation.runner import RESULTS_DIR
     from evaluation.pinned_service import launch, admission
 
     config = official_config(
-        level, corpora, seed, row_timeout, retry_timeout, rehearsal, guard, purpose
+        level,
+        corpora,
+        seed,
+        row_timeout,
+        retry_timeout,
+        rehearsal,
+        guard,
+        purpose,
+        dynamic_launcher,
     )
+    if prepare_only and foreground:
+        raise ValueError("prepare-only and foreground execution are mutually exclusive")
     if only_names is not None and not rehearsal:
         raise ValueError("a subset is rehearsal-only")
     if foreground and not rehearsal:
@@ -205,12 +235,21 @@ def start_run(
     # host exclusion too, before there is an executable experiment session.
     with admission(None, run_id, "preflight", rehearsal=True):
         _load_guard(Control(run_dir), guard, "manifest preflight")
+        if dynamic_launcher == "preload":
+            identity.prepare_preload_environment(run_dir)
         manifest, _ = identity.build_manifest(
             config, run_id=run_id, only_names=only_names
         )
         with RunStore.create(run_dir, manifest):
             pass
     print(f"[pinned] created {run_id}: {run_dir}", file=sys.stderr, flush=True)
+    if prepare_only:
+        print(
+            "[pinned] prepared only; no execution service launched",
+            file=sys.stderr,
+            flush=True,
+        )
+        return run_dir
     if foreground:
         return execute_run(run_dir)
     unit = launch(run_dir, manifest)
@@ -229,7 +268,7 @@ def _complete_sets(store):
     main, retry = store.results("main"), store.results("retry")
     if set(main) != expected:
         raise ValueError(
-            f"incomplete main set: missing={sorted(expected - set(main))}, extra={sorted(set(main)-expected)}"
+            f"incomplete main set: missing={sorted(expected - set(main))}, extra={sorted(set(main) - expected)}"
         )
     required = {
         key
@@ -238,13 +277,189 @@ def _complete_sets(store):
     }
     if set(retry) != required:
         raise ValueError(
-            f"incomplete retry set: missing={sorted(required-set(retry))}, extra={sorted(set(retry)-required)}"
+            f"incomplete retry set: missing={sorted(required - set(retry))}, extra={sorted(set(retry) - required)}"
         )
     return main, retry
 
 
 def _jsonl(path, header, rows):
     atomic_write(path, b"".join(identity.canonical(x) + b"\n" for x in [header, *rows]))
+
+
+@contextlib.contextmanager
+def _preload_session_cost(broker, run_dir: Path, session: str, manifest_hash: str):
+    """Measure enter, all rows/gaps and verified close, including broker fsyncs."""
+    started = time.perf_counter()
+    primary = None
+    try:
+        with broker:
+            yield broker
+    except BaseException as exc:
+        primary = exc
+        raise
+    finally:
+        elapsed = time.perf_counter() - started
+        try:
+            broker.run_dir.mkdir(parents=True, exist_ok=True)
+            cost_path = broker.run_dir / "run-cost.json"
+            _json(
+                broker.run_dir / "session-cost.json",
+                {
+                    "schema": "pinned-preload-session-cost-v1",
+                    "session_id": session,
+                    "manifest_hash": manifest_hash,
+                    "observed_session_wall_s": elapsed,
+                    "boundary": "before BrokerRun.__enter__ through BrokerRun.__exit__; includes broker audit fsyncs, excludes this checkpoint write",
+                    "broker_closed": broker.closed,
+                    "broker_cost_file": str(cost_path.relative_to(run_dir)),
+                    "broker_cost_sha256": identity.file_hash(cost_path)
+                    if cost_path.is_file()
+                    else None,
+                    "error": repr(primary) if primary is not None else None,
+                },
+            )
+        except BaseException as cleanup_error:
+            if primary is None:
+                raise
+            _note_cleanup_error(
+                primary, f"session cost checkpoint also failed: {cleanup_error!r}"
+            )
+
+
+def _preload_publication_audit(
+    store, run_dir: Path, records: dict
+) -> tuple[list[Path], list[dict]]:
+    """Verify bound receipts and charge every started broker session, including failures."""
+    artifacts = set((run_dir / "preload").rglob("*.json"))
+
+    def checked_file(name, expected):
+        path = (run_dir / name).resolve()
+        if (
+            not path.is_relative_to(run_dir.resolve())
+            or identity.file_hash(path) != expected
+        ):
+            raise ValueError(f"preload audit hash mismatch: {name}")
+        artifacts.add(path)
+        return path
+
+    for slot_records in records.values():
+        for record in slot_records.values():
+            row = record["row"]
+            audit = row.get("dynamic_preload")
+            if not isinstance(audit, dict):
+                raise ValueError("preload completion is missing its row cleanup audit")
+            path = checked_file(audit["audit_file"], audit["audit_sha256"])
+            bound = json.loads(path.read_text())
+            if (
+                bound["attempt_id"] != record["attempt_id"]
+                or bound["session_id"] != record["session_id"]
+                or bound["manifest_hash"] != store.manifest_hash
+            ):
+                raise ValueError(
+                    "preload row audit belongs to a different attempt/session/manifest"
+                )
+            receipt = bound["receipt"]
+            for name, expected in receipt["files"].items():
+                checked_file(name, expected)
+            checked_file(receipt["audit_file"], receipt["audit_sha256"])
+
+    costs = []
+    for session in store.status()["sessions"]:
+        directory = run_dir / "preload" / session["session_id"]
+        if not directory.exists():
+            if store.get_metadata(f"preload_session:{session['session_id']}"):
+                raise ValueError(
+                    f"started preload session audit is missing: {session['session_id']}"
+                )
+            # A pause can precede broker construction. No preload cost exists.
+            costs.append(
+                {
+                    "session_id": session["session_id"],
+                    "broker_started": False,
+                    "session_reason": session["reason"],
+                }
+            )
+            continue
+        path = directory / "run-cost.json"
+        if not path.is_file():
+            raise ValueError(
+                f"preload session cost is missing: {session['session_id']}"
+            )
+        cost = json.loads(path.read_text())
+        session_path = directory / "session-cost.json"
+        if not session_path.is_file():
+            raise ValueError(
+                f"preload outer session cost is missing: {session['session_id']}"
+            )
+        observed = json.loads(session_path.read_text())
+        if (
+            observed.get("session_id") != session["session_id"]
+            or observed.get("manifest_hash") != store.manifest_hash
+            or observed.get("broker_closed") is not True
+            or observed.get("broker_cost_file") != str(path.relative_to(run_dir))
+            or observed.get("broker_cost_sha256") != identity.file_hash(path)
+        ):
+            raise ValueError(
+                f"preload outer session cost is unverified: {session['session_id']}"
+            )
+        if (
+            cost.get("protocol")
+            != store.manifest["config"]["dynamic_launcher_protocol"]
+            or cost.get("closed") is not True
+            or cost.get("broker_reaped") is not True
+            or cost.get("remaining_children") != []
+            or cost.get("cleanup_issues") != []
+        ):
+            raise ValueError(
+                f"preload session cleanup/cost is unverified: {session['session_id']}"
+            )
+        for key in ("run_wall_s", "shared_setup_wall_s", "shared_shutdown_wall_s"):
+            value = cost.get(key)
+            if (
+                isinstance(value, bool)
+                or not isinstance(value, (int, float))
+                or not math.isfinite(value)
+                or value < 0
+            ):
+                raise ValueError(
+                    f"preload session has invalid {key}: {session['session_id']}"
+                )
+        elapsed = observed.get("observed_session_wall_s")
+        if (
+            isinstance(elapsed, bool)
+            or not isinstance(elapsed, (int, float))
+            or not math.isfinite(elapsed)
+            or elapsed < 0
+        ):
+            raise ValueError(
+                f"preload outer session elapsed is invalid: {session['session_id']}"
+            )
+        artifacts.add(path)
+        artifacts.add(session_path)
+        failed = cost.get("error") is not None or cost.get("broker_returncode") != 0
+        costs.append(
+            {
+                "session_id": session["session_id"],
+                "broker_started": True,
+                "session_reason": session["reason"],
+                "error": cost.get("error"),
+                "status": "interrupted"
+                if session["reason"] == "operator pause"
+                else "failed"
+                if failed
+                else "closed",
+                "cost_file": str(path.relative_to(run_dir)),
+                "cost_sha256": identity.file_hash(path),
+                "observed_session_wall_s": elapsed,
+                "session_cost_file": str(session_path.relative_to(run_dir)),
+                "session_cost_sha256": identity.file_hash(session_path),
+                "cost_boundary": observed["boundary"],
+                "broker_run_wall_s": cost["run_wall_s"],
+                "shared_setup_wall_s": cost["shared_setup_wall_s"],
+                "shared_shutdown_wall_s": cost["shared_shutdown_wall_s"],
+            }
+        )
+    return sorted(artifacts), costs
 
 
 def publish(store, run_dir: Path) -> Path:
@@ -263,6 +478,7 @@ def publish(store, run_dir: Path) -> Path:
         "manifest_hash": manifest_hash,
         "protocol_version": identity.PROTOCOL_VERSION,
         "rehearsal": config["rehearsal"],
+        **identity.launcher_metadata(config.get("dynamic_launcher", "spawn")),
     }
     for corpus in config["corpora"]:
         rows = [
@@ -302,6 +518,10 @@ def publish(store, run_dir: Path) -> Path:
     summary = out.with_name(out.stem + "_SUMMARY.md")
     atomic_write(summary, pr.summary_markdown(header, merged, stats, table).encode())
     artifacts = [*files.values(), retry_file, out, summary]
+    session_costs = None
+    if config.get("dynamic_launcher", "spawn") == "preload":
+        audits, session_costs = _preload_publication_audit(store, run_dir, records)
+        artifacts.extend(audits)
     receipt = dict(
         extra,
         main_rows=len(main),
@@ -309,6 +529,8 @@ def publish(store, run_dir: Path) -> Path:
         dataset=str(out.relative_to(run_dir)),
         files={str(p.relative_to(run_dir)): identity.file_hash(p) for p in artifacts},
     )
+    if session_costs is not None:
+        receipt["preload_session_costs"] = session_costs
     # Each file is synced and atomically replaced; COMPLETE makes the bundle visible.
     _json(run_dir / "COMPLETE.json", receipt)
     store.set_metadata("publication", receipt)
@@ -395,6 +617,7 @@ def execute_run(
                 config["rehearsal"],
                 config["load_guard"],
                 config["purpose"],
+                config.get("dynamic_launcher", "spawn"),
             )
             store.recover_interrupted(
                 "previous controller ended before durable completion"
@@ -418,70 +641,172 @@ def execute_run(
                     "unit": unit,
                     "pid": os.getpid(),
                     "started_at": time.time(),
+                    **identity.launcher_metadata(
+                        config.get("dynamic_launcher", "spawn")
+                    ),
                 }
             )
+            broker = None
+            row_cleanup_failed = False
             try:
                 with control.signals():
                     _load_guard(control, config["load_guard"], "session")
-                    for slot in ("main", "retry"):
-                        # On an export-only recovery never move the phase backward.
-                        if slot == "retry":
-                            if len(store.results("main")) != len(manifest["rows"]):
-                                raise ValueError("retry before complete main pass")
-                            if store.status().get("phase") not in (
-                                "FINALIZING",
-                                "COMPLETE",
-                            ):
-                                store.set_phase("RETRY")
-                        completed = store.results(slot)
-                        main = store.results("main")
-                        last_corpus = None
-                        for item in manifest["rows"]:
-                            key = item["corpus"], item["name"]
-                            if key in completed or (
-                                slot == "retry"
-                                and not budget_reached(
-                                    main[key], config["row_timeout_s"]
-                                )
-                            ):
-                                continue
-                            control.between()
-                            if slot == "retry" or key[0] != last_corpus:
-                                _load_guard(
-                                    control, config["load_guard"], f"{slot} {key[0]}"
-                                )
-                            budget = (
-                                config["row_timeout_s"]
-                                if slot == "main"
-                                else config["retry_timeout_s"]
+                    with contextlib.ExitStack() as resources:
+                        if config.get("dynamic_launcher", "spawn") == "preload":
+                            from evaluation.dynamic_preload.broker_adapter import (
+                                BrokerRun,
                             )
-                            with exclusive_lock(run_dir / "control.lock"):
+
+                            broker = BrokerRun(
+                                identity.ROOT, run_dir / "preload" / session
+                            )
+                            store.set_metadata(
+                                f"preload_session:{session}",
+                                {
+                                    "broker_dir": str(
+                                        broker.run_dir.relative_to(run_dir)
+                                    ),
+                                    "launch_intent": True,
+                                },
+                            )
+                            resources.enter_context(
+                                _preload_session_cost(
+                                    broker, run_dir, session, store.manifest_hash
+                                )
+                            )
+                        for slot in ("main", "retry"):
+                            # On export-only recovery never move the phase backward.
+                            if slot == "retry":
+                                if len(store.results("main")) != len(manifest["rows"]):
+                                    raise ValueError("retry before complete main pass")
+                                if store.status().get("phase") not in (
+                                    "FINALIZING",
+                                    "COMPLETE",
+                                ):
+                                    store.set_phase("RETRY")
+                            completed = store.results(slot)
+                            main = store.results("main")
+                            last_corpus = None
+                            for item in manifest["rows"]:
+                                key = item["corpus"], item["name"]
+                                if key in completed or (
+                                    slot == "retry"
+                                    and not budget_reached(
+                                        main[key], config["row_timeout_s"]
+                                    )
+                                ):
+                                    continue
                                 control.between()
-                                attempt = store.begin_attempt(
-                                    *key, slot, session, budget
+                                if (
+                                    broker is not None
+                                    or slot == "retry"
+                                    or key[0] != last_corpus
+                                ):
+                                    _load_guard(
+                                        control,
+                                        config["load_guard"],
+                                        f"{slot} {key[0]}/{key[1]}",
+                                    )
+                                budget = (
+                                    config["row_timeout_s"]
+                                    if slot == "main"
+                                    else config["retry_timeout_s"]
                                 )
-                            last_corpus = key[0]
-                            attempt_dir = run_dir / "attempts" / attempt
-                            attempt_dir.mkdir(parents=True, exist_ok=True)
-                            row = _run_one(
-                                corpora[key[0]][key[1]],
-                                key[0],
-                                config["seed"],
-                                budget,
-                                False,
-                                level,
-                                cancel_requested=control.immediate,
-                                output_dir=attempt_dir,
-                            )
-                            metrics = store.commit_result(attempt, row)
-                            assert_quiescent(unit)
-                            print(
-                                f"[pinned] saved {slot} {key[0]}/{key[1]} "
-                                f"checkpoint={metrics['total_s']:.6f}s",
-                                file=sys.stderr,
-                                flush=True,
-                            )
-                            control.between()
+                                with exclusive_lock(run_dir / "control.lock"):
+                                    control.between()
+                                    attempt = store.begin_attempt(
+                                        *key, slot, session, budget
+                                    )
+                                last_corpus = key[0]
+                                attempt_dir = run_dir / "attempts" / attempt
+                                attempt_dir.mkdir(parents=True, exist_ok=True)
+                                options: dict[str, Any] = {
+                                    "cancel_requested": control.immediate,
+                                    "output_dir": attempt_dir,
+                                }
+                                if broker is not None:
+                                    broker.row_process = broker.row_identity = None
+                                    options["dynamic_broker"] = broker
+                                primary = None
+                                audit = None
+                                started = time.perf_counter()
+                                try:
+                                    row = _run_one(
+                                        corpora[key[0]][key[1]],
+                                        key[0],
+                                        config["seed"],
+                                        budget,
+                                        False,
+                                        level,
+                                        **options,
+                                    )
+                                except BaseException as exc:
+                                    primary = exc
+                                    raise
+                                finally:
+                                    elapsed = time.perf_counter() - started
+                                    if (
+                                        broker is not None
+                                        and broker.row_process is not None
+                                    ):
+                                        try:
+                                            receipt = broker.finish_row(
+                                                attempt, elapsed
+                                            )
+                                            if primary is None:
+                                                broker.validate_row(row, receipt)
+                                            audit = {
+                                                "attempt_id": attempt,
+                                                "session_id": session,
+                                                "manifest_hash": store.manifest_hash,
+                                                "receipt": receipt,
+                                            }
+                                            audit_path = (
+                                                attempt_dir / "preload-row.json"
+                                            )
+                                            _json(audit_path, audit)
+                                            audit = {
+                                                "audit_file": str(
+                                                    audit_path.relative_to(run_dir)
+                                                ),
+                                                "audit_sha256": identity.file_hash(
+                                                    audit_path
+                                                ),
+                                            }
+                                        except BaseException as cleanup_error:
+                                            row_cleanup_failed = True
+                                            if primary is None:
+                                                raise
+                                            _note_cleanup_error(
+                                                primary,
+                                                f"preload row cleanup also failed: {cleanup_error!r}",
+                                            )
+                                if broker is not None:
+                                    if audit is None:
+                                        raise RuntimeError(
+                                            "preload row returned without a registered/reaped process"
+                                        )
+                                    row["dynamic_preload"] = audit
+                                    assert_quiescent(
+                                        unit, allowed_resident=broker.broker_identity
+                                    )
+                                else:
+                                    assert_quiescent(unit)
+                                row.update(
+                                    identity.launcher_metadata(
+                                        config.get("dynamic_launcher", "spawn")
+                                    )
+                                )
+                                metrics = store.commit_result(attempt, row)
+                                print(
+                                    f"[pinned] saved {slot} {key[0]}/{key[1]} "
+                                    f"checkpoint={metrics['total_s']:.6f}s",
+                                    file=sys.stderr,
+                                    flush=True,
+                                )
+                                control.between()
+                    # No live broker remains during final validation/publication.
+                    assert_quiescent(unit)
                     control.between()
                     identity.validate_manifest(store.manifest)
                     control.between()
@@ -489,23 +814,32 @@ def execute_run(
                     result = publish(store, run_dir)
                     store.end_session(session, "complete")
                     return result
-            except (PauseRequested, RowInterrupted):
-                store.recover_interrupted("operator pause")
-                store.set_metadata(
-                    "pause_acknowledged",
-                    {"sequence": control.sequence, "mode": control.request},
+            except BaseException as exc:
+                paused = (
+                    isinstance(exc, (PauseRequested, RowInterrupted))
+                    and not row_cleanup_failed
                 )
-                print(f"[pinned] paused: {run_dir}", file=sys.stderr, flush=True)
-                return run_dir
-            except BaseException:
                 try:
-                    store.recover_interrupted("controller error")
-                except Exception as cleanup_error:
-                    print(
-                        f"[pinned] could not record interruption: {cleanup_error}",
-                        file=sys.stderr,
-                        flush=True,
+                    if broker is not None and not broker.closed:
+                        raise RuntimeError(
+                            "broker cleanup is incomplete; session remains recoverable"
+                        )
+                    assert_quiescent(unit)
+                    store.recover_interrupted(
+                        "operator pause" if paused else "controller error"
                     )
+                except BaseException as cleanup_error:
+                    _note_cleanup_error(
+                        exc, f"could not safely record interruption: {cleanup_error!r}"
+                    )
+                    raise exc
+                if paused:
+                    store.set_metadata(
+                        "pause_acknowledged",
+                        {"sequence": control.sequence, "mode": control.request},
+                    )
+                    print(f"[pinned] paused: {run_dir}", file=sys.stderr, flush=True)
+                    return run_dir
                 raise
 
 
@@ -530,6 +864,10 @@ def main(argv=None):
         "--purpose", choices=("definitive", "attribution"), default="definitive"
     )
     start.add_argument("--foreground", action="store_true")
+    start.add_argument("--prepare-only", action="store_true")
+    start.add_argument(
+        "--dynamic-launcher", choices=("spawn", "preload"), default="spawn"
+    )
     start.add_argument("--run-dir", type=Path)
     for name in ("resume", "status", "verify", "pause", "_execute"):
         command = sub.add_parser(name)
@@ -555,6 +893,8 @@ def main(argv=None):
             purpose=args.purpose,
             run_dir=args.run_dir,
             foreground=args.foreground,
+            dynamic_launcher=args.dynamic_launcher,
+            prepare_only=args.prepare_only,
         )
     else:
         directory = args.run_dir.resolve()
