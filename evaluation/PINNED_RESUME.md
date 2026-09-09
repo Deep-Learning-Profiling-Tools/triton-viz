@@ -38,7 +38,7 @@ The manifest freezes the ordered corpus/spec roster, full execution commit,
 source and installed package hashes, value sidecars, runtime/environment,
 ladder level, budgets and counting rules. Keep the execution checkout,
 environment and inputs unchanged until completion. Resume refuses a mismatch.
-The definitive run is L2, all 1242 rows from 17 corpora, seed 0, jobs 1, main
+The definitive run is L2, all 1249 rows from 17 corpora, seed 0, jobs 1, main
 budget 200 s and retry budget 320 s, fence order enabled with no environment
 override. L1/L0 attribution requires `--purpose attribution` and its own run;
 their main budgets are 200/180 s. Rehearsal can select smaller corpora and budgets:
