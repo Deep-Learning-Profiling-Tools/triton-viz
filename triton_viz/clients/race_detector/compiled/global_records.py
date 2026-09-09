@@ -310,6 +310,18 @@ class _RaceEnv:
 
         self._pids = (SymbolicExpr.PID0, SymbolicExpr.PID1, SymbolicExpr.PID2)
         self.graph = graph
+        # The reader accepts only forward CFG block order and preserves each
+        # event's branch path. Source-earlier awaits are candidates for
+        # control dependencies, activated only when both endpoints execute.
+        # An unknown/dropped path or mask cannot justify such an edge.
+        self.await_indices = tuple(
+            i
+            for i, access in enumerate(graph.accesses)
+            if access.awaited
+            and access.exit_pred is not None
+            and not access.guarded
+            and not access.mask_dropped
+        )
         self.params = params
         self.symbolic_params = symbolic_params
         # Route 2 state: per-tensor snapshot arrays and their equalities,
@@ -1332,6 +1344,17 @@ def _record_for(
         source_location=source,
         program_seq=seq,
         dep_loads=tuple(getattr(access, "deps", ())),
+        causal_constraints=env.premises_for(access),
+        await_observations=(
+            tuple(sorted(observed_indices(access.exit_pred)))
+            if access.awaited and access.exit_pred is not None
+            else ()
+        ),
+        await_dependencies=(
+            tuple(i for i in env.await_indices if i < seq)
+            if not access.guarded and not access.mask_dropped
+            else ()
+        ),
         debug_name=f"{kernel_name}:ttir{access.line_no}:{access.kind}",
         active=active,
         reads=reads,

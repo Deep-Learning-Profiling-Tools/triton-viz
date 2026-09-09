@@ -222,6 +222,10 @@ class SymbolicMemoryEvent:
     # The substituted RMW operand v (None for non-RMW / unmodeled RMW);
     # the counting axiom reads the constant increment off it.
     rmw_operand: Any = None
+    # Substituted operational conditions, excluding proof-domain premises.
+    # Reads/writes retain those premises for all execution constraints;
+    # causality must not mistake them for observation dependencies.
+    causal_inputs: tuple[Any, ...] = ()
 
 
 def _import_symbolic_expr_pids():
@@ -1278,6 +1282,11 @@ class TwoCopySymbolicHBSolver:
         active_all = apply_sub(record.active, sub)
         local_all = apply_sub(record.local_constraints, sub)
         prem_all = apply_sub(record.premises, sub)
+        causal_all = (
+            (local_all, prem_all)
+            if record.causal_constraints is None
+            else apply_sub(record.causal_constraints, sub)
+        )
 
         addr_lanes = to_lanes(addr_all)
         n_lanes = len(addr_lanes) or 1
@@ -1298,9 +1307,14 @@ class TwoCopySymbolicHBSolver:
         local_terms = tuple(as_bool(c) for c in iter_constraints(local_all))
         prem_terms = tuple(as_bool(c) for c in iter_constraints(prem_all))
         self.launch_premises.extend(prem_terms)
+        causal_terms = tuple(as_bool(c) for c in iter_constraints(causal_all))
 
         out: list[SymbolicMemoryEvent] = []
         for lane, addr in enumerate(addr_lanes):
+            causal_inputs = (
+                as_bool(lane_value(active_all, lane, n_lanes)),
+                *causal_terms,
+            )
             active = And(
                 as_bool(lane_value(active_all, lane, n_lanes)),
                 *local_terms,
@@ -1317,6 +1331,9 @@ class TwoCopySymbolicHBSolver:
                         "CAS record missing old_value / cas_cmp_value / cas_new_value"
                     )
                 success = old == cmp_
+                # Preserve the compare dependency in the write condition,
+                # without importing execution-domain premises into vdep.
+                causal_inputs += (success,)
                 reads = active
                 writes = And(active, success)
                 written = If(success, new, old)
@@ -1392,6 +1409,7 @@ class TwoCopySymbolicHBSolver:
                     old_value=old_value,
                     written_value=written_value,
                     rmw_operand=rmw_operand,
+                    causal_inputs=causal_inputs,
                 )
             )
         return out
@@ -2079,19 +2097,29 @@ class TwoCopySymbolicHBSolver:
             value-modeled event e's written value or RMW operand (a CAS's
             cmp/new terms live inside its written_value If-term), assert
             vc_r(r) < vc_w(e); if it occurs in e's activity (reads/writes
-            exprs) or address, assert vc_r(r) < vc_r(e) — the value is
-            needed before e's read part can even issue.
+            conditions) or address, assert vc_r(r) < vc_r(e) — the value
+            is needed before e's read part can even issue.
 
-        Gating: vdep edges are asserted UNCONDITIONALLY, unlike co-hb's
-        activity gating. Syntactic dependence is a static fact; the static
-        vdep graph is acyclic by construction (a record's lowered terms can
-        only mention observation symbols captured earlier in its own copy,
-        and alpha-renaming separates the copies), so the vdep edges alone
-        are always satisfiable, and every cycle-closing rf edge is already
-        activity-gated through its selector (_build_read_from_choices
-        forces all selectors false when the reader is inactive). An
-        activity gate would only weaken the axiom without excluding any
-        additional execution.
+        Operational conditions are preserved separately from the lowered
+        reads/writes predicates. Those predicates also contain global
+        execution premises (including every await's exit condition) and
+        source-domain restrictions, which are not value dependencies.
+        Scanning them would invent reciprocal dependencies between two
+        independent awaits and make even the bare base inconsistent.
+        Frontends distinguish actual loop/mask control from domain facts;
+        legacy records retain local_constraints/premises as operational
+        conditions, including interpreter loop-control premises.
+
+        Gating: genuine static vdep edges remain UNCONDITIONAL. Captured
+        operational expressions refer to earlier observations within one
+        copy, and alpha-renaming separates the copies. Global termination
+        conditions do not meet that ordering argument and are excluded
+        from dependency extraction, while remaining in event activity and
+        the independent feasibility check. Cycle-closing rf edges remain
+        activity-gated through their selectors. A preceding await's exit
+        is a genuine control dependency of later operations: these explicit
+        edges require both same-copy endpoints to execute, so mutually
+        exclusive branches do not constrain each other's causality ranks.
 
         Occurrence is checked on GENUINE observation symbols only: the keys
         of r.old_value intersected with the copy-local rename targets (the
@@ -2133,13 +2161,39 @@ class TwoCopySymbolicHBSolver:
             obs_keys = _collect_z3_var_keys((r.old_value,)) & copy_local_targets
             if not obs_keys:
                 continue
+            exit_sources = (
+                [
+                    source
+                    for source in atomic_events
+                    if source.copy == r.copy
+                    and source.event_id in r.record.await_observations
+                ]
+                if r.record.await_observations
+                else [r]
+            )
             for e in atomic_events:
                 if e.idx == r.idx:
                     continue
                 if obs_keys & _collect_z3_var_keys((e.written_value, e.rmw_operand)):
                     cons.append(self.vc_read_rank[r.idx] < self.vc_write_rank[e.idx])
-                if obs_keys & _collect_z3_var_keys((e.reads, e.writes, e.addr)):
+                if obs_keys & _collect_z3_var_keys((e.causal_inputs, e.addr)):
                     cons.append(self.vc_read_rank[r.idx] < self.vc_read_rank[e.idx])
+                # Exiting a preceding await controls later operations, but a
+                # poll in another branch does not. The encoder supplies
+                # source-earlier candidates; both same-copy path/activity
+                # predicates decide whether that control edge actually exists.
+                if r.copy == e.copy and r.event_id in e.record.await_dependencies:
+                    # An exit may compare the poll with another read's value.
+                    # Both are control inputs; retaining only the poll would
+                    # allow an expected value to come from a future publication.
+                    for source in exit_sources:
+                        cons.append(
+                            Implies(
+                                And(r.reads, e.reads, source.reads),
+                                self.vc_read_rank[source.idx]
+                                < self.vc_read_rank[e.idx],
+                            )
+                        )
 
     # ──────────────────── counting axiom (B.1.5) ────────────────────
 

@@ -93,6 +93,23 @@ class AccessEventRecord:
     # DISTINCT positions only for these pairs.
     dep_loads: tuple[int, ...] = ()
 
+    # Operational control conditions used for value-causality dependencies,
+    # before execution-domain premises are conjoined into event activity.
+    # None preserves legacy local_constraints/premises, which can contain
+    # real masks and loop control. Frontends with separate domain facts must
+    # supply only actual control conditions (for example loop existence).
+    # active, addresses and atomic operands are tracked separately.
+    causal_constraints: tuple[Any, ...] | None = None
+
+    # Earlier await records that must exit before this operation when both
+    # execute in one program copy. These are conditional control edges:
+    # the solver must conjoin both endpoints' activity/path predicates,
+    # rather than treating source order alone as an unconditional dependency.
+    await_dependencies: tuple[int, ...] = ()
+    # Observation-producing records consumed by this await's exit predicate,
+    # including the poll and any separately read expected/threshold value.
+    await_observations: tuple[int, ...] = ()
+
 
 @dataclass(frozen=True)
 class RaceReport:
