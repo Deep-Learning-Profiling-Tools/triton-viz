@@ -6,6 +6,12 @@ Startup, input transport, child cleanup and actual timeout slack remain visible.
 """
 from __future__ import annotations
 
+# Diagnostic module-entry clock must precede the imports being measured.
+# ruff: noqa: E402
+import time
+
+_MODULE_ENTERED = time.perf_counter()
+
 import argparse
 import copy
 import dis
@@ -523,18 +529,35 @@ def _stop(proc) -> None:
     proc.wait()
 
 
+_SETUP_MARKS = []
+
+
+def _mark(label):
+    _SETUP_MARKS.append([label, time.perf_counter()])
+
+
+def _timed(label, function, *args, **kwargs):
+    _mark(label + ":begin")
+    try:
+        return function(*args, **kwargs)
+    finally:
+        _mark(label + ":end")
+
+
 def run_dynamic(spec, seed, level, budget_s, hooks=()) -> dict[str, Any]:
     import torch
     from triton_viz.core.config import config
 
+    _SETUP_MARKS.clear()
     started = time.perf_counter()
+    _mark("parent:start")
     with tempfile.TemporaryDirectory(prefix="tilerace-dynamic-") as directory:
         path = Path(directory)
-        args = spec.make_args(seed)
-        identity = input_identity(spec, args)
-        spec_bytes = _serialize_spec(spec)
-        (path / "spec.pkl").write_bytes(spec_bytes)
-        torch.save(args, path / "inputs.pt")
+        args = _timed("parent:make_args", spec.make_args, seed)
+        identity = _timed("parent:input_identity", input_identity, spec, args)
+        spec_bytes = _timed("parent:serialize_spec", _serialize_spec, spec)
+        _timed("parent:write_spec", (path / "spec.pkl").write_bytes, spec_bytes)
+        _timed("parent:save_inputs", torch.save, args, path / "inputs.pt")
         del args
         request = {
             "protocol": PROTOCOL,
@@ -543,9 +566,11 @@ def run_dynamic(spec, seed, level, budget_s, hooks=()) -> dict[str, Any]:
             "level": int(level),
             "hooks": list(hooks),
             "inputs": identity,
-            "kernel": _kernel_identity(spec.kernel_fn),
+            "kernel": _timed(
+                "parent:kernel_identity", _kernel_identity, spec.kernel_fn
+            ),
             "config": dict(vars(config)),
-            "source": source_identity(),
+            "source": _timed("parent:source_identity", source_identity),
             "spec_sha256": hashlib.sha256(spec_bytes).hexdigest(),
         }
         _json(path / "request.json", request)
@@ -554,6 +579,7 @@ def run_dynamic(spec, seed, level, budget_s, hooks=()) -> dict[str, Any]:
         # development-only dependencies. Runtime module reads are checked before GO.
         environment["PYTHONPATH"] = os.pathsep.join(str(p) for p in sys.path if p)
         process_started = time.perf_counter()
+        _mark("parent:popen_begin")
         proc = subprocess.Popen(
             [
                 sys.executable,
@@ -564,6 +590,7 @@ def run_dynamic(spec, seed, level, budget_s, hooks=()) -> dict[str, Any]:
             ],
             env=environment,
         )
+        _mark("parent:popen_return")
         ready_started = None
         cancellation_sent = None
         kill_sent = None
@@ -589,6 +616,7 @@ def run_dynamic(spec, seed, level, budget_s, hooks=()) -> dict[str, Any]:
                     ):
                         raise DynamicSubprocessError("child launch identity mismatch")
                     ready_started = time.perf_counter()
+                    _mark("parent:ready")
                     _json(path / "go.json", {"parent_started": ready_started})
                 if ready_started is None:
                     if now - process_started >= SETUP_TIMEOUT_S:
@@ -618,6 +646,7 @@ def run_dynamic(spec, seed, level, budget_s, hooks=()) -> dict[str, Any]:
             _stop(proc)
             raise
         reaped = time.perf_counter()
+        _mark("parent:reaped")
         if ready_started is None:
             detail = (
                 _read(path / "error.json")
@@ -699,27 +728,49 @@ def run_dynamic(spec, seed, level, budget_s, hooks=()) -> dict[str, Any]:
                 for hook in hooks
             },
         }
+        result["execution"]["setup_profile"] = {
+            "parent": list(_SETUP_MARKS),
+            "child": _read(path / "setup-profile.json")
+            if (path / "setup-profile.json").exists()
+            else None,
+        }
     result["execution"]["full_wall_s"] = time.perf_counter() - started
     return result
 
 
 def _child(path: Path) -> None:
+    _SETUP_MARKS.clear()
+    _SETUP_MARKS.append(["child:module_entered", _MODULE_ENTERED])
+    _mark("child:entry")
     import cloudpickle
+
+    _mark("child:cloudpickle_imported")
     import torch
+
+    _mark("child:torch_imported")
     from evaluation import harness
+
+    _mark("child:harness_imported")
     from triton_viz.clients.race_detector.ladder import LadderLevel
     from triton_viz.core.config import config
 
+    _mark("child:other_imported")
     request = _read(path / "request.json")
     if request["protocol"] != PROTOCOL:
         raise DynamicSubprocessError("dynamic child protocol mismatch")
     spec_bytes = (path / "spec.pkl").read_bytes()
     if hashlib.sha256(spec_bytes).hexdigest() != request["spec_sha256"]:
         raise DynamicSubprocessError("dynamic callable transport hash mismatch")
-    spec = cloudpickle.loads(spec_bytes)
-    args = torch.load(path / "inputs.pt", map_location="cpu", weights_only=False)
-    identity = input_identity(spec, args)
-    kernel = _kernel_identity(spec.kernel_fn)
+    spec = _timed("child:load_spec", cloudpickle.loads, spec_bytes)
+    args = _timed(
+        "child:load_inputs",
+        torch.load,
+        path / "inputs.pt",
+        map_location="cpu",
+        weights_only=False,
+    )
+    identity = _timed("child:input_identity", input_identity, spec, args)
+    kernel = _timed("child:kernel_identity", _kernel_identity, spec.kernel_fn)
     if identity != request["inputs"] or kernel != request["kernel"]:
         raise DynamicSubprocessError("dynamic child input/kernel identity mismatch")
     object.__setattr__(spec, "make_args", lambda seed: args)
@@ -727,7 +778,7 @@ def _child(path: Path) -> None:
         raise DynamicSubprocessError("dynamic child configuration schema differs")
     for key, value in request["config"].items():
         setattr(config, key, value)
-    imported_source = source_identity()
+    imported_source = _timed("child:source_identity", source_identity)
     if imported_source != request["source"]:
         raise DynamicSubprocessError("dynamic child imported source differs")
     harness.DYNAMIC_TIMEOUT_S = request["budget_s"]
@@ -769,6 +820,7 @@ def _child(path: Path) -> None:
 
     def ready():
         nonlocal analysis_started
+        _mark("child:detector_ready")
         _json(
             path / "ready.json",
             {
@@ -780,24 +832,30 @@ def _child(path: Path) -> None:
         while not (path / "go.json").exists():
             time.sleep(0.001)
         analysis_started = time.perf_counter()
+        _mark("child:go")
         for observer in observers.values():
             observer.begin()
         running.set()
 
     try:
+        _mark("child:local_begin")
         result = harness._dynamic_track_local(
             spec, request["seed"], LadderLevel(request["level"]), ready=ready
         )
     finally:
+        _mark("child:local_return")
         stopped.set()
         monitor_thread.join()
+        _mark("child:monitor_joined")
     if snapshot_error:
         raise DynamicSubprocessError(
             f"dynamic observer snapshot failed: {snapshot_error}"
         )
     finished = {name: observer.finish() for name, observer in observers.items()}
+    _mark("child:observers_finished")
     if analysis_started is None:
         raise DynamicSubprocessError("dynamic child returned without READY/GO")
+    _mark("child:result_write_begin")
     _json(
         path / "result.json",
         {
@@ -807,6 +865,9 @@ def _child(path: Path) -> None:
             "peak_rss_kib": resource.getrusage(resource.RUSAGE_SELF).ru_maxrss,
         },
     )
+
+    _mark("child:result_write_end")
+    _json(path / "setup-profile.json", list(_SETUP_MARKS))
 
 
 def main():
