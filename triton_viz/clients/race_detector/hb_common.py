@@ -22,6 +22,14 @@ class UnsupportedSymbolicRaceQuery(Exception):
     """
 
 
+class CountingScopeUnsupported(UnsupportedSymbolicRaceQuery):
+    """An atomic address needs a counter whose symbolic-grid bound may wrap.
+
+    A caller may retry a smaller declared launch domain with every guard
+    intact. This does not certify that the counter is valid in that domain.
+    """
+
+
 def as_bool(value: Any) -> BoolRef:
     """Coerce ``value`` to a Z3 ``BoolRef``.
 

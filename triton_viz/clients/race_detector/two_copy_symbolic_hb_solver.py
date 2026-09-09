@@ -129,6 +129,7 @@ from .conflict_simplification import (
 )
 from .data import AccessEventRecord, RaceReport, RaceType
 from .hb_common import (
+    CountingScopeUnsupported,
     UnsupportedSymbolicRaceQuery,
     apply_sub,
     as_bool,
@@ -496,6 +497,7 @@ class TwoCopySymbolicHBSolver:
         self.rf_constraints: list[BoolRef] = []
         self.atomic_coherence_constraints: list[BoolRef] = []
         self.counting_constraints: list[BoolRef] = []
+        self._counting_grid_restricted: set[int] = set()
         # RQ5 ablation "coherence": no per-location atomic order — the
         # counting axiom (a coherence-order axiom) is omitted with it.
         self._counting: dict[int, _CountingInfo] = (
@@ -2245,6 +2247,8 @@ class TwoCopySymbolicHBSolver:
         # cover it, since it is what the escape hatch trusts to stay
         # representable.
         if init + inc * max_g > signed_max:
+            if any(_is_symbolic_dim(d) for d in self.grid):
+                self._counting_grid_restricted.add(id(e_a.record))
             return None
         # (e) no other event's write part can overlap [L, L+elem). The
         # check runs under the axiom's own PROVISIONAL observation bounds
@@ -2416,7 +2420,12 @@ class TwoCopySymbolicHBSolver:
             hit = _collect_z3_var_keys((e.addr,)) & set(obs_keys)
             if hit:
                 src = obs_keys[next(iter(hit))]
-                raise UnsupportedSymbolicRaceQuery(
+                error = (
+                    CountingScopeUnsupported
+                    if id(src.record) in self._counting_grid_restricted
+                    else UnsupportedSymbolicRaceQuery
+                )
+                raise error(
                     f"the observation of atomic {src.name} feeds the address "
                     f"of {e.name}, and the counting axiom's guards do not "
                     "hold for it — an atomic return in address position is "

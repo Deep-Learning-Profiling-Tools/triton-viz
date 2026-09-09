@@ -38,7 +38,7 @@ from ....core.config import config as cfg
 from ....core.data import Op
 from ...common.ttir_reader import AccessGraph, UnsupportedTTIR, parse_ttir
 from ..ladder import LadderLevel, parse_ladder_level
-from ..hb_common import UnsupportedSymbolicRaceQuery
+from ..hb_common import CountingScopeUnsupported, UnsupportedSymbolicRaceQuery
 from ..two_copy_symbolic_hb_solver import TwoCopySymbolicHBSolver
 from .global_records import (
     GlobalTensor,
@@ -1358,17 +1358,47 @@ class CompiledRaceDetector(Client):
                 padded = tuple(int(d) for d in lg) + (1, 1, 1)
                 lg3 = (padded[0], padded[1], padded[2])
             self.last_global_content_qualified |= enc.content_qualified
-            solver = TwoCopySymbolicHBSolver(
-                enc.records,
-                fence_seqs=enc.fence_seqs,
-                token_order=enc.token_order,
-                fence_order=cfg.race_detector_fence_order and enc.fence_order_applies,
-                grid=symbolic_grid(enc, lg),
-                arange_dict=enc.arange_dict,
-                ablations=self.ablations,
-                enum_fallback_grid=lg3,
-                extra_assumptions=enc.assumptions,
-            )
+            launch_scoped = False
+            grid = symbolic_grid(enc, lg)
+            try:
+                solver = TwoCopySymbolicHBSolver(
+                    enc.records,
+                    fence_seqs=enc.fence_seqs,
+                    token_order=enc.token_order,
+                    fence_order=cfg.race_detector_fence_order
+                    and enc.fence_order_applies,
+                    grid=grid,
+                    arange_dict=enc.arange_dict,
+                    ablations=self.ablations,
+                    enum_fallback_grid=lg3,
+                    extra_assumptions=enc.assumptions,
+                )
+            except CountingScopeUnsupported:
+                if lg3 is None:
+                    raise
+                # Construction failed before any pair was proved. Retry ALL
+                # queries at this launch, keeping every counting guard. The
+                # concrete grid bounds counter arithmetic; the equalities
+                # also bind grid/NumPrograms terms in the existing records.
+                pins = tuple(
+                    d == IntVal(lg3[i])
+                    for i, d in enumerate(grid)
+                    if not isinstance(d, int)
+                )
+                solver = TwoCopySymbolicHBSolver(
+                    enc.records,
+                    fence_seqs=enc.fence_seqs,
+                    token_order=enc.token_order,
+                    fence_order=cfg.race_detector_fence_order
+                    and enc.fence_order_applies,
+                    grid=lg3,
+                    arange_dict=enc.arange_dict,
+                    ablations=self.ablations,
+                    extra_assumptions=pins + tuple(enc.assumptions),
+                    enum_fallback_grid=lg3,
+                    launch_ceiling=True,
+                )
+                launch_scoped = True
             found = solver.find_races()
         except UnsupportedTTIR as e:
             return ("unsupported", f"{e.kind}: {e}")
@@ -1403,7 +1433,9 @@ class CompiledRaceDetector(Client):
             # attribute, never worded as a race). Still-SAT keeps the
             # race path with the PINNED reports, whose witnesses are
             # in-extent by construction (replayable by C2).
-            scoped = self._launch_scoped_requery(enc, lg, found)
+            scoped = (
+                None if launch_scoped else self._launch_scoped_requery(enc, lg, found)
+            )
             if scoped is not None:
                 if not scoped:
                     return ("proved-launch", exact + widened)
@@ -1448,7 +1480,7 @@ class CompiledRaceDetector(Client):
                 "execution, so the race-freedom certificate is withheld "
                 "(vacuous proof)",
             )
-        if solver.enum_used:
+        if launch_scoped or solver.enum_used:
             return ("proved-launch", [])
         return ("proved", "T1")
 
