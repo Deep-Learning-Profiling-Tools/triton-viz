@@ -25,13 +25,69 @@ Rows are consumed through the generic ``cutile`` LaunchSpec path (the
 static CuTile-IR-reader track; cuda.tile has no interpreter). Rows whose
 IR leaves the reader's fragment refuse with the construct named
 (control-flow for branches/spins, indirect-address for loaded-value
-addressing, atomic-cas for CAS) — the documented-boundary discipline the
+addressing, cas-value for an ordinary non-spin CAS) — the documented-boundary discipline the
 Triton corpus already uses for trb010/011/013.
 
 The specs JSON next to this module carries each row's CAPTURED CuTile IR
 plus arg descriptors (see evaluation/tritonracebench_cutile_capture);
 rebuild needs neither cuda-tile nor a GPU. Before the first capture the
 JSON is absent and CORPUS is empty (capture-only mode).
+
+Coverage against the Triton roster (69 of its 71 rows). The seven
+race-free repair rows of evaluation/kernels/tritonracebench_repairs.py
+have twins here, captured 2026-09-10 on the same cuda.tile 1.5.0, torch
+and sm_89 as the original rows.
+
+What replaces the fence. Six of those seven Triton kernels write
+``tl.debug_barrier()`` around the synchronizing atomic
+(``batch_ticket_queue`` has no fence at all: its ticket disjointness
+follows from RMW indivisibility). cuda.tile 1.5.0 has no fence, barrier
+or membar, and its compiler's token pass does NOT order everything
+unconditionally. Read from the captured IR, it emits exactly two kinds
+of edge:
+
+- accesses through the SAME array parameter chain directly
+  (``trb026_reread_fenced_no``: the read-back's ``load_pointer`` takes
+  ``token=$66``, the tile store's token); and
+- a RELEASE or ACQ_REL atomic receives ``join_tokens`` of the
+  program-preceding memory operations, and later accesses receive
+  ``join_tokens`` with that atomic's result token. A RELAXED or
+  ACQUIRE-only atomic receives no such join
+  (``trb021_acquire_only_yes``: its ACQUIRE CAS takes the entry
+  ``token=$token`` while the producer's data store is ``$80``).
+
+Every twin here rests on the second edge (its publication is a RELEASE
+or ACQ_REL atomic) or needs no intra-instance order at all
+(``trb013_batch_ticket_no``). The chains those labels depend on are
+asserted from the captured IR by
+evaluation/check_tritonracebench_cutile_twins.py, so a recapture that
+lost one fails a check rather than silently inverting a label.
+
+Two Triton rows have NO semantics-preserving, name-matched cuTile twin
+and stay Triton-only:
+
+- ``trb026_reread_unfenced_yes`` and
+  ``trb026_guarded_no_producer_fence_yes``. Both are RACY BECAUSE a
+  fence is absent: their label depends on two accesses of one instance
+  being unordered. There is no fence to drop from the twin, and the
+  resulting cuTile kernel is textually identical to an
+  already-registered row carrying the OPPOSITE label
+  (``trb026_reread_fenced_no`` and ``trb021_guarded_acq_rel_no``
+  respectively). The only other spelling considered, binding two
+  parameters to one allocation, changes the argument contents and needs
+  ``aliased=True``, which is outside the T0 premise.
+
+Four of the seven new twins abstain at L2 on boundaries that already
+bound pre-existing rows, not on anything specific to them:
+``trb013_batch_ticket_no`` on indirect-address (as
+``trb013_work_queue_no`` does) and ``trb021_role_specific_order_no``,
+``trb017_cas_unlock_no`` and ``trb026_fenced_tile_handoff_no`` on
+cas-value (as ``trb021_guarded_acq_rel_no`` does: an ordinary, non-spin
+CAS in a kernel whose IR also contains ``tile_astype``, which every
+cuTile kernel does). ``trb016_atomic_flag_observation_no``,
+``trb025_failed_cas_arrival_no`` and ``trb025_both_consumer_branches_no``
+prove. Outputs and pairing are checked independently of any verdict by
+evaluation/check_tritonracebench_cutile_twins.py.
 """
 
 from __future__ import annotations
@@ -1080,6 +1136,176 @@ def _trb026_args(seed: int) -> tuple:
     )
 
 
+# ── the seven race-free repair twins (Triton corpus: tritonracebench_repairs)
+# Each Triton twin writes ``tl.debug_barrier()`` between the payload access
+# and the synchronizing atomic. cuTile has no fence primitive; the compiler's
+# token pass supplies that intra-instance order, exactly as for the trb016,
+# trb017, trb025 and trb026 twins above, so the twins here drop the fence and
+# map every atomic 1:1 (sem/scope -> MemoryOrder/MemoryScope).
+
+
+@ct.kernel
+def trb021_role_order_kernel(flag, data, out):
+    pid = ct.bid(0)
+    zero = ct.arange(1, dtype=np.int32)
+    if pid == 0:
+        ct.scatter(data, zero, 1)
+        ct.atomic_cas(flag, zero, 0, 1, memory_order=MO.RELEASE, memory_scope=MS.DEVICE)
+    else:
+        old = ct.atomic_cas(
+            flag, zero, 1, 1, memory_order=MO.ACQUIRE, memory_scope=MS.DEVICE
+        )
+        got = old == 1
+        value = ct.gather(data, zero, mask=got, padding_value=0)
+        ct.scatter(out, zero + pid, value, mask=got)
+
+
+@ct.kernel
+def trb013_batch_ticket_kernel(head, buf):
+    pid = ct.bid(0)
+    zero = ct.arange(1, dtype=np.int32)
+    first = ct.atomic_add(
+        head, zero, 2, memory_order=MO.RELAXED, memory_scope=MS.DEVICE
+    )
+    lanes = ct.arange(2, dtype=np.int32)
+    ct.scatter(buf, ct.broadcast_to(first, (2,)) + lanes, pid)
+
+
+@ct.kernel
+def trb016_flag_observation_kernel(flag, data, out, BLOCK: ConstInt):
+    pid = ct.bid(0)
+    zero = ct.arange(1, dtype=np.int32)
+    offs = ct.arange(BLOCK, dtype=np.int32)
+    if pid == 0:
+        ct.scatter(data, offs, offs)
+        seen = ct.atomic_or(
+            flag, zero, 0, memory_order=MO.RELAXED, memory_scope=MS.DEVICE
+        )
+        ct.scatter(out, zero, seen)
+        ct.atomic_xchg(flag, zero, 1, memory_order=MO.RELEASE, memory_scope=MS.DEVICE)
+    else:
+        while (
+            ct.atomic_add(
+                flag, zero, 0, memory_order=MO.ACQUIRE, memory_scope=MS.DEVICE
+            ).item()
+            != 1
+        ):
+            pass
+        value = ct.gather(data, offs)
+        ct.scatter(out, pid * BLOCK + offs, value)
+
+
+@ct.kernel
+def trb017_cas_unlock_kernel(lock, x, out):
+    pid = ct.bid(0)
+    zero = ct.arange(1, dtype=np.int32)
+    while (
+        ct.atomic_cas(
+            lock, zero, 0, 1, memory_order=MO.ACQUIRE, memory_scope=MS.DEVICE
+        ).item()
+        != 0
+    ):
+        pass
+    v = ct.gather(x, zero)
+    ct.scatter(x, zero, v + 1)
+    ct.atomic_cas(lock, zero, 1, 0, memory_order=MO.RELEASE, memory_scope=MS.DEVICE)
+    ct.scatter(out, zero + pid, 1)
+
+
+@ct.kernel
+def trb025_failed_cas_arrival_kernel(sem, payload, out, BLOCK: ConstInt):
+    pid = ct.bid(0)
+    zero = ct.arange(1, dtype=np.int32)
+    offs = ct.arange(BLOCK, dtype=np.int32)
+    if pid == 0:
+        ct.scatter(payload, offs, ct.astype(offs + 1, np.float32))
+        ct.atomic_xchg(sem, zero, 1, memory_order=MO.RELEASE, memory_scope=MS.DEVICE)
+    else:
+        # On arrival this CAS fails, but its read still acquires the release.
+        while (
+            ct.atomic_cas(
+                sem, zero, 0, 0, memory_order=MO.ACQUIRE, memory_scope=MS.DEVICE
+            ).item()
+            != 1
+        ):
+            pass
+        v = ct.gather(payload, offs)
+        ct.scatter(out, (pid - 1) * BLOCK + offs, v)
+
+
+@ct.kernel
+def trb025_both_branches_kernel(sem, payload, out, BLOCK: ConstInt):
+    pid = ct.bid(0)
+    zero = ct.arange(1, dtype=np.int32)
+    offs = ct.arange(BLOCK, dtype=np.int32)
+    if pid == 0:
+        ct.scatter(payload, offs, ct.astype(offs + 1, np.float32))
+        ct.atomic_xchg(sem, zero, 1, memory_order=MO.RELEASE, memory_scope=MS.DEVICE)
+    else:
+        if pid == 1:
+            while (
+                ct.atomic_add(
+                    sem, zero, 0, memory_order=MO.ACQUIRE, memory_scope=MS.DEVICE
+                ).item()
+                != 1
+            ):
+                pass
+        else:
+            while (
+                ct.atomic_or(
+                    sem, zero, 0, memory_order=MO.ACQUIRE, memory_scope=MS.DEVICE
+                ).item()
+                != 1
+            ):
+                pass
+        v = ct.gather(payload, offs)
+        ct.scatter(out, (pid - 1) * BLOCK + offs, v)
+
+
+@ct.kernel
+def trb026_tile_handoff_kernel(flag, data, out, BLOCK: ConstInt):
+    pid = ct.bid(0)
+    zero = ct.arange(1, dtype=np.int32)
+    offs = ct.arange(BLOCK, dtype=np.int32)
+    prod = (offs >= 0) & (pid == 0)
+    ct.scatter(data, offs, offs + 1, mask=prod)
+    cmpv = ct.where((zero >= 0) & (pid == 0), 0, 1)
+    old = ct.atomic_cas(
+        flag, zero, cmpv, 1, memory_order=MO.ACQ_REL, memory_scope=MS.DEVICE
+    )
+    cons = (offs >= 0) & (pid == 1) & (ct.broadcast_to(old, (BLOCK,)) == 1)
+    value = ct.gather(data, offs, mask=cons, padding_value=0)
+    ct.scatter(out, offs, value, mask=cons)
+
+
+def _trb021_role_args(seed: int) -> tuple:
+    return tuple(torch.zeros(n, dtype=torch.int32) for n in (1, 1, 2))
+
+
+def _trb013_batch_args(seed: int) -> tuple:
+    return tuple(torch.zeros(n, dtype=torch.int32) for n in (1, 64))
+
+
+def _trb016_obs_args(seed: int) -> tuple:
+    return tuple(torch.zeros(n, dtype=torch.int32) for n in (1, 64, 128))
+
+
+def _trb017_unlock_args(seed: int) -> tuple:
+    return tuple(torch.zeros(n, dtype=torch.int32) for n in (1, 1, 4))
+
+
+def _trb025_repair_args(seed: int) -> tuple:
+    return (
+        torch.zeros(1, dtype=torch.int32),
+        torch.zeros(16, dtype=torch.float32),
+        torch.zeros(32, dtype=torch.float32),
+    )
+
+
+def _trb026_fence_args(seed: int) -> tuple:
+    return tuple(torch.zeros(n, dtype=torch.int32) for n in (1, 16, 16))
+
+
 # ── the row table ────────────────────────────────────────────────
 # name -> (kernel, make_args, extra positional args appended AFTER the
 # tensor/scalar args (the ConstInt values, in parameter order), grid,
@@ -1441,7 +1667,52 @@ _row(
     "the pair (the Triton twin needs tl.debug_barrier)",
 )  # fmt: skip
 
-assert len(ROWS) == 62, len(ROWS)
+# ── the seven race-free repair twins ─────────────────────────────
+
+_row(
+    "trb021_role_specific_order_no", trb021_role_order_kernel, _trb021_role_args,
+    (), (2,), "race-free", "one-sided-sw",
+    "separate release-only producer and acquire-only consumer records restore "
+    "both synchronization halves (the Triton twin fences before the release)",
+)  # fmt: skip
+_row(
+    "trb013_batch_ticket_no", trb013_batch_ticket_kernel, _trb013_batch_args,
+    (), (4,), "race-free", "work-queue-fetch",
+    "reserve two adjacent slots per atomic ticket; increment-two ranks and lane "
+    "offsets produce disjoint batches",
+)  # fmt: skip
+_row(
+    "trb016_atomic_flag_observation_no", trb016_flag_observation_kernel,
+    _trb016_obs_args, (64,), (2,), "race-free", "producer-consumer-wait",
+    "the producer's flag observation is a device-scoped identity atomic OR, so it "
+    "is compatible with the consumer's polling atomics",
+)  # fmt: skip
+_row(
+    "trb017_cas_unlock_no", trb017_cas_unlock_kernel, _trb017_unlock_args,
+    (), (2,), "race-free", "mutex-cas",
+    "release CAS unlock replaces the plain store, retaining successful unlock and "
+    "acquire lock pairing",
+)  # fmt: skip
+_row(
+    "trb025_failed_cas_arrival_no", trb025_failed_cas_arrival_kernel,
+    _trb025_repair_args, (16,), (3,), "race-free", "comm-comp",
+    "poll for the published value with acquire CAS; initial zero cannot exit and "
+    "the failed CAS still acquires the arrival",
+)  # fmt: skip
+_row(
+    "trb025_both_consumer_branches_no", trb025_both_branches_kernel,
+    _trb025_repair_args, (16,), (3,), "race-free", "comm-comp",
+    "both consumer branches poll, with identity add and identity OR respectively; "
+    "the second consumer remains active",
+)  # fmt: skip
+_row(
+    "trb026_fenced_tile_handoff_no", trb026_tile_handoff_kernel, _trb026_fence_args,
+    (16,), (2,), "race-free", "tile-level-fence",
+    "a vector payload published through a scalar acq_rel CAS: the token pass "
+    "orders both sides, where the Triton twin needs two tl.debug_barrier calls",
+)  # fmt: skip
+
+assert len(ROWS) == 69, len(ROWS)
 
 
 # ── the corpus (from the captured specs JSON) ────────────────────
