@@ -714,8 +714,15 @@ launch-scoped rung run unchanged.
 Queued lifts (v2):
 - [ ] multi-loop support (7 rows) — sequential + nested loop slots.
 - [ ] while-form `loop` / `if` blocks (6 rows) — path conditions.
-- [ ] integer xor in addresses (bitonic partner indexing) — bitvector
-      side-channel or pattern lift.
+      `if` blocks landed with multipath (L2). The COUNTED while-form
+      loop (a python `while i < N` over a counter) landed 2026-09-10,
+      lifted to the `for` slot; see
+      `evaluation/CUTILE_COUNTED_WHILE_LOOP.md`. At L2 the row counts
+      above are stale: what remains of this item is one genuinely
+      data-dependent walk (streamk `first_wave`).
+- [x] integer xor in addresses (bitonic partner indexing) — landed
+      2026-09-10 as an exact arithmetic lowering, not a bitvector
+      side-channel; see `evaluation/CUTILE_BITWISE_ADDRESSING.md`.
 - [ ] C2 confirmation: mini tile-op evaluator (29-op numpy-like
       surface) or real-launch replay on the 4090 — restores the
       confirmed/unconfirmed distinction for cuTile race SATs.

@@ -174,22 +174,33 @@ LOADED_GUARD = _ir(
     "$10: Token = " + _STORE.format(idx="$1"),
 )
 
-WHILE_LOOP = _ir(
-    "$20: Tile[int32,()] = loop (with k.0: Tile[int32,()] = $c0)",
-    "do (k.0: Tile[int32,()])",
-    "    (k.0: Tile[int32,()]):",
-    '    $21: Tile[bool_,()] = raw_cmp(lhs=k.0, rhs=n, fn="lt")',
-    "    if(cond=$21)",
-    "    then",
-    "        ():",
-    "        yield ",
-    "    else",
-    "        ():",
-    "        break k.0",
-    "    $22: Token = " + _STORE.format(idx="k.0"),
-    "    $23: Tile[int32,()] = " + _ARITH.format(a="k.0", b="$c1", fn="add"),
-    "    continue $23",
-)
+
+def _while_loop(advance="min", extra=()):
+    """The while-form ``loop`` construct. ``advance="add"`` makes it the
+    COUNTED shape (a python ``while k < n`` over a counter, lifted to
+    ``for k in range(0, n, 1)``); any other advance is a genuine
+    data-dependent walk (stream-K's iterator) and keeps the refusal."""
+    return _ir(
+        "$20: Tile[int32,()] = loop (with k.0: Tile[int32,()] = $c0)",
+        "do (k.0: Tile[int32,()])",
+        "    (k.0: Tile[int32,()]):",
+        '    $21: Tile[bool_,()] = raw_cmp(lhs=k.0, rhs=n, fn="lt")',
+        "    if(cond=$21)",
+        "    then",
+        "        ():",
+        "        yield ",
+        "    else",
+        "        ():",
+        "        break k.0",
+        "    $22: Token = " + _STORE.format(idx="k.0"),
+        *extra,
+        "    $23: Tile[int32,()] = " + _ARITH.format(a="k.0", b="$c1", fn=advance),
+        "    continue $23",
+    )
+
+
+WHILE_LOOP = _while_loop()
+COUNTED_WHILE_LOOP = _while_loop(advance="add")
 
 
 # ───────────────────── single-path unchanged ─────────────────────
@@ -276,6 +287,39 @@ def test_while_form_loop_still_refused_at_l2():
     with pytest.raises(UnsupportedTTIR, match="while-form") as ei:
         _mp(WHILE_LOOP)
     assert ei.value.kind == "control-flow"
+
+
+def test_counted_while_loop_takes_the_range_of_its_test_in_both_modes():
+    """The counted shape is a reader capability, not a ladder rung: it
+    lifts identically at L0/L1 (single path) and at L2 (multipath)."""
+    a = parse_cutile_ir(COUNTED_WHILE_LOOP, "t")
+    b = _mp(COUNTED_WHILE_LOOP)
+    for g, loop in ((a, a.loop), (b, b.loops[0] if b.loops else None)):
+        assert loop is not None
+        assert (loop.loop_ssa, loop.induction_var) == ("k.0", "k.0")
+        assert (loop.lower, loop.upper, loop.step) == (
+            Const(0),
+            Param("n"),
+            Const(1),
+        )
+        (store,) = g.accesses
+        assert store.kind == "store"
+    assert replace(a, multipath=True, loops=[a.loop]) == replace(
+        b, accesses=[replace(x, loops=()) for x in b.accesses]
+    )
+
+
+def test_counted_while_loop_inherits_the_cross_iteration_obligation():
+    """The lift buys the `for` semantics AND the `for` obligations: this
+    body's store is not chained through a carried token, so successive
+    iterations have no verified serial memory boundary and the encoder
+    abstains instead of proving. (The token-chained counterpart, which
+    does prove and whose write-sharing twin still races, is pinned in
+    tests/unit/test_cutile_reader.py.)"""
+    g = _mp(COUNTED_WHILE_LOOP)
+    with pytest.raises(UnsupportedTTIR) as ei:
+        _t1(g, {"n": 3})
+    assert ei.value.kind == "token-order"
 
 
 # ───────────────────── if blocks ─────────────────────

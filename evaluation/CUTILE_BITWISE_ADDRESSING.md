@@ -79,3 +79,9 @@ their own work.
 Adoption note: the pinned evaluation numbers are unchanged by this commit.
 A cuTile population that includes the two new proofs requires a new pinned
 run.
+
+Superseded in part (2026-09-10): the six while-form loop abstentions this
+record leaves open were revisited in
+`evaluation/CUTILE_COUNTED_WHILE_LOOP.md`, which closes four of them and
+moves a fifth into the loaded-value group. The counts above stand as the
+state at this commit.

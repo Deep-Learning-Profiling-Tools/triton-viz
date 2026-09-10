@@ -25,7 +25,10 @@ Semantic mapping (why this is a thin front-end, not a new model):
 - Structured ``for $i in range(a, b, c)`` loops map to the single
   :class:`LoopInfo` slot with Term bounds; loop-carried non-token values
   bind to :class:`DataDep` (they are tile VALUES — cuTile advances
-  addresses by index arithmetic, not carried pointers).
+  addresses by index arithmetic, not carried pointers). The COUNTED
+  ``loop`` construct the frontend emits for a python ``while i < N``
+  (see :func:`_counted_while_shape`) carries the same trip count and
+  takes the same slot.
 - Tokens contribute a guarded SSA partial order in ``AccessGraph.token_order``:
   memory operations inherit their input token's ancestors and add themselves;
   ``join_tokens`` merges ancestors without ordering its independent inputs.
@@ -910,9 +913,45 @@ def _handle_for(
         raise UnsupportedTTIR(
             f"line {i + 1}: range() with {len(bounds)} bounds", kind="parse"
         )
-    where = f"line {i + 1} (for {iv})"
+    return _lift_counted_loop(
+        lines,
+        i,
+        indent,
+        results,
+        st,
+        iv=iv,
+        bounds=bounds,
+        carried_text=fm.group(3) or "",
+        where=f"line {i + 1} (for {iv})",
+        form="for",
+        exit_test_end=None,
+    )
+
+
+def _lift_counted_loop(
+    lines: list[str],
+    i: int,
+    indent: int,
+    results: list[tuple[str, str]],
+    st: _State,
+    *,
+    iv: str,
+    bounds: list[Term],
+    carried_text: str,
+    where: str,
+    form: str,
+    exit_test_end: int | None,
+) -> int:
+    """Lift a loop whose trip count is ``range(lower, upper, step)``.
+
+    Shared by the ``for`` construct and by the counted ``loop`` form the
+    cuTile frontend emits for a Python ``while`` (see
+    :func:`_counted_while_shape`). ``exit_test_end`` is the index of the
+    first body line past the counted loop's top test; ``None`` for a
+    ``for``, whose body starts right after the parameter header.
+    """
     saved_env = st.env.copy()
-    carried = _carried_values(fm.group(3) or "", st, where)
+    carried = _carried_values(carried_text, st, where)
     if len(results) != len(carried):
         _token_failure(f"{where}: loop result arity does not match carried values")
     trip_count = None
@@ -962,6 +1001,11 @@ def _handle_for(
                 else:
                     st.env[pname] = DataDep("loop-carried value")
             j += 1
+    if exit_test_end is not None:
+        # `_counted_while_shape` validated and located the top test; its
+        # comparison and `if`/`then`/`else` block carry no memory access
+        # and no value the body reads, so the lift steps over them.
+        j = exit_test_end
     st.in_loop = True
     saved_path, saved_guarded = st.path, st.guarded
     st.loop_stack.append(iv)
@@ -977,8 +1021,8 @@ def _handle_for(
         and lines[j].strip().split(" ", 1)[0] in ("yield", "break")
     ):
         raise UnsupportedTTIR(
-            f"line {j + 1}: `{lines[j].strip().split(' ')[0]}` inside a `for` "
-            "body is not modeled",
+            f"line {j + 1}: `{lines[j].strip().split(' ')[0]}` inside a "
+            f"`{form}` body is not modeled",
             kind="control-flow",
         )
     if j == 0 or lines[j - 1].strip().split(" ", 1)[0] != "continue":
@@ -1018,6 +1062,235 @@ def _handle_for(
     return j
 
 
+_RE_INT_SCALAR = re.compile(r"^(?:const )?Tile\[u?int\d+,\(\)\]$")
+
+
+def _nesting_scan(
+    lines: list[str], start: int, body_indent: int
+) -> tuple[int, list[int], bool]:
+    """Walk a loop body's lines, separating this loop's own terminators
+    from those of nested constructs.
+
+    Returns ``(end, continues, has_break)``: the index one past the body,
+    the indices of the ``continue`` lines that terminate THIS body, and
+    whether any ``break`` targets THIS loop. A ``break`` inside a nested
+    `if` region still exits the enclosing loop, so only a nested ``loop``
+    / ``for`` / combiner ``do`` block shields a terminator from this
+    loop; the scan tracks exactly those.
+    """
+    n = len(lines)
+    shields: list[int] = []
+    continues: list[int] = []
+    has_break = False
+    k = start
+    while k < n:
+        raw = lines[k]
+        cur = len(raw) - len(raw.lstrip())
+        if cur < body_indent:
+            break
+        while shields and cur <= shields[-1]:
+            shields.pop()
+        line = raw.strip()
+        head = line.split(" ", 1)[0]
+        if not shields:
+            if head == "break":
+                has_break = True
+            elif head == "continue":
+                continues.append(k)
+        _lhs, eq, rhs = line.partition(" = ")
+        opened = rhs if eq else line
+        if _RE_FOR.match(opened) or _RE_LOOP.match(opened) or opened.startswith("do ("):
+            shields.append(cur)
+        k += 1
+    return k, continues, has_break
+
+
+def _counted_while_shape(
+    lines: list[str],
+    i: int,
+    indent: int,
+    results: list[tuple[str, str]],
+    lm: re.Match,
+    st: _State,
+) -> dict[str, Any] | None:
+    """Recognize the counted form of the while-form ``loop`` construct.
+
+    The cuTile frontend lowers a Python ``while i < N:`` over an integer
+    counter into a ``loop`` whose body opens with the test and exits
+    through it. Exactly this shape is lifted to the ``for`` semantics:
+
+    * one integer scalar carried slot is the induction variable, named by
+      the FIRST body line, ``raw_cmp(lhs=<induction>, rhs=<bound>,
+      fn="lt")``, immediately consumed by ``if(cond=...)`` whose ``then``
+      arm is a bare ``yield`` and whose ``else`` arm ``break``s;
+    * the bound is loop invariant. It is read on the first body line, so
+      by SSA dominance it is defined outside the loop; the scan also
+      rejects a bound that names a carried parameter;
+    * the ``break`` operands repeat the carried parameters in order, so a
+      loop result is the carried value at the top of the exiting
+      iteration, which is what :func:`_lift_counted_loop` already
+      computes for a ``for`` result;
+    * the body has exactly one terminator of its own, the trailing
+      ``continue``, and no ``break`` outside a nested loop. This is what
+      makes the trip count ``range(init, bound, step)``: without single
+      exit the zero-trip rule would DELETE in-loop accesses that a real
+      early exit still performs;
+    * the induction slot's ``continue`` operand is ``<induction> + K``
+      for a positive integer constant ``K`` defined outside the loop.
+
+    Returns the keyword arguments for :func:`_lift_counted_loop`, or
+    ``None`` when any clause fails, in which case ``_handle_loop`` falls
+    back to the await shape and to the byte-identical control-flow
+    refusal.
+    """
+    n = len(lines)
+    items = [c for c in _split_top(lm.group(1) or "") if c.strip()]
+    if not items or len(items) != len(results):
+        return None
+    names: list[str] = []
+    types: list[str] = []
+    inits: list[str] = []
+    for item in items:
+        lhs, sep, rhs = item.partition(" = ")
+        m = _RE_TYPED_NAME.match(lhs)
+        if not sep or m is None:
+            return None
+        names.append(_strip_prov(m.group(1)))
+        types.append(m.group(2).strip())
+        inits.append(rhs.strip())
+
+    j = i + 1
+    if j < n and lines[j].strip().startswith("do ("):
+        j += 1
+    body_indent = indent + 4
+    if j >= n:
+        return None
+    hdr = lines[j].strip()
+    if not (hdr.startswith("(") and hdr.endswith("):")):
+        return None
+    params: list[str] = []
+    for item in _split_top(hdr[1:-2]):
+        m = _RE_TYPED_NAME.match(item)
+        if m is None:
+            return None
+        params.append(_strip_prov(m.group(1)))
+    if params != names:
+        return None
+    j += 1
+
+    # the top test
+    if j >= n or len(lines[j]) - len(lines[j].lstrip()) != body_indent:
+        return None
+    lhs, eq, rhs = lines[j].strip().partition(" = ")
+    om = _RE_OP.match(rhs) if eq else None
+    m = _RE_TYPED_NAME.match(lhs)
+    if om is None or m is None or om.group(1) != "raw_cmp":
+        return None
+    cond = _strip_prov(m.group(1))
+    kw = _parse_kwargs(om.group(2))
+    if kw.get("fn") != '"lt"':
+        return None
+    induction = _strip_prov(kw.get("lhs", ""))
+    bound = _strip_prov(kw.get("rhs", ""))
+    if induction not in names or bound in names:
+        return None
+    slot = names.index(induction)
+    if not _RE_INT_SCALAR.match(types[slot]):
+        return None
+    j += 1
+
+    # `if(cond=$c)` / `then: yield` / `else: break <carried identity>`
+    im = _RE_IF.match(lines[j].strip()) if j < n else None
+    if (
+        im is None
+        or _strip_prov(im.group(1)) != cond
+        or len(lines[j]) - len(lines[j].lstrip()) != body_indent
+    ):
+        return None
+    j += 1
+    arm_indent = body_indent + 4
+    for label, terminator in (("then", "yield"), ("else", "break")):
+        if (
+            j >= n
+            or lines[j].strip() != label
+            or len(lines[j]) - len(lines[j].lstrip()) != body_indent
+        ):
+            return None
+        j += 1
+        if j < n and lines[j].strip() == "():":
+            j += 1
+        if j >= n or len(lines[j]) - len(lines[j].lstrip()) != arm_indent:
+            return None
+        arm = lines[j].strip()
+        if arm.split(" ", 1)[0] != terminator:
+            return None
+        operands = [t.strip() for t in _split_top(arm[len(terminator) :]) if t.strip()]
+        if terminator == "yield":
+            if operands:
+                return None
+        elif [_strip_prov(o) for o in operands] != names:
+            return None
+        j += 1
+
+    # the exit test's arms end at their terminator, so the body resumes at
+    # the loop's own level
+    if j >= n or len(lines[j]) - len(lines[j].lstrip()) != body_indent:
+        return None
+
+    # single exit, single `continue`, and it closes the body
+    end, continues, has_break = _nesting_scan(lines, j, body_indent)
+    if has_break or len(continues) != 1 or continues[0] != end - 1:
+        return None
+    if len(lines[end - 1]) - len(lines[end - 1].lstrip()) != body_indent:
+        return None
+    continued = [
+        t.strip()
+        for t in _split_top(lines[end - 1].strip()[len("continue") :])
+        if t.strip()
+    ]
+    if len(continued) != len(names):
+        return None
+
+    # the induction slot advances by a positive constant
+    advance = _strip_prov(continued[slot])
+    step: int | None = None
+    for k in range(j, end):
+        if len(lines[k]) - len(lines[k].lstrip()) != body_indent:
+            # the advance must be unconditional on every iteration that
+            # reaches the backedge, so it is a top-level body statement
+            continue
+        a_lhs, a_eq, a_rhs = lines[k].strip().partition(" = ")
+        a_m = _RE_TYPED_NAME.match(a_lhs) if a_eq else None
+        if a_m is None or _strip_prov(a_m.group(1)) != advance:
+            continue
+        a_om = _RE_OP.match(a_rhs)
+        if a_om is None or a_om.group(1) != "raw_binary_arith":
+            return None
+        a_kw = _parse_kwargs(a_om.group(2))
+        if a_kw.get("fn") != '"add"' or _strip_prov(a_kw.get("lhs", "")) != induction:
+            return None
+        delta = _val(st, a_kw.get("rhs", ""))
+        if not isinstance(delta, Const) or delta.value <= 0:
+            return None
+        step = delta.value
+        break
+    if step is None:
+        return None
+
+    return {
+        "iv": induction,
+        "bounds": [
+            _as_term(_val(st, inits[slot]), "loop bound"),
+            _as_term(_val(st, bound), "loop bound"),
+            Const(step),
+        ],
+        "carried_text": lm.group(1) or "",
+        "where": f"line {i + 1} (loop {induction})",
+        "form": "loop",
+        "exit_test_end": j,
+    }
+
+
 _WHILE_FORM_REFUSAL = (
     "while-form `loop` construct (carried values, data-dependent trip) is not modeled"
 )
@@ -1040,13 +1313,25 @@ def _handle_loop(
     loop-invariant value and breaks on that test, with nothing else in
     the body but value bookkeeping. The loop collapses to that one access
     stamped ``awaited`` with the EXIT predicate over its observation; the
-    encoder makes the verdict conditional on termination. A loop carrying
-    data values (a data-dependent trip count over real values: stream-K's
-    K loop, a block-sparse walk) keeps the control-flow refusal, byte for
-    byte. Applies at every ladder level: the await abstraction is a reader
-    capability, not a concretization rung.
+    encoder makes the verdict conditional on termination. Applies at
+    every ladder level: the await abstraction is a reader capability, not
+    a concretization rung.
+
+    A loop that carries data values is tried first against the COUNTED
+    shape (:func:`_counted_while_shape`), the lowering of a python
+    ``while i < N`` over an integer counter, which has an ordinary
+    ``range`` trip count and is lifted like a ``for``. Everything else -
+    a genuinely data-dependent trip count, a multi-exit walk - keeps the
+    control-flow refusal, byte for byte.
     """
     line_no = i + 1
+    shape = _counted_while_shape(lines, i, indent, results, lm, st)
+    if shape is not None:
+        if (st.in_loop or st.loop is not None) and not st.multipath:
+            raise UnsupportedTTIR(
+                f"line {line_no}: multiple/nested loops", kind="nested-loop"
+            )
+        return _lift_counted_loop(lines, i, indent, results, st, **shape)
     carried = [c for c in _split_top(lm.group(1) or "") if c.strip()]
     for c in carried:
         lhs_c, _, _init = c.partition(" = ")

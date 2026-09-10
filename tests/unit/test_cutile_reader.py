@@ -3,8 +3,9 @@
 Self-contained IR snippets (grammar-faithful to cuda-tile 1.5.0's final
 CuTile IR text) exercise the semantic mapping: tile-space addressing to
 affine terms with implicit-clip masks, the raw-pointer gather/scatter and
-atomic paths, the boolean-xor floor-division lowering, and the abstention
-discipline for integer xor and while-form loops. End-to-end pins run the
+atomic paths, the boolean-xor floor-division lowering, the counted form
+of the while-form `loop` construct, and the abstention discipline for
+integer xor and for every other while-form loop. End-to-end pins run the
 parsed graph through encode_graph and the two-copy solver — proof AND
 detection directions.
 """
@@ -301,3 +302,184 @@ def test_t0_gate_refuses_a_param_pinned_graph():
 
     g = parse_cutile_ir(_BITWISE_IR.replace("OP", "xor"), "t", params={"j": 4})
     assert g.param_pinned and not t0_linearity_gate(g)
+
+
+# ── the counted form of the while-form `loop` construct ──────────
+# cuda.tile lowers a python `while i < N:` over an integer counter into a
+# `loop` whose body opens with the test and exits through it. That exact
+# shape carries the same trip count as `for i in range(i0, N, step)`, so
+# the reader lifts it into the one LoopInfo slot; every other while-form
+# loop keeps the control-flow refusal.
+
+_LOOP_PREAMBLE = """\
+(x_0: Tile[pointer[float32],()], x_1: Tile[int32,()], x_2: Tile[int32,()], N: Tile[int32,()]):
+$token: Token = make_token()
+$0: Tile[int32,()] = assume_bounded(x=x_1, lower_bound=0, upper_bound=None)
+x{x_0, $0, x_2}: Array[float32,(?):(1)] = make_tensor_view(base_ptr=x_0, shape=($0), dynamic_strides=())
+$1: Tile[int32,()] = tile_bid(axis=0)
+$2{x_0, $0, x_2}: PartitionView[Array[float32,(?):(1)],tile_shape=(64,),order=(0,),padding_mode=PaddingMode.UNDETERMINED] = make_partition_view(array=x{x_0, $0, x_2})
+$3: Tile[float32,(64)] = typed_const(value=0)
+$i0: const Tile[int32,()] = typed_const(value=0)
+$one: const Tile[int32,()] = typed_const(value=1)
+"""
+
+# The body is written once and shared by both loop forms, so a graph
+# difference can only come from the loop lift itself. The store chains the
+# carried token, which is what gives the loop its serial memory boundary
+# (a store in a token-free loop body abstains in both forms alike).
+_LOOP_BODY = """\
+    $m1: Tile[int32,()] = raw_binary_arith(lhs=$1, rhs=N, fn="mul", rounding_mode=None, flush_to_zero=False)
+    $idx: Tile[int32,()] = raw_binary_arith(lhs=$m1, rhs=i.0, fn="add", rounding_mode=None, flush_to_zero=False)
+    $sto: Token = tile_store(view=$2{x_0, $0, x_2}, index=($idx), tile=$3, token=$tok.0, latency=None, allow_tma=None, memory_order=MemoryOrder.WEAK, memory_scope=MemoryScope.NONE)
+    $an: Tile[float32,(64)] = raw_binary_arith(lhs=acc.0, rhs=$3, fn="add", rounding_mode=None, flush_to_zero=False)
+"""
+
+_COUNTED_WHILE_IR = (
+    _LOOP_PREAMBLE
+    + """\
+$out: Tile[float32,(64)], $iout: Tile[int32,()], $tok.1: Token = loop (with acc.0: Tile[float32,(64)] = $3, i.0: Tile[int32,()] = $i0, $tok.0: Token = $token)
+do (acc.0: Tile[float32,(64)], i.0: Tile[int32,()], $tok.0: Token)
+    (acc.0: Tile[float32,(64)], i.0: Tile[int32,()], $tok.0: Token):
+    $c: Tile[bool_,()] = raw_cmp(lhs=i.0, rhs=N, fn="lt")
+    if(cond=$c)
+    then
+        ():
+        yield
+    else
+        ():
+        break acc.0, i.0, $tok.0
+"""
+    + _LOOP_BODY
+    + """\
+    $in: Tile[int32,()] = raw_binary_arith(lhs=i.0, rhs=$one, fn="add", rounding_mode=None, flush_to_zero=False)
+    continue $an, $in, $sto
+return
+"""
+)
+
+_COUNTED_FOR_IR = (
+    _LOOP_PREAMBLE
+    + """\
+$out: Tile[float32,(64)], $tok.1: Token = for i.0 in range($i0, N, $one) (with acc.0: Tile[float32,(64)] = $3, $tok.0: Token = $token)
+do (i.0: Tile[int32,()], acc.0: Tile[float32,(64)], $tok.0: Token)
+    (i.0: Tile[int32,()], acc.0: Tile[float32,(64)], $tok.0: Token):
+"""
+    + _LOOP_BODY
+    + """\
+    continue $an, $sto
+return
+"""
+)
+
+
+def _solve_loop(ir: str, n: int = 512, grid: tuple = (4, 1, 1), bound: int = 2):
+    g = parse_cutile_ir(ir, "t", multipath=True)
+    params = {"x_1": n, "x_2": 1, "N": bound}
+    tensors = {
+        "x": GlobalTensor(data_ptr=1 << 40, numel=n, elem_size=4, contiguous=True)
+    }
+    enc = encode_graph(g, params, tensors)
+    solver = TwoCopySymbolicHBSolver(
+        enc.records,
+        grid=symbolic_grid(enc, grid),
+        arange_dict=enc.arange_dict,
+        fence_order=True,
+        fence_seqs=enc.fence_seqs,
+        token_order=enc.token_order,
+    )
+    return g, solver.find_races()
+
+
+def test_counted_while_lifts_to_the_range_of_its_test():
+    from triton_viz.clients.common.ttir_reader import Param
+
+    g = parse_cutile_ir(_COUNTED_WHILE_IR, "t", multipath=True)
+    (loop,) = g.loops
+    assert loop.loop_ssa == "i.0" and loop.induction_var == "i.0"
+    assert loop.lower == Const(0)
+    assert loop.upper == Param("N")
+    assert loop.step == Const(1)
+    (ev,) = g.accesses
+    assert ev.kind == "store" and ev.loops == ("i.0",)
+
+
+def test_counted_while_and_the_equivalent_for_build_the_same_graph():
+    w = parse_cutile_ir(_COUNTED_WHILE_IR, "t", multipath=True)
+    f = parse_cutile_ir(_COUNTED_FOR_IR, "t", multipath=True)
+    assert [(a.kind, a.base_param, a.offset, a.mask, a.loops) for a in w.accesses] == [
+        (a.kind, a.base_param, a.offset, a.mask, a.loops) for a in f.accesses
+    ]
+    assert [(lp.loop_ssa, lp.lower, lp.upper, lp.step) for lp in w.loops] == [
+        (lp.loop_ssa, lp.lower, lp.upper, lp.step) for lp in f.loops
+    ]
+
+
+def test_counted_while_partitioned_by_bid_proves_clean():
+    g, found = _solve_loop(_COUNTED_WHILE_IR)
+    assert [a.kind for a in g.accesses] == ["store"]
+    assert found == []
+
+
+def test_counted_while_writing_the_same_tiles_still_reports_the_race():
+    # the negative control for the lift: dropping the bid from the tile
+    # index makes every program write tiles 0..N-1, and the loop lift must
+    # not launder that into a proof
+    racy = _COUNTED_WHILE_IR.replace("index=($idx)", "index=(i.0)")
+    _g, found = _solve_loop(racy)
+    assert found, "a counted while that write-shares its tiles must race"
+
+
+def test_counted_while_with_a_second_exit_keeps_refusing():
+    # an early `break` inside the body means the trip count is no longer
+    # the test's range: the zero-trip rule would DELETE accesses that a
+    # real early exit still performs
+    early = _COUNTED_WHILE_IR.replace(
+        "    $in: Tile[int32,()] = raw_binary_arith(lhs=i.0, rhs=$one",
+        "    if(cond=$c)\n"
+        "    then\n"
+        "        ():\n"
+        "        break acc.0, i.0, $tok.0\n"
+        "    else\n"
+        "        ():\n"
+        "        yield \n"
+        "    $in: Tile[int32,()] = raw_binary_arith(lhs=i.0, rhs=$one",
+    )
+    with pytest.raises(UnsupportedTTIR) as exc:
+        parse_cutile_ir(early, "t", multipath=True)
+    assert exc.value.kind == "control-flow"
+
+
+def test_counted_while_with_a_runtime_step_keeps_refusing():
+    runtime = _COUNTED_WHILE_IR.replace(
+        'lhs=i.0, rhs=$one, fn="add"', 'lhs=i.0, rhs=N, fn="add"'
+    )
+    with pytest.raises(UnsupportedTTIR) as exc:
+        parse_cutile_ir(runtime, "t", multipath=True)
+    assert exc.value.kind == "control-flow"
+
+
+def test_counted_while_with_a_loop_carried_bound_keeps_refusing():
+    carried_bound = _COUNTED_WHILE_IR.replace(
+        'raw_cmp(lhs=i.0, rhs=N, fn="lt")', 'raw_cmp(lhs=i.0, rhs=acc.0, fn="lt")'
+    )
+    with pytest.raises(UnsupportedTTIR) as exc:
+        parse_cutile_ir(carried_bound, "t", multipath=True)
+    assert exc.value.kind == "control-flow"
+
+
+def test_counted_while_break_must_repeat_the_carried_slots():
+    swapped = _COUNTED_WHILE_IR.replace(
+        "        break acc.0, i.0, $tok.0", "        break acc.0, acc.0, $tok.0"
+    )
+    with pytest.raises(UnsupportedTTIR) as exc:
+        parse_cutile_ir(swapped, "t", multipath=True)
+    assert exc.value.kind == "control-flow"
+
+
+def test_counted_while_zero_trip_has_no_footprint():
+    zero = _COUNTED_WHILE_IR.replace(
+        '$c: Tile[bool_,()] = raw_cmp(lhs=i.0, rhs=N, fn="lt")',
+        '$c: Tile[bool_,()] = raw_cmp(lhs=i.0, rhs=$i0, fn="lt")',
+    )
+    g = parse_cutile_ir(zero, "t", multipath=True)
+    assert g.accesses == []
