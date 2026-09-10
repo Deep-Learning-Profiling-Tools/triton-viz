@@ -1,0 +1,32 @@
+{
+  "kind": "correctness diagnostic provenance; no timing adoption",
+  "files": {
+    "triton_viz/clients/common/ttir_reader.py": "adab92aea4c6d26d6c3b27d20788d32a3ef79460b35d60394947d91d7817b655",
+    "evaluation/diagnose_dot_c.py": "3b29c6465d58445e3d08cb64e71223ed3c77e74fd1c4df181e1fee4f2583a33a",
+    "tests/unit/test_ttir_dot_dependency.py": "428ab541fe48a3c74f43c0b65dd76702ae631f2449cf8bb0cd7518f388e2b908",
+    "evaluation/diagnostics/dot-c-20260907/nonvarlen.json": "205c7dd2c45ffdbeeaf16b359207cba9756e8278459a678ca24cbd2304121327",
+    "evaluation/diagnostics/dot-c-20260907/varlen.json": "a6dc77474fea35ac22a54296446235b2ce4916d7875ff139774c7dad6269b91a",
+    "evaluation/diagnostics/dot-c-20260907/executed-diagnose-dot-c.py.txt": "344bea7e7486f54a2259c32493cbd8fc6e995f81cfe73abccd061ee338ff7100"
+  },
+  "frozen_manifest": {
+    "path": "/home/hwu27/workspace/triton-viz/evaluation/results/final-pin-31c48f5-20260907/sequence/L2/manifest.json",
+    "sha256": "2794d107c10db4df2b19d6f3f3f765b2a21bd6a5935568e43ea2be155705f4b4",
+    "execution_commit": "31c48f5390301d2b948fed25fd7e85c2836b1962",
+    "matching_files": {
+      "kernels/fla_specs.json": "f968e82a951bb9c81d30f0372143377b6866d01174194c1980c6a19fa7c5132b",
+      "kernels/fla_values.npz": "3ea59bf7a5ca4eebfd506230cfbd2b31bbdf892c2ee138aa3ca76ecb99ffb82b"
+    }
+  },
+  "tests": {
+    "passed": 96,
+    "focused_dot_tests": 39,
+    "command": "python -m pytest tests/unit/test_ttir_dot_dependency.py tests/unit/test_ttir_reader_datadep_policy.py tests/unit/test_compiled_race_detector_ttir.py tests/unit/test_compiled_sanitizer_reader.py tests/unit/test_t1_global_races.py -q"
+  },
+  "scope": "this-params-any-grid + content; Loaded differential check remains unsupported",
+  "executed_script": {
+    "path": "evaluation/diagnostics/dot-c-20260907/executed-diagnose-dot-c.py.txt",
+    "sha256": "344bea7e7486f54a2259c32493cbd8fc6e995f81cfe73abccd061ee338ff7100",
+    "formatted_runner_ast_identical": true
+  },
+  "hooks": "All applicable hooks passed after formatting; mypy, Ruff, spelling, size and whitespace checks included."
+}

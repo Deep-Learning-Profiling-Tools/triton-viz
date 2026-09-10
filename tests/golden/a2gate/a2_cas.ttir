@@ -1,0 +1,16 @@
+#loc = loc("/home/hwu27/workspace/triton-viz/tests/golden/a2gate/generate_golden.py":37:0)
+#loc4 = loc("p_ptr"(#loc))
+#loc5 = loc("out_ptr"(#loc))
+module {
+  tt.func public @a2_cas_kernel(%p_ptr: !tt.ptr<i32> loc("p_ptr"(#loc)), %out_ptr: !tt.ptr<i32> loc("out_ptr"(#loc))) attributes {noinline = false} {
+    %old = arith.constant 0 : i32 loc(#loc6)
+    %old_0 = arith.constant 1 : i32 loc(#loc6)
+    %old_1 = tt.atomic_cas acq_rel, gpu, %p_ptr, %old, %old_0 : (!tt.ptr<i32>, i32, i32) -> i32 loc(#loc6)
+    tt.store %out_ptr, %old_1 : !tt.ptr<i32> loc(#loc2)
+    tt.return loc(#loc3)
+  } loc(#loc)
+} loc(#loc)
+#loc1 = loc("/home/hwu27/workspace/triton-viz/tests/golden/a2gate/generate_golden.py":38:34)
+#loc2 = loc("/home/hwu27/workspace/triton-viz/tests/golden/a2gate/generate_golden.py":39:22)
+#loc3 = loc("/home/hwu27/workspace/triton-viz/tests/golden/a2gate/generate_golden.py":39:4)
+#loc6 = loc("old"(#loc1))

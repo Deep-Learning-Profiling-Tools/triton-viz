@@ -1,0 +1,208 @@
+"""Replay the two archived FLA static graphs with baseline/production readers.
+
+This is a correctness diagnostic, not a benchmark. It never compiles TTIR
+or launches a GPU kernel. Run each invocation under an outer process limit.
+Integer inputs restore the saved capture values; other inputs regenerate at
+seed zero and must match the archived earlier diagnostic's byte hashes.
+"""
+
+from __future__ import annotations
+
+import argparse
+import ast
+import dataclasses
+import hashlib
+import inspect
+import json
+from pathlib import Path
+import subprocess
+
+
+def sha(path):
+    return hashlib.sha256(Path(path).read_bytes()).hexdigest()
+
+
+def main():
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--baseline-ref", required=True)
+    parser.add_argument("--cache-root", type=Path, required=True)
+    parser.add_argument("--prior-diagnostic-dir", type=Path, required=True)
+    parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--varlen", action="store_true")
+    options = parser.parse_args()
+    if options.output.exists():
+        parser.error("output exists; retain previous diagnostic evidence")
+
+    import torch
+    from evaluation.kernels import load
+    from evaluation.harness import _static_track
+    from triton_viz.clients.common import ttir_reader as reader
+    from triton_viz.clients.race_detector.compiled import client
+    from triton_viz.clients.race_detector.ladder import LadderLevel
+    from triton_viz.core.config import config
+
+    config.race_detector_fence_order = True
+    root = Path(reader.__file__).resolve().parents[3]
+    baseline_source = subprocess.check_output(
+        [
+            "git",
+            "-C",
+            str(root),
+            "show",
+            options.baseline_ref + ":triton_viz/clients/common/ttir_reader.py",
+        ],
+        text=True,
+    )
+    baseline_node = next(
+        node
+        for node in ast.parse(baseline_source).body
+        if isinstance(node, ast.FunctionDef) and node.name == "parse_ttir"
+    )
+    namespace = dict(vars(reader))
+    exec(
+        compile(
+            ast.get_source_segment(baseline_source, baseline_node),
+            "<baseline-parse-ttir>",
+            "exec",
+        ),
+        namespace,
+    )
+    baseline_parse = namespace["parse_ttir"]
+    candidate_parse = reader.parse_ttir
+    # The baseline calls the current module's helpers. Assert all top-level
+    # functions it can consult are unchanged so only parse_ttir differs.
+    for node in ast.parse(baseline_source).body:
+        if isinstance(node, ast.FunctionDef) and node.name != "parse_ttir":
+            before = ast.dump(node, include_attributes=False)
+            after = ast.dump(
+                ast.parse(inspect.getsource(getattr(reader, node.name))).body[0],
+                include_attributes=False,
+            )
+            assert before == after, "baseline helper changed: " + node.name
+
+    stem = "fla_log_linear_attn_chunk" + ("_varlen" if options.varlen else "")
+    name = stem + "__chunkwise_bwd_kernel_diag"
+    spec = next(spec for spec in load("fla").specs if spec.name == name)
+    args = spec.make_args(0)
+    assert all(
+        value.device.type == "cpu" for value in args if isinstance(value, torch.Tensor)
+    )
+
+    def describe(value):
+        if isinstance(value, torch.Tensor):
+            return {
+                "shape": list(value.shape),
+                "stride": list(value.stride()),
+                "dtype": str(value.dtype),
+                "device": str(value.device),
+                "sha256": hashlib.sha256(
+                    value.detach().contiguous().view(torch.uint8).numpy().tobytes()
+                ).hexdigest(),
+            }
+        return {"scalar": value}
+
+    inputs = [describe(value) for value in args]
+    old_name = (
+        "tt_dot_full_static_probe" + ("_varlen" if options.varlen else "") + ".json"
+    )
+    prior_path = options.prior_diagnostic_dir / old_name
+    prior = json.loads(prior_path.read_text())
+    assert (
+        inputs == prior["inputs"]
+    ), "regenerated inputs differ from archived diagnostic"
+    expected_sha = prior["ttir_sha256"]
+    candidates = [
+        path
+        for path in options.cache_root.glob("*/chunkwise_bwd_kernel_diag.ttir")
+        if sha(path) == expected_sha
+    ]
+    assert candidates, "the exact archived TTIR is required"
+    cached = candidates[0]
+    ttir = cached.read_text()
+    fixed_spec = dataclasses.replace(spec, make_args=lambda seed: args)
+    result = {
+        "kind": "static correctness diagnostic; not performance data",
+        "name": name,
+        "baseline_ref": options.baseline_ref,
+        "candidate_parent": subprocess.check_output(
+            ["git", "-C", str(root), "rev-parse", "HEAD"], text=True
+        ).strip(),
+        "candidate_reader_sha256": sha(reader.__file__),
+        "baseline_reader_sha256": hashlib.sha256(baseline_source.encode()).hexdigest(),
+        "script_sha256": sha(__file__),
+        "ttir_path": str(cached),
+        "ttir_sha256": expected_sha,
+        "prior_diagnostic_sha256": sha(prior_path),
+        "specs_sha256": sha(root / "evaluation/kernels/fla_specs.json"),
+        "values_sidecar_sha256": sha(root / "evaluation/kernels/fla_values.npz"),
+        "kernel_source_sha256": sha(inspect.getsourcefile(spec.kernel_fn.fn)),
+        "seed": 0,
+        "grid": spec.grid,
+        "constexprs": spec.constexprs,
+        "inputs": inputs,
+        "single_path": {},
+        "accesses": {},
+        "static": {},
+    }
+    try:
+        for label, parse in (
+            ("baseline", baseline_parse),
+            ("candidate", candidate_parse),
+        ):
+            try:
+                parse(ttir)
+            except reader.UnsupportedTTIR as error:
+                result["single_path"][label] = {
+                    "kind": error.kind,
+                    "reason": str(error),
+                }
+            else:
+                raise AssertionError("expected unchanged single-path refusal")
+            graph = parse(ttir, multipath=True)
+            result["accesses"][label] = [
+                dict(dataclasses.asdict(access), deps=getattr(access, "deps", ()))
+                for access in graph.accesses
+            ]
+            reader.parse_ttir = client.parse_ttir = parse
+            result["static"][label] = _static_track(fixed_spec, ttir, 0, LadderLevel.L2)
+            assert inputs == [
+                describe(value) for value in args
+            ], "diagnostic mutated input bytes"
+            print(label, json.dumps(result["static"][label], default=str), flush=True)
+    finally:
+        reader.parse_ttir = client.parse_ttir = candidate_parse
+
+    assert result["single_path"]["baseline"] == result["single_path"]["candidate"]
+    assert result["single_path"]["baseline"]["kind"] == "indirect-address"
+    changed = []
+    before, after = result["accesses"]["baseline"], result["accesses"]["candidate"]
+    assert len(before) == len(after)
+    for index, (left, right) in enumerate(zip(before, after)):
+        if left != right:
+            assert {key for key in left if left[key] != right[key]} == {"deps"}
+            changed.append(
+                {
+                    "index": index,
+                    "source_line": right["loc"]["line"],
+                    "before": left["deps"],
+                    "after": right["deps"],
+                }
+            )
+    assert {item["source_line"] for item in changed} == {1439, 1440}, changed
+    baseline, candidate = result["static"]["baseline"], result["static"]["candidate"]
+    assert baseline["status"] == "races" and baseline["n_reports"] == 2
+    assert {witness["race_type"] for witness in baseline["witnesses"]} == {"WAR"}
+    assert candidate["status"] == "ok" and candidate["n_reports"] == 0
+    result["changed_dependencies"] = changed
+    result["input_bytes_unchanged"] = True
+    result["passed"] = True
+    options.output.parent.mkdir(parents=True, exist_ok=True)
+    options.output.write_text(json.dumps(result, indent=2, default=str) + "\n")
+    print(
+        "PASS: exactly dq/dv dependencies changed; two WARs become a scoped proof.",
+        flush=True,
+    )
+
+
+if __name__ == "__main__":
+    main()

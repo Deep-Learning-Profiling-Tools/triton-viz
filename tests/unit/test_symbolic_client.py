@@ -26,6 +26,7 @@ from triton_viz.clients.symbolic_engine import (
     LoadSymbolicExpr,
     StoreSymbolicExpr,
     _range_to_iterator_constraint,
+    _triton_frame_dirs,
 )
 from triton_viz.core.data import Sort
 from triton_viz.core.patch import LoopSite, loop_file_token
@@ -161,6 +162,25 @@ def test_reduce_expr_eval(op: str, data):
     assert cast(IntNumRef, result).as_long() == getattr(builtins, op)(data)
 
 
+def test_cumsum_overrider_defaults_axis_like_tl_cumsum():
+    # tilebench radix_sort regression: the tl-module patch intercepts
+    # BEFORE triton binds tl.cumsum's own defaults, so a bare
+    # tl.cumsum(x) reaches the overrider as a single positional arg —
+    # the overrider must carry axis=0/reverse=False/dtype=None itself
+    # instead of requiring axis (which aborted the dynamic track with
+    # "missing 1 required positional argument: 'axis'").
+    import numpy as np
+
+    client = _LoopSiteSymbolicClient()
+    input_arr = SymbolicExpr.create(
+        "const", np.array([1, 0, 1, 1]), block_type(INT32, [4])
+    )
+    expr = client._op_cumsum_overrider(input_arr)
+    assert expr.op == "cumsum"
+    assert int(expr.axis.to_py()) == 0
+    assert np.array_equal(expr.concretize().data, [1, 1, 2, 3])
+
+
 # ======== Basic Symbolic Expr Operations Tests =========
 
 
@@ -208,11 +228,14 @@ def test_basic_expr_pid_eval(axis, expected_pid):
 
 @pytest.mark.parametrize("start,end", [(4, 8), (0, 4)])
 def test_basic_expr_arange_eval(start, end):
-    # Test that arange expr produces a named symbolic variable with range constraints.
+    # Test that arange expr produces a named symbolic variable with range
+    # constraints. The name is suffixed with the creation site (independent
+    # same-range arange instances must not share a summary var), so only the prefix
+    # is stable.
     arange_expr = SymbolicExpr.create("arange", INT32, start, end)
     result, constraints = arange_expr.eval(simplify_constraints=False)
     result = cast(ArithRef, result)
-    assert result.decl().name() == f"arange_{start}_{end}"
+    assert result.decl().name().startswith(f"arange_{start}_{end}")
     assert constraints is not None
     constraints_str = str(constraints)
     assert f"{result} >= {start}" in constraints_str
@@ -766,14 +789,89 @@ def test_load_dtype_block_of_pointers():
 
 
 def test_store_dtype_block_of_pointers():
-    """tl.store on a block of pointers should not derive a dtype (store returns None).
+    """tl.store on a block of pointers should derive its element dtype from
+    the value (or from the pointer's element type when ptr is a scalar
+    pointer). The race detector relies on this to size byte-overlap
+    predicates correctly. See StoreSymbolicExpr.__init__.
 
     ptr dtype: block_type(pointer<fp32>, [1, 16])
-    expected store dtype: None
+    expected store dtype: fp32 (unpacked from the value's block_type)
     """
     ptr = ConstSymbolicExpr(
         "const", value=0, dtype=block_type(pointer_type(FLOAT32), [1, 16])
     )
     value = ConstSymbolicExpr("const", value=0, dtype=block_type(FLOAT32, [1, 16]))
     store = StoreSymbolicExpr("store", ptr, value)
-    assert store.dtype is None, f"Expected None, got {store.dtype}"
+    assert store.dtype == FLOAT32, f"Expected FLOAT32, got {store.dtype}"
+    assert store.shape == (1, 16), f"Expected shape (1, 16), got {store.shape}"
+
+
+# ======== Scalar Truthiness Frame Classification Tests ===========
+
+
+def _bool_from_frame(filename: str, obj) -> bool:
+    """Call bool(obj) from a frame whose co_filename is ``filename`` — the
+    initiator frame the truthiness classifier sees (compile() needs no real
+    file at that path)."""
+    code = compile("def probe(x):\n    return bool(x)\n", filename, "exec")
+    namespace: dict = {}
+    exec(code, namespace)
+    return namespace["probe"](obj)
+
+
+def _valueless_scalar_expr() -> SymbolicExpr:
+    # atomic_cas results have no concrete value: concretize() is undefined.
+    return SymbolicExpr.create(
+        "atomic_cas",
+        ConstSymbolicExpr("const", value=0, dtype=pointer_type(INT32)),
+        ConstSymbolicExpr("const", value=0, dtype=INT32),
+        ConstSymbolicExpr("const", value=1, dtype=INT32),
+    )
+
+
+def test_truthiness_frontend_plumbing_is_object_truthy():
+    """Frontend plumbing (semantic.py / core.py) runs at compile time in
+    compiled Triton, where ``bool(tensor)`` is object truthiness: its
+    None-guards must see "present" both for a value-less CAS-derived scalar
+    (whose concretization is undefined) and for a concrete FALSY scalar —
+    ``other.handle if other else None`` must not drop a user-provided
+    ``other=0``."""
+    _, _, plumbing_files = _triton_frame_dirs()
+    assert plumbing_files
+    for plumbing_file in plumbing_files:
+        assert _bool_from_frame(plumbing_file, _valueless_scalar_expr().data) is True
+        falsy = ConstSymbolicExpr("const", value=0, dtype=INT32)
+        assert _bool_from_frame(plumbing_file, falsy.data) is True
+
+
+def test_truthiness_triton_tree_kernel_code_uses_concrete_value():
+    """Kernel code that happens to live under the triton package tree
+    (vendored kernels, @jit helpers like language/standard.py) branches on
+    the VALUE: a concrete scalar must yield its real truthiness there, not
+    an unconditionally forced True. Regression test: the classifier used to
+    treat every triton-package initiator as plumbing, silently capturing
+    the wrong branch."""
+    triton_pkg_dir, _, plumbing_files = _triton_frame_dirs()
+    vendored = os.path.join(triton_pkg_dir, "tools", "vendored_kernel.py")
+    jit_helper = os.path.join(triton_pkg_dir, "language", "standard.py")
+    for kernel_file in (vendored, jit_helper):
+        assert kernel_file not in plumbing_files
+        falsy = ConstSymbolicExpr("const", value=0, dtype=INT32)
+        truthy = ConstSymbolicExpr("const", value=1, dtype=INT32)
+        assert _bool_from_frame(kernel_file, falsy.data) is False
+        assert _bool_from_frame(kernel_file, truthy.data) is True
+
+
+def test_truthiness_triton_tree_valueless_scalar_fails_loudly():
+    """When the engine cannot know the value of a kernel-level branch
+    condition it must fail loudly, never silently pick a branch (clients
+    with a scalar-concretize observer get to mark unsupported first)."""
+    triton_pkg_dir, _, _ = _triton_frame_dirs()
+    vendored = os.path.join(triton_pkg_dir, "tools", "vendored_kernel.py")
+    with pytest.raises(NotImplementedError):
+        _bool_from_frame(vendored, _valueless_scalar_expr().data)
+
+
+def test_truthiness_user_code_keeps_concrete_value_semantics():
+    assert bool(ConstSymbolicExpr("const", value=0, dtype=INT32).data) is False
+    assert bool(ConstSymbolicExpr("const", value=1, dtype=INT32).data) is True

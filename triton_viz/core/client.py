@@ -141,6 +141,22 @@ class ClientManager:
             )
             if not duplicate:
                 self.clients[new_client.NAME] = new_client
+        # A STANDALONE client (e.g. the compiled-mode race detector) skips the
+        # interpreted run via pre_run_callback() == False. Because pre_run is
+        # all()-combined across clients, that would suppress every co-registered
+        # client's capture. Reject the composition up front rather than
+        # silently dropping the other clients' blocks.
+        standalone = [
+            c for c in self.clients.values() if getattr(c, "STANDALONE", False)
+        ]
+        if standalone and len(self.clients) > 1:
+            others = [c.NAME for c in self.clients.values() if c not in standalone]
+            raise RuntimeError(
+                f"{standalone[0].__class__.__name__} runs standalone and cannot "
+                f"be composed with other trace clients ({', '.join(others)}); its "
+                "pre_run_callback skips the interpreted run, which would suppress "
+                "their capture. Trace it on its own @triton_viz.trace(...)."
+            )
 
     @contextmanager
     def patch_warmup(self, jit_fn):

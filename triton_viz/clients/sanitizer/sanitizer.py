@@ -67,13 +67,34 @@ class Sanitizer(Client):
 
     def __new__(cls: type[SanitizerT], *args: Any, **kwargs: Any) -> SanitizerT:
         if cls is Sanitizer:
+            # Torch-style dual mode: Sanitizer() is eager, Sanitizer(compile=
+            # True) is the static TTIR analyzer. The disable flag wins over the
+            # mode: when cfg.enable_sanitizer is off both spellings collapse to
+            # NullSanitizer, so an explicit Sanitizer(compile=True) under
+            # ENABLE_SANITIZER=0 stays inert (trace() then leaves the kernel
+            # untraced, since NullSanitizer IS a Sanitizer) instead of warming
+            # up and aborting. CompiledSanitizer is a plain Client — NOT a
+            # Sanitizer subclass — so Python does not re-invoke __init__ on it.
+            compile_mode = kwargs.pop("compile", False)
+            if compile_mode and cfg.enable_sanitizer:
+                from .compiled.client import CompiledSanitizer
+
+                # CompiledSanitizer is NOT a Sanitizer subclass, so Python does
+                # not auto-invoke __init__ on the returned object — do it here.
+                compiled_obj = object.__new__(CompiledSanitizer)
+                CompiledSanitizer.__init__(compiled_obj, *args, **kwargs)
+                return cast(SanitizerT, compiled_obj)
+            # Eager / disabled paths: the target IS a Sanitizer subclass, so
+            # Python re-invokes its __init__ with the ORIGINAL call kwargs
+            # (which still carry any `compile=` — the pop above only touched our
+            # local copy). Return the bare instance and let that automatic
+            # __init__ run; calling __init__ here too would double-initialize.
+            # The subclass __init__ tolerates and ignores a stray `compile`.
             target_cls = cast(
                 type["Sanitizer"],
                 SymbolicSanitizer if cfg.enable_sanitizer else NullSanitizer,
             )
-            obj = object.__new__(target_cls)
-            cast(Any, target_cls).__init__(obj, *args, **kwargs)
-            return cast(SanitizerT, obj)
+            return cast(SanitizerT, object.__new__(target_cls))
         return cast(SanitizerT, object.__new__(cls))
 
     def __init__(self, abort_on_error: bool = True, *args, **kwargs):
@@ -154,7 +175,11 @@ _fn_symbolic_cache_set: set[_FnSymbolicCache] = set()
 
 
 class SymbolicSanitizer(Sanitizer, SymbolicClient):
-    def __init__(self, abort_on_error: bool = True):
+    def __init__(self, abort_on_error: bool = True, **_ignored: Any):
+        # **_ignored swallows a stray ``compile`` kwarg: Sanitizer(compile=
+        # False) dispatches here, and Python re-invokes __init__ with the
+        # original kwargs (including compile). It is consumed by the factory's
+        # mode dispatch, not a real init parameter.
         super().__init__(abort_on_error=abort_on_error)
         self.records: list[OutOfBoundsRecordZ3] = []
         self.cache_args: list[Any] = []

@@ -30,7 +30,12 @@ def gluon_tma_oob_kernel(
     smem = gl.allocate_shared_memory(gl.float32, [block_m, block_n], layout)
     bar = mbarrier.allocate_mbarrier()
     mbarrier.init(bar, count=1)
-    mbarrier.expect(bar, desc.nbytes_per_cta)
+    # tensor_descriptor.nbytes_per_cta only exists on triton >= 3.7
+    # nightlies; fall back to the block byte size on 3.6.
+    nbytes = getattr(desc, "nbytes_per_cta", None)
+    if nbytes is None:
+        nbytes = block_m * block_n * 4  # fp32 tile
+    mbarrier.expect(bar, nbytes)
     if hasattr(tma, "async_load"):
         tma.async_load(desc, [m, 0], bar, smem)  # OOB: row coordinate starts past x.
     else:

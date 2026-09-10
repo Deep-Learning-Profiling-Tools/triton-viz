@@ -1,0 +1,776 @@
+"""End-to-end tests for the compiled-mode race detector.
+
+Two layers:
+  * analyzer-level golden tests — stock TTGIR must prove race-freedom
+    (UNSAT), and every mutation of the pipeline machinery must produce a
+    report with a sensible witness;
+  * trace-level tests — a real kernel through ``triton_viz.trace`` with the
+    warmup-acquired TTGIR (requires a CUDA driver; skipped without one).
+"""
+
+import linecache
+import textwrap
+from pathlib import Path
+
+import pytest
+import torch
+import triton
+import triton.language as tl
+
+import triton_viz
+from triton_viz.clients import CompiledRaceDetector, RaceDetector, RaceType, Tracer
+from triton_viz.clients.race_detector.compiled import analyze_ttgir
+from triton_viz.core.client import ClientManager
+from triton_viz.core.config import config
+
+GOLDEN = Path(__file__).resolve().parents[1] / "golden" / "ttgir"
+
+
+def _read(name: str) -> str:
+    return (GOLDEN / name).read_text()
+
+
+# ──────────────────────── analyzer-level: proofs ────────────────────────
+
+
+def test_stock_pipelined_matmul_is_proven_race_free():
+    """The compiler-emitted 3-stage cp.async pipeline is exactly covered by
+    its async_wait counting: every (copy, load) query is UNSAT, for every
+    trip count and grid — a proof for the specialization."""
+    r = analyze_ttgir(_read("matmul_s3_sm80.ttgir"))
+    assert r.status == "ok"
+    assert r.reports == []
+
+
+def test_generic_only_and_no_smem_kernels_are_ok():
+    for name in ("matmul_s1_sm80.ttgir", "add_sm80.ttgir"):
+        r = analyze_ttgir(_read(name))
+        assert r.status == "ok"
+        assert r.reports == []
+
+
+def test_stock_sm90_wgmma_pipeline_is_proven_race_free():
+    """The sm90 pipeline (cp.async writers + async warp_group_dot readers):
+    every RAW query (copy vs wgmma read, async_wait counting) AND every WAR
+    query (copy overwriting a slot vs a possibly-pending wgmma read,
+    warp_group_dot_wait pendings counting) is UNSAT."""
+    r = analyze_ttgir(_read("matmul_s3_sm90.ttgir"))
+    assert r.status == "ok", r.unsupported_reason
+    assert r.reports == []
+
+
+def test_sm90_fence_async_shared_is_accepted():
+    """fence_async_shared only ADDS generic→async ordering the model never
+    relies on for a proof; its presence must not degrade the analysis."""
+    stock = _read("matmul_s3_sm90.ttgir")
+    mutated = stock.replace(
+        "%a_97 = ttg.async_wait %a_88, %b_90 {num = 2 : i32} loc(#loc72)",
+        "ttng.fence_async_shared {bCluster = false} loc(#loc72)\n"
+        "      %a_97 = ttg.async_wait %a_88, %b_90 {num = 2 : i32} loc(#loc72)",
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "ok", r.unsupported_reason
+    assert r.reports == []
+
+
+def test_warp_specialized_tma_dump_is_unsupported_not_silent():
+    """The warp-specialized pipeline (tl.range(..., warp_specialize=True))
+    is a cross-warp-group protocol: producer default region + consumer
+    partitions synchronized by count-128 arrive barriers. Outside the
+    tranche-2 model — must fail closed (here on the first thread-arrival
+    barrier, before even reaching ttg.warp_specialize)."""
+    r = analyze_ttgir(_read("matmul_tma_ws_s3_sm90.ttgir"))
+    assert r.status == "unsupported"
+    reason = r.unsupported_reason or ""
+    assert "count 128" in reason or "warp_specialize" in reason
+
+
+def test_sm90_ops_outside_subset_stay_unsupported_not_silent():
+    """ttng ops outside the modeled sm90 subset (warp specialization,
+    Blackwell tcgen5) must still degrade to an honest unsupported."""
+    stock = _read("matmul_s3_sm90.ttgir")
+    mutated = stock.replace(
+        "%acc_71 = ttg.async_wait {num = 0 : i32} loc(#loc89)",
+        "%acc_71 = ttg.async_wait {num = 0 : i32} loc(#loc89)\n"
+        "    ttng.tc_gen5_mma %a, %b, %acc loc(#loc89)",
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "ttng.tc_gen5_mma" in (r.unsupported_reason or "")
+
+
+# ──────────────────────── analyzer-level: mutations ────────────────────────
+# Each mutation hand-edits the golden TTGIR the way a pipeliner bug would
+# manifest; the detector must produce a RAW report with a valid witness.
+
+
+def _assert_races(
+    text: str, expect_min: int = 1, kind: RaceType = RaceType.RAW
+) -> list:
+    """At least ``expect_min`` reports of ``kind`` with sane witnesses.
+    Other kinds may accompany them: a weakened/deleted wait leaves the
+    writes unretired too, so the same mutation legitimately surfaces
+    WAW alongside the RAW/WAR it was aimed at."""
+    r = analyze_ttgir(text)
+    assert r.status == "ok", r.unsupported_reason
+    matching = [rep for rep in r.reports if rep.race_type == kind]
+    assert len(matching) >= expect_min, (
+        f"mutation not detected as {kind.name}: "
+        f"{[(rep.race_type.name, rep.message[:60]) for rep in r.reports]}"
+    )
+    for rep in matching:
+        if rep.witness:
+            assert rep.witness["slot"] >= 0
+    return matching
+
+
+def test_mutation_weakened_wait_num():
+    """async_wait num too large (4 instead of 2): the wait tolerates more
+    outstanding groups than the rotation distance provides."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    _assert_races(stock.replace("{num = 2 : i32}", "{num = 4 : i32}"))
+
+
+def test_mutation_wait_num_off_by_one():
+    """The stock kernel is exactly tight: num=3 already races."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    _assert_races(stock.replace("{num = 2 : i32}", "{num = 3 : i32}"))
+
+
+def test_mutation_deleted_wait():
+    stock = _read("matmul_s3_sm80.ttgir")
+    mutated = "\n".join(
+        line for line in stock.splitlines() if "ttg.async_wait %" not in line
+    )
+    _assert_races(mutated)
+
+
+def _shrink_to_single_buffer(stock: str) -> str:
+    """Single-buffer the double-buffered pipeline, well-formed: memdesc depth
+    2 -> 1, rotation wrap 2 -> 1, AND the prologue's stage-1 prefetch redirected
+    from slot 1 to slot 0 (a depth-1 buffer has no slot 1). Every slot now
+    indexes the lone stage, so the geometry is consistent and the prefetch
+    overwrites the slot the current iteration still reads."""
+    mutated = stock.replace("!ttg.memdesc<2x", "!ttg.memdesc<1x").replace(
+        "memdesc<2x", "memdesc<1x"
+    )
+    mutated = mutated.replace(
+        "arith.cmpi sge, %acc_93, %c2_i32", "arith.cmpi sge, %acc_93, %c1_i32"
+    ).replace("arith.cmpi sge, %acc_104, %c2_i32", "arith.cmpi sge, %acc_104, %c1_i32")
+    # Prologue stage-1 prefetch: index slot 0, not the now-nonexistent slot 1.
+    mutated = mutated.replace("%a[%c1_i32]", "%a[%c0_i32]").replace(
+        "%b[%c1_i32]", "%b[%c0_i32]"
+    )
+    return mutated
+
+
+def test_mutation_shrunk_stage_dim():
+    """A well-formed single-buffering of a double-buffered pipeline must be
+    caught as a race: the prefetch overwrites the slot the current iteration
+    still reads."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    _assert_races(_shrink_to_single_buffer(stock))
+
+
+# ─────────────────── analyzer-level: sm90 wgmma mutations ───────────────────
+# The WAR direction is new at sm90: the copy must not overwrite a slot while
+# a warp-group MMA read of it can still be pending. The stock kernel is
+# exactly tight at pendings=1.
+
+
+def test_sm90_mutation_pendings_off_by_one():
+    """pendings=2 leaves the PREVIOUS iteration's wgmma possibly pending —
+    and that is exactly the wgmma whose slot the current copy overwrites
+    (rotation distance 2 at 3 stages). Both allocations must be reported."""
+    stock = _read("matmul_s3_sm90.ttgir")
+    reports = _assert_races(
+        stock.replace("{pendings = 1 : i32}", "{pendings = 2 : i32}"),
+        kind=RaceType.WAR,
+    )
+    assert {r.alloc for r in reports} == {"%a", "%b"}
+
+
+def test_sm90_mutation_weakened_pendings():
+    stock = _read("matmul_s3_sm90.ttgir")
+    _assert_races(
+        stock.replace("{pendings = 1 : i32}", "{pendings = 3 : i32}"),
+        kind=RaceType.WAR,
+    )
+
+
+def test_sm90_mutation_deleted_dot_wait():
+    """No warp_group_dot_wait at all: every issued wgmma stays pending —
+    the copies overwrite slots with reads in flight."""
+    stock = _read("matmul_s3_sm90.ttgir")
+    mutated = "\n".join(
+        line for line in stock.splitlines() if "warp_group_dot_wait" not in line
+    )
+    _assert_races(mutated, kind=RaceType.WAR)
+
+
+def test_sm90_mutation_weakened_async_wait_reports_wgmma_raw():
+    """The RAW direction survives the reader swap: weakening the cp.async
+    wait must report the WGMMA reads (not local_loads) as the racing
+    readers."""
+    stock = _read("matmul_s3_sm90.ttgir")
+    reports = _assert_races(stock.replace("{num = 2 : i32}", "{num = 4 : i32}"))
+    assert any("warp_group_dot" in r.message for r in reports)
+
+
+# ─────────────── analyzer-level: sm90 TMA/mbarrier (tranche 2) ───────────────
+# The descriptor pipeline: barrier_expect arms an mbarrier slot with the
+# byte count of BOTH TMA copies of that round; the consumer's wait_barrier
+# targets arming (k + b_w) div S of slot (b_w + k) mod S with parity
+# ((k + b_w) div S) mod 2; the copy at k' belongs to arming
+# (k' + b_e) div S. Coverage collapses to the linear k' + b_e ≤ k + b_w.
+
+
+def test_stock_sm90_tma_pipeline_is_proven_race_free():
+    r = analyze_ttgir(_read("matmul_tma_s3_sm90.ttgir"))
+    assert r.status == "ok", r.unsupported_reason
+    assert r.reports == []
+
+
+def test_stock_sm90_tma_one_shot_is_proven_race_free():
+    """num_stages=1 lowers to the ONE-SHOT protocol: a fresh in-loop
+    barrier per iteration (init → expect → copy → wait phase 0 → inval),
+    one per input buffer. The wgmma read is guarded by BOTH waits — a
+    copy is covered when ANY matching guard orders it, and its own
+    iteration's wait forces same-or-earlier-iteration completion."""
+    r = analyze_ttgir(_read("matmul_tma_s1_sm90.ttgir"))
+    assert r.status == "ok", r.unsupported_reason
+    assert r.reports == []
+
+
+def test_tma_one_shot_mutation_deleted_wait_barrier():
+    stock = _read("matmul_tma_s1_sm90.ttgir")
+    mutated = "\n".join(
+        line for line in stock.splitlines() if "ttng.wait_barrier" not in line
+    )
+    _assert_races(mutated)
+
+
+def test_tma_one_shot_mutation_wrong_phase_constant():
+    """Waiting parity 1 on a fresh phase-0 barrier returns before the
+    arrivals land — a coverage hole, reported."""
+    stock = _read("matmul_tma_s1_sm90.ttgir")
+    mutated = stock.replace(
+        "ttng.wait_barrier %a_10, %c0_i32", "ttng.wait_barrier %a_10, %c1_i32"
+    )
+    reports = _assert_races(mutated)
+    assert all(r.alloc == "%a_9" for r in reports)
+
+
+def test_tma_mutation_deleted_wait_barrier():
+    """No phase wait at all: every read runs unguarded against in-flight
+    TMA arrivals."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = "\n".join(
+        line for line in stock.splitlines() if "ttng.wait_barrier" not in line
+    )
+    reports = _assert_races(mutated)
+    assert any("no wait_barrier guards the read" in r.message for r in reports)
+
+
+def test_tma_mutation_phase_never_flips():
+    """Breaking the parity flip (xori 1 → 0) makes the wait target an
+    already-completed phase from the second rotation period on — a real
+    coverage hole, reported as RAW, not abstained."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = stock.replace("arith.xori %arg10, %c1_i32", "arith.xori %arg10, %c0_i32")
+    reports = _assert_races(mutated)
+    assert any("phase chain" in r.message for r in reports)
+
+
+def test_tma_mutation_expect_undercount():
+    """barrier_expect 8192 → 4096: the phase completes after ~one of the
+    two copies, so the wait orders neither — both allocations report."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = stock.replace(
+        "ttng.barrier_expect %acc_39, 8192", "ttng.barrier_expect %acc_39, 4096"
+    )
+    reports = _assert_races(mutated)
+    assert any("undercounts" in r.message for r in reports)
+
+
+def test_tma_mutation_expect_overcount_is_deadlock_unsupported():
+    """barrier_expect larger than its arrivals never completes: a hang,
+    not a race — honest unsupported."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = stock.replace(
+        "ttng.barrier_expect %acc_39, 8192", "ttng.barrier_expect %acc_39, 16384"
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "deadlock" in (r.unsupported_reason or "")
+
+
+def test_tma_mutation_deleted_dot_wait_is_war():
+    """The WAR direction survives under TMA writers: without the wgmma
+    drain, the next round's TMA copy overwrites a slot a pending
+    warp_group_dot still reads."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = "\n".join(
+        line for line in stock.splitlines() if "warp_group_dot_wait" not in line
+    )
+    reports = _assert_races(mutated, kind=RaceType.WAR)
+    assert any("async_tma_copy_global_to_local" in r.message for r in reports)
+
+
+def test_tma_mutation_deleted_fence_is_raw():
+    """The epilogue TMA store reads a generically-initialized immutable
+    allocation; dropping the fence_async_shared between them is the
+    stale-read proxy-crossing bug."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = "\n".join(
+        line for line in stock.splitlines() if "fence_async_shared" not in line
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "ok", r.unsupported_reason
+    assert len(r.reports) == 1
+    assert r.reports[0].race_type == RaceType.RAW
+    assert "fence_async_shared" in r.reports[0].message
+
+
+def test_tma_mutation_wrong_barrier_slot_is_deadlock_unsupported():
+    """A copy signaling the consumer's slot chain instead of its arming
+    chain leaves the armed slot starving — deadlock, honest unsupported."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = stock.replace("%a_40, %acc_39, %acc_23", "%a_40, %acc_29, %acc_23")
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "no matching barrier_expect" in (r.unsupported_reason or "")
+
+
+def test_tma_mutation_weakened_prefetch_stop_fails_the_drain():
+    """Prefetch predicate iv < trip-1 instead of trip-2: the last arming
+    can still be in flight when the epilogue reuses the freed storage —
+    the reuse drain is no longer provable."""
+    stock = _read("matmul_tma_s3_sm90.ttgir")
+    mutated = stock.replace("arith.subi %1, %c2_i32", "arith.subi %1, %c1_i32")
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "drain" in (r.unsupported_reason or "")
+
+
+def test_const_slot_out_of_range_is_unsupported():
+    """Shrinking the memdesc to depth 1 WITHOUT fixing the prologue leaves a
+    constant slot-1 access into a 1-stage buffer — inconsistent geometry. The
+    model must fail closed (unsupported) rather than emit a proof/report
+    computed under a broken buffer model."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    mutated = stock.replace("!ttg.memdesc<2x", "!ttg.memdesc<1x").replace(
+        "memdesc<2x", "memdesc<1x"
+    )
+    mutated = mutated.replace(
+        "arith.cmpi sge, %acc_93, %c2_i32", "arith.cmpi sge, %acc_93, %c1_i32"
+    ).replace("arith.cmpi sge, %acc_104, %c2_i32", "arith.cmpi sge, %acc_104, %c1_i32")
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "out of range" in (r.unsupported_reason or "")
+
+
+def test_mutation_rotation_off_by_one():
+    """Extract index initialized one step ahead: loads read the slot whose
+    prefetch the wait does not yet cover."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    _assert_races(stock.replace("%acc_86 = %c-1_i32", "%acc_86 = %c0_i32"))
+
+
+def test_mutation_dropped_commit_group():
+    """A copy whose token never reaches a commit group can never be covered
+    by any wait — exactly that one pair must be reported."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    mutated = stock.replace(
+        "%a_117 = ttg.async_commit_group tokens %a_116",
+        "%a_117 = ttg.async_commit_group",
+    )
+    reports = _assert_races(mutated)
+    # exactly the one (uncommitted copy, load) RAW pair; the same
+    # uncommitted copy also shows up as WAW (nothing ever retires it)
+    assert len(reports) == 1
+
+
+def test_mutation_dropped_wait_operand_token():
+    """The stock loop wait awaits BOTH allocations' commit tokens
+    (``async_wait %a_87, %b_89 {num = 2}``). Dropping the B token while
+    keeping num=2 is a wait that no longer awaits B: the counting model alone
+    would still read it as covered (the num is unchanged), so the per-token
+    coverage gate must catch it and report exactly the B-buffer loads — never
+    a silent ``ok``."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    mutated = stock.replace(
+        "ttg.async_wait %a_87, %b_89 {num = 2 : i32}",
+        "ttg.async_wait %a_87 {num = 2 : i32}",
+    )
+    reports = _assert_races(mutated)
+    # A stays awaited (operand %a_87 present) — only B loads are uncovered.
+    assert reports, "dropped wait token not detected"
+    assert all(r.alloc == "%b" for r in reports), [r.alloc for r in reports]
+
+
+def test_malformed_commit_group_is_unsupported():
+    """An operand-style ``async_commit_group %tok`` (no ``tokens`` keyword)
+    is outside the parsed vocabulary. It must degrade to unsupported, not be
+    silently swallowed as an empty commit group (which would corrupt commit
+    rank accounting)."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    mutated = stock.replace(
+        "ttg.async_commit_group tokens %a_116",
+        "ttg.async_commit_group %a_116",
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "async_commit_group" in (r.unsupported_reason or "")
+
+
+def test_commit_group_without_result_is_unsupported():
+    """ttg.async_commit_group always prints its !ttg.async.token result; a
+    result-less commit group is malformed (its token is what a wait names, so
+    a group with no token is unreachable by any wait). The reader fails closed
+    rather than fabricate an empty token."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    mutated = stock.replace(
+        "%a_117 = ttg.async_commit_group tokens %a_116",
+        "ttg.async_commit_group tokens %a_116",
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "result" in (r.unsupported_reason or "")
+
+
+def test_conditional_region_in_loop_is_unsupported():
+    """A conditional region inside the pipelined loop is not modeled; the
+    reader must say so rather than mis-track the loop/epilogue boundary via
+    naive brace counting (a ``} else {`` nets +1, not 0)."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    mutated = stock.replace(
+        "%a_96 = ttg.async_wait %a_87, %b_89 {num = 2 : i32} loc(#loc72)",
+        "%a_96 = ttg.async_wait %a_87, %b_89 {num = 2 : i32} loc(#loc72)\n"
+        "      scf.if %arg13 {\n"
+        "      } else {\n"
+        "      }",
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "region" in (r.unsupported_reason or "")
+
+
+def test_local_alloc_after_dealloc_epilogue_reuse_needs_a_proven_drain():
+    """Epilogue storage reuse (local_alloc after local_dealloc) is allowed
+    only under a proven drain of every async agent. The sm80 stock
+    epilogue drains with ``async_wait {num=0}``, so an injected reuse
+    still analyzes ok; DELETING that drain flips the same kernel to an
+    honest unsupported — never a silent proof over reused storage."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    reuse_line = (
+        "ttg.local_dealloc %b : !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable> loc(#loc89)\n"
+        "    %reuse = ttg.local_alloc : () -> !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable> loc(#loc89)"
+    )
+    mutated = stock.replace(
+        "ttg.local_dealloc %b : !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable> loc(#loc89)",
+        reuse_line,
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "ok", r.unsupported_reason
+    assert r.reports == []
+
+    undrained = "\n".join(
+        line
+        for line in mutated.splitlines()
+        if "ttg.async_wait {num = 0 : i32}" not in line
+    )
+    r2 = analyze_ttgir(undrained)
+    assert r2.status == "unsupported"
+    assert "drain" in (r2.unsupported_reason or "")
+
+
+def test_local_alloc_after_dealloc_outside_epilogue_is_unsupported():
+    """Reuse before the epilogue (here: dealloc+alloc injected in the
+    prologue) has no drain story at all — fail closed."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    mutated = stock.replace(
+        "%acc = arith.cmpi sgt, %1, %c0_i32 : i32 loc(#loc89)",
+        "ttg.local_dealloc %b : !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable> loc(#loc89)\n"
+        "    %reuse = ttg.local_alloc : () -> !ttg.memdesc<2x32x64xf16, #shared1, #smem, mutable> loc(#loc89)\n"
+        "    %acc = arith.cmpi sgt, %1, %c0_i32 : i32 loc(#loc89)",
+    )
+    r = analyze_ttgir(mutated)
+    assert r.status == "unsupported"
+    assert "dealloc" in (r.unsupported_reason or "")
+
+
+def test_compiled_detector_is_standalone_only():
+    """The compiled detector skips the interpreted run (pre_run=False), which
+    is all()-combined — composing it with another client would suppress that
+    client's capture. ClientManager must reject the composition up front."""
+    ClientManager([CompiledRaceDetector()])  # standalone is fine
+    with pytest.raises(RuntimeError, match="standalone"):
+        ClientManager([CompiledRaceDetector(), Tracer()])
+    with pytest.raises(RuntimeError, match="standalone"):
+        ClientManager([Tracer(), CompiledRaceDetector()])
+
+
+def test_compile_true_respects_disabled_flag():
+    """RaceDetector(compile=True) still honors the global enable flag: with the
+    detector off, the factory returns the NullRaceDetector (status 'disabled'),
+    exactly like the default RaceDetector(), so ENABLE_RACE_DETECTOR=0 keeps
+    zero runtime impact."""
+    saved = config.enable_race_detector
+    config.enable_race_detector = False
+    try:
+        detector = RaceDetector(compile=True)
+        assert detector.last_status == "disabled"
+        assert not isinstance(detector, CompiledRaceDetector)
+    finally:
+        config.enable_race_detector = saved
+
+
+def test_smtlib_artifact_export():
+    """SAT queries can be exported as SMT-LIB2 — the plan's SMT-IR
+    interchange artifact."""
+    stock = _read("matmul_s3_sm80.ttgir")
+    r = analyze_ttgir(
+        stock.replace("{num = 2 : i32}", "{num = 4 : i32}"), collect_smtlib=True
+    )
+    assert r.reports and r.smtlib
+    assert "(declare-fun" in r.smtlib[0] or "(assert" in r.smtlib[0]
+
+
+# ──────────────────────── trace-level (needs CUDA) ────────────────────────
+
+
+requires_cuda = pytest.mark.skipif(
+    not torch.cuda.is_available(), reason="warmup compilation needs a CUDA driver"
+)
+
+
+@pytest.fixture
+def _enable_race_detector():
+    # The public RaceDetector(...) factory only returns a real backend while
+    # the flag is on; otherwise it is the NullRaceDetector and trace() leaves
+    # the kernel untraced.
+    saved = config.enable_race_detector
+    config.enable_race_detector = True
+    try:
+        yield
+    finally:
+        config.enable_race_detector = saved
+
+
+@requires_cuda
+def test_trace_pipelined_matmul_proves_race_free(_enable_race_detector):
+    detector = RaceDetector(compile=True)
+    # The factory routes compile=True to the static compiled-mode backend.
+    assert isinstance(detector, CompiledRaceDetector)
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def kernel(
+        a_ptr,
+        b_ptr,
+        c_ptr,
+        M,
+        N,
+        K,
+        stride_am,
+        stride_bk,
+        stride_cm,
+        BLOCK_M: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+        BLOCK_K: tl.constexpr,
+    ):
+        pid_m = tl.program_id(0)
+        pid_n = tl.program_id(1)
+        offs_m = pid_m * BLOCK_M + tl.arange(0, BLOCK_M)
+        offs_n = pid_n * BLOCK_N + tl.arange(0, BLOCK_N)
+        offs_k = tl.arange(0, BLOCK_K)
+        a_ptrs = a_ptr + offs_m[:, None] * stride_am + offs_k[None, :]
+        b_ptrs = b_ptr + offs_k[:, None] * stride_bk + offs_n[None, :]
+        acc = tl.zeros((BLOCK_M, BLOCK_N), dtype=tl.float32)
+        for _k in range(0, tl.cdiv(K, BLOCK_K)):
+            a = tl.load(a_ptrs, mask=offs_k[None, :] < K - _k * BLOCK_K, other=0.0)
+            b = tl.load(b_ptrs, mask=offs_k[:, None] < K - _k * BLOCK_K, other=0.0)
+            acc += tl.dot(a, b)
+            a_ptrs += BLOCK_K
+            b_ptrs += BLOCK_K * stride_bk
+        c_ptrs = c_ptr + offs_m[:, None] * stride_cm + offs_n[None, :]
+        c_mask = (offs_m[:, None] < M) & (offs_n[None, :] < N)
+        tl.store(c_ptrs, acc.to(tl.float16), mask=c_mask)
+
+    M = N = K = 128
+    a = torch.randn(M, K, dtype=torch.float16, device="cuda")
+    b = torch.randn(K, N, dtype=torch.float16, device="cuda")
+    c = torch.empty(M, N, dtype=torch.float16, device="cuda")
+    grid = (triton.cdiv(M, 64), triton.cdiv(N, 64))
+    kernel[grid](
+        a,
+        b,
+        c,
+        M,
+        N,
+        K,
+        K,
+        N,
+        N,
+        BLOCK_M=64,
+        BLOCK_N=64,
+        BLOCK_K=32,
+        num_warps=4,
+        num_stages=3,
+    )
+
+    # The sm80/sm90 split depends on the local GPU: Ampere-class targets
+    # produce the cp.async pipeline (proof); Hopper+ produces ttng ops
+    # (honest unsupported). Both are correct outcomes; silent wrong
+    # verdicts are not.
+    assert detector.last_status in ("ok", "unsupported")
+    if detector.last_status == "ok":
+        assert detector.last_reports == []
+    else:
+        assert detector.unsupported_reason is not None
+
+
+@requires_cuda
+def test_trace_elementwise_kernel_is_ok(_enable_race_detector):
+    detector = RaceDetector(compile=True)
+
+    @triton_viz.trace(detector)
+    @triton.jit
+    def add_kernel(x_ptr, y_ptr, out_ptr, n, BLOCK: tl.constexpr):
+        pid = tl.program_id(0)
+        offs = pid * BLOCK + tl.arange(0, BLOCK)
+        mask = offs < n
+        x = tl.load(x_ptr + offs, mask=mask)
+        y = tl.load(y_ptr + offs, mask=mask)
+        tl.store(out_ptr + offs, x + y, mask=mask)
+
+    n = 1024
+    x = torch.randn(n, device="cuda")
+    y = torch.randn(n, device="cuda")
+    out = torch.empty(n, device="cuda")
+    add_kernel[(triton.cdiv(n, 256),)](x, y, out, n, BLOCK=256)
+
+    assert detector.last_status == "ok"
+    assert detector.last_reports == []
+    # Warmup-only trace executes the REAL kernel — outputs must be live.
+    torch.testing.assert_close(out, x + y)
+
+
+@requires_cuda
+def test_trace_two_kernels_second_real_compile_survives(_enable_race_detector):
+    """Regression: a traced launch followed by a REAL compile of a second
+    kernel in the same process. Triton's interpreter patches tl.core.tensor
+    dunders in place; the snapshot/restore around the interpreted run leaks
+    them, breaking semantic._load_legacy's ``other.handle if other else
+    None`` on the next real compile of any kernel using a masked load with
+    ``other``. The warmup-only path never engages the interpreter, so both
+    kernels must compile, analyze, and EXECUTE for real. always_compile
+    forces real make_ir so a warm disk cache cannot mask the regression."""
+    from triton import knobs
+
+    saved = knobs.compilation.always_compile
+    knobs.compilation.always_compile = True
+    try:
+        det1 = RaceDetector(compile=True)
+
+        @triton_viz.trace(det1)
+        @triton.jit
+        def first_kernel(x_ptr, o_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            m = offs < n
+            x = tl.load(x_ptr + offs, mask=m)
+            tl.store(o_ptr + offs, x * 2.0, mask=m)
+
+        n = 512
+        x = torch.randn(n, device="cuda")
+        o = torch.empty(n, device="cuda")
+        first_kernel[(triton.cdiv(n, 256),)](x, o, n, BLOCK=256)
+        assert det1.last_status == "ok"
+        torch.testing.assert_close(o, x * 2.0)
+
+        det2 = RaceDetector(compile=True)
+
+        @triton_viz.trace(det2)
+        @triton.jit
+        def second_kernel(x_ptr, o_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            m = offs < n
+            # masked load WITH other: real compile evaluates `if other` on a
+            # tl.tensor — the construct the leaked interpreter __bool__ broke.
+            x = tl.load(x_ptr + offs, mask=m, other=0.0)
+            tl.store(o_ptr + offs, x + 1.0, mask=m)
+
+        o2 = torch.empty(n, device="cuda")
+        second_kernel[(triton.cdiv(n, 256),)](x, o2, n, BLOCK=256)
+        assert det2.last_status == "ok"
+        torch.testing.assert_close(o2, x + 1.0)
+    finally:
+        knobs.compilation.always_compile = saved
+
+
+@requires_cuda
+def test_trace_kernel_calling_wrapped_device_fn(_enable_race_detector):
+    """Regression: under the CLI wrapper every @triton.jit function is
+    wrapped — including DEVICE functions. The real code generator resolves a
+    callee through the caller's __globals__ and only accepts JITFunctions
+    there; a TritonTrace global used to die with "Unsupported function
+    referenced". The warmup-only path must unwind trace globals to the raw
+    JITFunction for the real-compile window (and restore them after).
+
+    The kernels are exec'd into a synthetic module namespace because that is
+    the shape the CLI produces: both functions live at module level, so the
+    caller references the device fn as a true GLOBAL. Defining them inside
+    this test function would instead capture the device fn as a closure
+    freevar, and Triton's get_capture_scope() overlays nonlocals on top of
+    __globals__ — a scope the global-swap window does not touch."""
+    src = textwrap.dedent(
+        """
+        import triton
+        import triton.language as tl
+
+        import triton_viz
+        from triton_viz.clients import RaceDetector
+
+        detector = RaceDetector(compile=True)
+
+
+        # Wrap the device function too, exactly as the CLI's patched
+        # triton.jit would. It is never launched by the host; it only exists
+        # as a wrapped module global the top kernel references.
+        @triton_viz.trace(RaceDetector(compile=True))
+        @triton.jit
+        def _device_double(x):
+            return x * 2.0
+
+
+        @triton_viz.trace(detector)
+        @triton.jit
+        def caller_kernel(x_ptr, o_ptr, n, BLOCK: tl.constexpr):
+            pid = tl.program_id(0)
+            offs = pid * BLOCK + tl.arange(0, BLOCK)
+            m = offs < n
+            x = tl.load(x_ptr + offs, mask=m, other=0.0)
+            tl.store(o_ptr + offs, _device_double(x), mask=m)
+        """
+    )
+    # Seed linecache so triton's inspect.getsource() can read the exec'd
+    # defs; mtime=None makes the entry immune to linecache.checkcache().
+    filename = "<compiled_race_detector_device_fn_module>"
+    linecache.cache[filename] = (len(src), None, src.splitlines(True), filename)
+    ns: dict = {"__name__": "_compiled_race_device_fn_mod"}
+    try:
+        exec(compile(src, filename, "exec"), ns)
+
+        n = 512
+        x = torch.randn(n, device="cuda")
+        o = torch.empty(n, device="cuda")
+        ns["caller_kernel"][(triton.cdiv(n, 256),)](x, o, n, BLOCK=256)
+        assert ns["detector"].last_status == "ok"
+        torch.testing.assert_close(o, x * 2.0)
+        # The swap window must have restored the wrapped module global.
+        assert isinstance(ns["_device_double"], triton_viz.core.trace.TritonTrace)
+    finally:
+        linecache.cache.pop(filename, None)

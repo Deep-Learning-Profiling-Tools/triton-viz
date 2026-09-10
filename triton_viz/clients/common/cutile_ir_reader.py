@@ -1,0 +1,2310 @@
+"""CuTile IR reader — the cuda.tile front-end of the shared access-graph
+model.
+
+Parses the FINAL CuTile IR text (``cuda.tile._compile.compile_tile(...,
+return_final_ir=True)``, captured at launch time by
+evaluation/tilebench_cutile_capture) into the SAME
+:class:`~.ttir_reader.AccessGraph` the TTIR reader produces, so the
+compiled race-detector track (``encode_graph`` →
+``TwoCopySymbolicHBSolver``, tier selector, launch-scoped rung) runs
+unchanged on cuTile kernels.
+
+Semantic mapping (why this is a thin front-end, not a new model):
+
+- ``tile_bid(axis)`` ≡ ``tt.get_program_id`` → :class:`Pid`.
+- Tile-space addressing lowers to the SAME affine algebra Triton kernels
+  hand-write: ``tile_load(view, index=(i,))`` over a partition view with
+  ``tile_shape=(T,)`` has footprint ``i*T + arange(0,T)`` per axis,
+  scaled by the array view's strides and CLIPPED to its logical shape —
+  cuTile has no explicit masks; the reader materializes the implicit
+  OOB-drop semantics as ordinary mask terms ``0 <= off < shape_axis``.
+- ``pointer_offset`` + ``tile_atomic_rmw(pointer, update, mask, ...)``
+  is exactly the TTIR ``addptr`` + ``tt.atomic_rmw`` shape (the cuTile
+  compiler routes per-element atomics through raw pointers and emits the
+  bounds-check mask itself); it lowers to the same atomic events.
+- Structured ``for $i in range(a, b, c)`` loops map to the single
+  :class:`LoopInfo` slot with Term bounds; loop-carried non-token values
+  bind to :class:`DataDep` (they are tile VALUES — cuTile advances
+  addresses by index arithmetic, not carried pointers). The COUNTED
+  ``loop`` construct the frontend emits for a python ``while i < N``
+  (see :func:`_counted_while_shape`) carries the same trip count and
+  takes the same slot.
+- Tokens contribute a guarded SSA partial order in ``AccessGraph.token_order``:
+  memory operations inherit their input token's ancestors and add themselves;
+  ``join_tokens`` merges ancestors without ordering its independent inputs.
+  Fully masked operations still transmit their token ancestry.
+- Scalar params keep their python names; an array param ``p`` arrives
+  flattened as ``p_0`` (base pointer), ``p_1..p_r`` (shape dims) and
+  ``p_{r+1}..p_{2r}`` (strides). Metadata slots become :class:`Param`
+  terms under their FLATTENED names — the harness binds their values
+  from the captured descriptors.
+
+Unmodeled value operations bind their results to :class:`DataDep`;
+unresolved tokens and unfamiliar token operations refuse with ``token-order``.
+DataDep reaching an
+address raises :class:`UnsupportedTTIR` (kind="indirect-address"),
+reaching a mask drops it and flags ``mask_dropped`` (widened, proof-only),
+reaching an atomic update clears ``atomic_val``. Unknown BLOCK structure
+fails closed (kind="control-flow").
+
+``parse_cutile_ir(..., multipath=True)`` (Route 3, the ladder's L2) lifts
+the two structural boundaries of the single-path model exactly as the
+TTIR reader's multipath mode does, and is byte-identical otherwise:
+
+- several ``for`` loops (nested or sequential) each get their own
+  :class:`LoopInfo` (``AccessGraph.loops``) and induction variable; an
+  access carries its enclosing loops in ``AccessEvent.loops``;
+- an integer ``tile_load`` / ``load_pointer`` with a MODELED mask binds
+  a :class:`Loaded` term (Route 2), so an address, mask, condition or
+  loop bound over a loaded value becomes a Select over the launch's
+  pre-launch contents and the verdict is content-qualified; a float
+  pointee or a dropped mask keeps :class:`DataDep`. ``other`` comes from
+  the partition view's padding mode (``ZERO``) or from
+  ``load_pointer``'s ``padding_value``;
+- structured ``if(cond=...)`` blocks contribute BOTH arms under path
+  predicates (``then`` under ``cond``, ``else`` under ``Not(cond)``); an
+  arm that ends in ``return`` is an early-exit guard, so the code after
+  the ``if`` carries the other arm's condition; an ``if`` with results
+  binds them to a Select over the two ``yield``s. An unmodelable
+  condition (loaded data) widens: both arms stay reachable, their
+  accesses are ``guarded``, value results bind to :class:`DataDep`. Token
+  results instead require an exact scalar condition and merge the actual
+  yielded tokens under their arm predicates; unknown or lane conditions refuse.
+Each carried token must preserve its own ancestry. For ordinary ``for`` loops,
+each potentially conflicting access pair must be ordered in both iteration
+directions or proved non-aliasing by the encoder's allocation-interval checks.
+Unordered pairs are retained in ``AccessGraph.loop_token_conflicts`` rather
+than discarded on the basis of different formal names. Read-only pairs need
+no iteration order. Statically zero-trip bodies are skipped, and a single-trip
+loop needs no recurrence proof.
+The while-form ``loop`` carrying data values (a data-dependent trip
+count over real values) is refused; the token-only while-form is the
+AWAIT shape (the TTIR reader's ``scf.while`` spin contract, spec C1.1:
+one non-mutating re-read of one location, compared against a
+loop-invariant value, exited on it) and becomes one awaited access
+carrying the loop's exit predicate, at every ladder level. Await polls always
+require the serial boundary, including plain loads, and loop result tokens
+come from the corresponding ``break`` operands. The other
+``break`` stay refused by name.
+"""
+
+from __future__ import annotations
+
+import re
+from collections.abc import Mapping
+from dataclasses import dataclass, field, fields, is_dataclass, replace
+from typing import Any, NoReturn
+
+from .ttir_reader import (
+    AccessEvent,
+    AccessGraph,
+    Arange,
+    AtomicInfo,
+    Bin,
+    BoolBin,
+    Cmp,
+    Const,
+    DataDep,
+    FuncArg,
+    Loaded,
+    LoopInfo,
+    LoopTokenConflict,
+    LoopVar,
+    Not,
+    Observed,
+    Param,
+    Pid,
+    PtrValue,
+    Select,
+    Term,
+    UnsupportedTTIR,
+    _set_arange_dim,
+    observed_indices,
+)
+
+_DTYPE_BITS = {
+    "float64": 64, "float32": 32, "float16": 16, "bfloat16": 16,
+    "int64": 64, "int32": 32, "int16": 16, "int8": 8,
+    "uint64": 64, "uint32": 32, "uint16": 16, "uint8": 8,
+    "bool_": 1,
+    "float8_e4m3fn": 8, "float8_e5m2": 8, "float8_e8m0fnu": 8,
+}  # fmt: skip
+_FLOAT_DTYPES = {d for d in _DTYPE_BITS if d.startswith(("float", "bfloat"))}
+
+_CMP_FN = {"lt": "slt", "le": "sle", "gt": "sgt", "ge": "sge", "eq": "eq", "ne": "ne"}
+# c_mod is C-style truncation-toward-zero — exactly the remsi semantics
+# Bin("%") already carries (python floor-mod is SYNTHESIZED from it by a
+# sign-fix select the reader models faithfully via boolean xor below)
+_ARITH_FN = {"add": "+", "sub": "-", "mul": "*", "floordiv": "//", "mod": "%",
+             "c_mod": "%", "min": "min", "max": "max"}  # fmt: skip
+_RMW_MODE = {
+    "ADD_INT": "add", "ADD_FLOAT": "fadd", "MIN_INT": "min", "MAX_INT": "max",
+    "MIN_FLOAT": "fmin", "MAX_FLOAT": "fmax", "AND": "and", "OR": "or",
+    "XOR": "xor", "EXCHANGE": "exch",
+    # cuda-tile 1.5 spellings (signedness split out of the mode name);
+    # values stay in the TTIR reader's rmw_op vocabulary
+    "MIN_SIGNED_INT": "min", "MAX_SIGNED_INT": "max",
+    "MIN_UNSIGNED_INT": "umin", "MAX_UNSIGNED_INT": "umax",
+    "AND_INT": "and", "OR_INT": "or", "XOR_INT": "xor",
+    "BITWISE_AND": "and", "BITWISE_OR": "or", "BITWISE_XOR": "xor",
+}  # fmt: skip
+_SCOPE = {"DEVICE": "gpu", "BLOCK": "cta", "SYSTEM": "sys", "NONE": "gpu"}
+
+
+@dataclass(frozen=True)
+class _Token:
+    """SSA token ancestors, guarded by scalar control-flow predicates.
+
+    Integer origins identify memory operations; string origins identify loop
+    token arguments while checking the loop's iteration-order contract.
+    Maps are copied on construction and never mutated after binding.
+    """
+
+    predecessors: dict[int | str, Term | None] = field(default_factory=dict)
+
+
+_TOKEN = _Token()
+
+
+def _token_failure(detail: str) -> NoReturn:
+    raise UnsupportedTTIR(f"token order: {detail}", kind="token-order")
+
+
+def _token_value(value: Any, where: str) -> _Token:
+    if not isinstance(value, _Token):
+        _token_failure(f"{where} is not a resolved token")
+    return value
+
+
+def _token_scalar(term: Any) -> bool:
+    if isinstance(term, (Arange, DataDep, Observed)):
+        return False
+    if is_dataclass(term):
+        return all(_token_scalar(getattr(term, f.name)) for f in fields(term))
+    if isinstance(term, (tuple, list)):
+        return all(_token_scalar(t) for t in term)
+    return True
+
+
+def _token_and(a: Term | None, b: Term | None) -> Term | None:
+    if a is None:
+        return b
+    if b is None or a == b:
+        return a
+    return BoolBin("and", a, b)
+
+
+def _token_or(a: Term | None, b: Term | None) -> Term | None:
+    if a is None or b is None:
+        return None
+    if a == b:
+        return a
+    if (isinstance(a, Not) and a.a == b) or (isinstance(b, Not) and b.a == a):
+        return None
+    # Preserve a common enclosing path when both arms yield its dependency.
+    if isinstance(a, BoolBin) and isinstance(b, BoolBin) and a.op == b.op == "and":
+        if a.a == b.a and _token_or(a.b, b.b) is None:
+            return a.a
+    return BoolBin("or", a, b)
+
+
+def _token_union(tokens: list[tuple[_Token, Term | None]]) -> _Token:
+    predecessors: dict[int | str, Term | None] = {}
+    for token, guard in tokens:
+        if not _token_scalar(guard):
+            _token_failure(
+                "a token selection has a lane-dependent or unknown predicate"
+            )
+        for origin, inherited in token.predecessors.items():
+            value = _token_and(inherited, guard)
+            predecessors[origin] = (
+                _token_or(predecessors[origin], value)
+                if origin in predecessors
+                else value
+            )
+    return _Token(predecessors)
+
+
+def _path_implies(path: Term | None, guard: Term | None) -> bool:
+    """A syntactic sufficient implication check; uncertainty refuses loops."""
+    if guard is None or path == guard:
+        return True
+    if isinstance(guard, BoolBin):
+        if guard.op == "and":
+            return _path_implies(path, guard.a) and _path_implies(path, guard.b)
+        if guard.op == "or":
+            return _path_implies(path, guard.a) or _path_implies(path, guard.b)
+    if isinstance(path, BoolBin) and path.op == "and":
+        return _path_implies(path.a, guard) or _path_implies(path.b, guard)
+    return False
+
+
+def _token_contains(token: _Token, origin: int | str, path: Term | None) -> bool:
+    return origin in token.predecessors and _path_implies(
+        path, token.predecessors[origin]
+    )
+
+
+@dataclass
+class _ArrayView:
+    base: str  # python param name
+    shape: list[Any]  # int | Term per axis
+    strides: list[Any]  # int | Term per axis
+    dtype: str
+
+
+@dataclass
+class _PartView:
+    array: _ArrayView
+    tile_shape: list[int]
+    padding: str
+
+
+# ───────────────────────── text utilities ─────────────────────────
+
+_NAME = r"[$\w.]+"
+_RE_TYPED_NAME = re.compile(rf"^\s*({_NAME})(?:\{{[^}}]*\}})?\s*:\s*(.*)$")
+_RE_OP = re.compile(r"^(\w+)\((.*)\)$")
+_RE_FOR = re.compile(rf"^for ({_NAME}) in range\((.*?)\)(?:\s*\(with (.*)\))?\s*$")
+_RE_IF = re.compile(rf"^if\(cond=({_NAME})\)\s*$")
+# the while-form construct: ``loop (with a: T = init, ...)``
+_RE_LOOP = re.compile(r"^loop\s*\((?:with\s*(.*?))?\)\s*$")
+_RE_TILE_TYPE = re.compile(r"^(?:const )?Tile\[(\w+),\(([^)]*)\)\]")
+_RE_ARRAY_TYPE = re.compile(r"^Array\[(\w+),\(([^)]*)\):\(([^)]*)\)\]")
+_RE_PARTVIEW_TYPE = re.compile(
+    r"^PartitionView\[.*tile_shape=\(([^)]*)\),order=\(([^)]*)\),"
+    r"padding_mode=PaddingMode\.(\w+)\]"
+)
+
+
+def _split_top(s: str, sep: str = ",") -> list[str]:
+    """Split at top level, respecting (), [] and {} nesting."""
+    parts: list[str] = []
+    depth = 0
+    cur: list[str] = []
+    for ch in s:
+        if ch in "([{":
+            depth += 1
+        elif ch in ")]}":
+            depth -= 1
+        if ch == sep and depth == 0:
+            parts.append("".join(cur).strip())
+            cur = []
+        else:
+            cur.append(ch)
+    tail = "".join(cur).strip()
+    if tail:
+        parts.append(tail)
+    return parts
+
+
+def _strip_prov(name: str) -> str:
+    """``$73{input_ptr_0, $0}`` → ``$73`` (provenance braces are display
+    metadata, not part of the SSA name)."""
+    return name.split("{", 1)[0].strip()
+
+
+def _parse_kwargs(argstr: str) -> dict[str, str]:
+    out: dict[str, str] = {}
+    for item in _split_top(argstr):
+        if not item:
+            continue
+        k, _, v = item.partition("=")
+        out[k.strip()] = v.strip()
+    return out
+
+
+def _ints(csv: str) -> list[int]:
+    return [int(x) for x in _split_top(csv) if x != ""]
+
+
+# ───────────────────────── the walker ─────────────────────────
+
+
+@dataclass
+class _State:
+    kernel_name: str
+    env: dict[str, Any] = field(default_factory=dict)
+    accesses: list[AccessEvent] = field(default_factory=list)
+    pid_axes: set[int] = field(default_factory=set)
+    loop: LoopInfo | None = None
+    in_loop: bool = False
+    arange_n: int = 0
+    # multipath (Route 3): every loop in opening order, the enclosing
+    # loops of the current position (outer first), the current path
+    # predicate and whether an enclosing condition is unmodeled
+    multipath: bool = False
+    loops: list[LoopInfo] = field(default_factory=list)
+    loop_stack: list[str] = field(default_factory=list)
+    path: Term | None = None
+    guarded: bool = False
+    unknown_ops: dict[str, int] = field(default_factory=dict)
+    func_args: list[FuncArg] = field(default_factory=list)
+    ptr_meta: dict[str, tuple[int, bool]] = field(default_factory=dict)
+    # inside a spin loop's body (the await shape admits no nesting)
+    in_spin: bool = False
+    token_order: dict[tuple[int, int], Term | None] = field(default_factory=dict)
+    token_inputs: dict[int, _Token] = field(default_factory=dict)
+    # Scalar arguments of the CAPTURED launch, by IR parameter name. Used
+    # only to lower an integer bitwise operation exactly (see _fold_bitwise);
+    # a fold that consumes one sets param_pinned, which closes the T0 tier.
+    params: dict[str, int] = field(default_factory=dict)
+    # Terms rewritten from a scalar param's CAPTURED value (see
+    # _fold_bitwise). The graph is param_pinned exactly when one of them
+    # reaches a CLAIM-bearing position (an address, mask, path, exit
+    # predicate, atomic operand or loop bound); a rewrite that only feeds
+    # a value the footprint does not depend on costs no scope.
+    pinned_terms: list[Any] = field(default_factory=list)
+    loop_token_conflicts: list[LoopTokenConflict] = field(default_factory=list)
+
+
+def _as_term(v: Any, ctx: str) -> Term:
+    if isinstance(v, (int, bool)):
+        return Const(int(v))
+    if isinstance(
+        v,
+        (
+            Const,
+            Pid,
+            Param,
+            Arange,
+            LoopVar,
+            Bin,
+            Cmp,
+            BoolBin,
+            Select,
+            DataDep,
+            Observed,
+            Loaded,
+        ),
+    ):
+        return v  # type: ignore[return-value]
+    return DataDep(f"{ctx}: unmodeled value {type(v).__name__}")
+
+
+def _datadep_whys(t: Any, out: set[str] | None = None) -> set[str]:
+    """Every DataDep reason inside ``t`` — the abstention message names the
+    actual polluter (an unmodeled op vs genuinely loaded data)."""
+    if out is None:
+        out = set()
+    if isinstance(t, DataDep):
+        out.add(t.why)
+    for attr in ("a", "b", "cond", "t", "f", "offset", "mask", "other"):
+        sub = getattr(t, attr, None)
+        if sub is not None:
+            _datadep_whys(sub, out)
+    return out
+
+
+def _has_datadep(t: Any) -> bool:
+    return bool(_datadep_whys(t))
+
+
+_TERM_ATTRS = ("a", "b", "cond", "t", "f", "offset", "mask", "other")
+
+
+def _term_contains(t: Any, needle: Any) -> bool:
+    """Structural containment. Terms are frozen dataclasses, so equality
+    is by value; an unrelated term that happens to be identical only
+    over-pins, which is the safe direction."""
+    if t == needle:
+        return True
+    for attr in _TERM_ATTRS:
+        sub = getattr(t, attr, None)
+        if sub is not None and _term_contains(sub, needle):
+            return True
+    return False
+
+
+def _pinned_claim(st: _State) -> bool:
+    """Does a param-pinned rewrite reach a term the CLAIM rests on?
+
+    A bitwise lowering that consumed a scalar param's captured value is
+    exact for this launch's parameters only, so it must close the
+    ANY-params tier. It closes it only where it matters: an address, a
+    mask, a path or exit predicate, an atomic operand, or a loop bound.
+    A rewrite that feeds a value the footprint does not depend on (a
+    radix key that is only counted, never used to address) leaves the
+    ANY-params claim intact.
+    """
+    if not st.pinned_terms:
+        return False
+    claims: list[Any] = []
+    for a in st.accesses:
+        claims += [a.offset, a.mask, a.path, a.exit_pred, a.atomic_val, a.atomic_cmp]
+    for lp in ([st.loop] if st.loop is not None else []) + list(st.loops):
+        claims += [lp.lower, lp.upper, lp.step]
+    return any(
+        c is not None and any(_term_contains(c, p) for p in st.pinned_terms)
+        for c in claims
+    )
+
+
+def parse_cutile_ir(
+    text: str,
+    kernel_name: str = "cutile_kernel",
+    *,
+    multipath: bool = False,
+    params: Mapping[str, int] | None = None,
+) -> AccessGraph:
+    """``params`` are the CAPTURED launch's scalar arguments. They are read
+    only to lower integer bitwise addressing exactly (a shift count or mask
+    is not otherwise expressible in the address fragment); a graph that used
+    one is marked ``param_pinned`` and the tier selector skips T0 for it."""
+    lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
+    changing_integer_casts = "tile_atomic_cas(" in text and any(
+        "= tile_astype(" in ln for ln in lines
+    )
+    if not lines:
+        raise UnsupportedTTIR("empty CuTile IR", kind="parse")
+    st = _State(kernel_name=kernel_name, multipath=multipath, params=dict(params or {}))
+    _parse_header(lines[0], st)
+    end = _walk(lines, 1, 0, st)
+    if end < len(lines):
+        raise UnsupportedTTIR(
+            f"line {end + 1}: unexpected {lines[end].strip()[:40]!r} after the "
+            "function body",
+            kind="parse",
+        )
+    if multipath:
+        return AccessGraph(
+            kernel_name=kernel_name,
+            has_value_changing_integer_casts=changing_integer_casts,
+            param_pinned=_pinned_claim(st),
+            func_args=st.func_args,
+            accesses=st.accesses,
+            loop=st.loops[0] if len(st.loops) == 1 else None,
+            iter_args={},
+            pid_axes=st.pid_axes,
+            loops=list(st.loops),
+            multipath=True,
+            frontend="cutile",
+            token_order=st.token_order,
+            loop_token_conflicts=st.loop_token_conflicts,
+        )
+    return AccessGraph(
+        kernel_name=kernel_name,
+        has_value_changing_integer_casts=changing_integer_casts,
+        param_pinned=_pinned_claim(st),
+        func_args=st.func_args,
+        accesses=st.accesses,
+        loop=st.loop,
+        iter_args={},
+        pid_axes=st.pid_axes,
+        frontend="cutile",
+        token_order=st.token_order,
+        loop_token_conflicts=st.loop_token_conflicts,
+    )
+
+
+def _parse_header(line: str, st: _State) -> None:
+    """``(a_0: Tile[pointer[float32],()], ..., N: Tile[int32,()]):``"""
+    inner = line.strip()
+    if not (inner.startswith("(") and inner.endswith("):")):
+        raise UnsupportedTTIR(f"unrecognized IR header: {line[:80]}", kind="parse")
+    ptr_bases: dict[str, tuple[int, bool]] = {}
+    scalars: list[str] = []
+    for item in _split_top(inner[1:-2]):
+        m = _RE_TYPED_NAME.match(item)
+        if not m:
+            raise UnsupportedTTIR(f"unparsable param {item!r}", kind="parse")
+        name, typ = m.group(1), m.group(2)
+        pm = re.match(r"Tile\[pointer\[(\w+)\],", typ)
+        if pm:
+            dt = pm.group(1)
+            bits = _DTYPE_BITS.get(dt)
+            if bits is None:
+                raise UnsupportedTTIR(f"unknown pointee dtype {dt}", kind="parse")
+            if not name.endswith("_0"):
+                raise UnsupportedTTIR(
+                    f"pointer param {name!r} outside the p_0 flattening " "convention",
+                    kind="parse",
+                )
+            base = name[:-2]
+            ptr_bases[base] = (bits, dt in _FLOAT_DTYPES)
+            st.env[name] = PtrValue(base, Const(0))
+        else:
+            scalars.append(name)
+            st.env[name] = Param(name)
+    st.ptr_meta = ptr_bases
+    for base, (bits, is_f) in ptr_bases.items():
+        st.func_args.append(FuncArg(base, True, bits, is_f))
+    for name in scalars:
+        # p_1/p_2/... metadata slots of a flattened array param are not
+        # python-level scalars; everything else is
+        m = re.match(r"^(.*)_(\d+)$", name)
+        if m and m.group(1) in ptr_bases:
+            continue
+        st.func_args.append(FuncArg(name, False, 0))
+
+
+def _skip_block(lines: list[str], i: int, indent: int) -> int:
+    """Skip a ``do (...)``-introduced nested block (reduce/scan combiner
+    lambdas): the ``do`` line, then everything indented deeper, through
+    the block's own terminator."""
+    i += 1  # the `do (...)` line
+    n = len(lines)
+    while i < n:
+        raw = lines[i]
+        cur = len(raw) - len(raw.lstrip())
+        if cur <= indent and not raw.strip().startswith(("(", "continue", "end")):
+            return i
+        if cur <= indent and raw.strip().startswith(("continue", "end")):
+            return i + 1
+        i += 1
+    return i
+
+
+def _walk(lines: list[str], i: int, indent: int, st: _State) -> int:
+    """Process ops at ``indent`` until dedent / return / continue."""
+    n = len(lines)
+    while i < n:
+        raw = lines[i]
+        cur_indent = len(raw) - len(raw.lstrip())
+        if cur_indent < indent:
+            return i
+        line = raw.strip()
+        head = line.split(" ", 1)[0]
+        if line == "return":
+            return i + 1
+        if head == "continue":
+            # whole-token match: a value named after a parameter such as
+            # `continued{...}: Array = make_tensor_view(...)` is an op line
+            return i + 1
+        if st.multipath and head in ("yield", "break"):
+            # an if-arm terminator (multipath) or a while-form construct
+            # (refused before its body is walked): hand it to the caller
+            return i
+        if line.startswith("do ("):
+            # combiner lambda of a value-level op (tile_reduce/scan): its
+            # results were already bound DataDep by the op line — the
+            # block body is pure value math, skip it wholesale
+            i = _skip_block(lines, i, cur_indent)
+            continue
+        i = _handle_line(lines, i, indent, line, st)
+    return i
+
+
+def _handle_line(lines: list[str], i: int, indent: int, line: str, st: _State) -> int:
+    lhs, eq, rhs = line.partition(" = ")
+    if not eq:
+        # statement forms: a result-free `for` (no carried tokens) and
+        # if-block keywords
+        fm = _RE_FOR.match(line)
+        if fm:
+            return _handle_for(lines, i, indent, [], fm, st)
+        lm = _RE_LOOP.match(line)
+        if lm:
+            return _handle_loop(lines, i, indent, [], lm, st)
+        im = _RE_IF.match(line)
+        if im and st.multipath:
+            return _handle_if(lines, i, indent, [], im.group(1), st)
+        # single-path: unchanged (an `if(cond=...)` statement is reached only
+        # after its expression form raised at the `then` line, as before)
+        if line in ("then", "else") or line.startswith(("then", "else", "if ")):
+            raise UnsupportedTTIR(
+                f"line {i + 1}: `if` block structure is not modeled",
+                kind="control-flow",
+            )
+        raise UnsupportedTTIR(
+            f"line {i + 1}: unrecognized statement {line[:60]!r}",
+            kind="control-flow",
+        )
+    results = []
+    for item in _split_top(lhs):
+        m = _RE_TYPED_NAME.match(item)
+        if not m:
+            raise UnsupportedTTIR(
+                f"line {i + 1}: unparsable result {item!r}", kind="parse"
+            )
+        results.append((_strip_prov(m.group(1)), m.group(2)))
+
+    fm = _RE_FOR.match(rhs)
+    if fm:
+        return _handle_for(lines, i, indent, results, fm, st)
+    lm = _RE_LOOP.match(rhs)
+    if lm:
+        return _handle_loop(lines, i, indent, results, lm, st)
+    if rhs.startswith("loop ") or rhs.startswith("loop("):
+        raise UnsupportedTTIR(
+            f"line {i + 1}: unrecognized loop form {rhs[:60]!r}", kind="parse"
+        )
+    im = _RE_IF.match(rhs)
+    if im and st.multipath:
+        return _handle_if(lines, i, indent, results, im.group(1), st)
+    # single-path: unchanged — the `if(cond=...)` expression falls through
+    # to the unknown-op binding and the `then` line raises, exactly as
+    # before, so refusal messages stay byte-identical at L0
+    if rhs.startswith("if ") or rhs == "if":
+        raise UnsupportedTTIR(
+            f"line {i + 1}: `if` block structure is not modeled",
+            kind="control-flow",
+        )
+
+    om = _RE_OP.match(rhs)
+    if not om:
+        raise UnsupportedTTIR(
+            f"line {i + 1}: unrecognized op form {rhs[:60]!r}", kind="parse"
+        )
+    op, kwargs = om.group(1), _parse_kwargs(om.group(2))
+    if op == "make_token":
+        if len(results) != 1:
+            _token_failure("make_token must have exactly one result")
+        for rname, rtyp in results:
+            if rtyp.strip() != "Token":
+                _token_failure("make_token has a non-token result")
+            st.env[rname] = _TOKEN
+        return i + 1
+    if op == "join_tokens":
+        if len(results) != 1:
+            _token_failure("join_tokens must have exactly one result")
+        if "tokens" not in kwargs:
+            _token_failure(f"line {i + 1}: join_tokens has no token operands")
+        joined = _token_union(
+            [
+                (_token_value(v, f"line {i + 1} join operand"), None)
+                for v in _tuple_vals(st, kwargs.get("tokens", "()"))
+            ]
+        )
+        for rname, rtyp in results:
+            if rtyp.strip() != "Token":
+                _token_failure("join_tokens has a non-token result")
+            st.env[rname] = joined
+        return i + 1
+    memory = op in {
+        "tile_load",
+        "tile_store",
+        "load_pointer",
+        "store_pointer",
+        "tile_atomic_rmw",
+        "tile_atomic_cas",
+    }
+    incoming = _TOKEN
+    if memory:
+        if "token" not in kwargs:
+            _token_failure(f"line {i + 1}: memory operation has no token operand")
+        if sum(t.strip() == "Token" for _, t in results) != 1:
+            _token_failure(f"line {i + 1}: memory operation must have one token result")
+        incoming = _token_value(_val(st, kwargs["token"]), f"line {i + 1} input")
+    if not memory and (
+        "token" in kwargs
+        or "tokens" in kwargs
+        or any(t.strip() == "Token" for _, t in results)
+        or any(_has_token_operand(st, value) for value in kwargs.values())
+    ):
+        _token_failure(f"line {i + 1}: unsupported token operation {op}")
+    n_before = len(st.accesses)
+    _handle_op(op, results, kwargs, i + 1, st)
+    if memory:
+        if len(st.accesses) != n_before + 1:
+            _token_failure(f"line {i + 1}: memory operation has no unique access")
+        st.token_inputs[n_before] = incoming
+        for origin, guard in incoming.predecessors.items():
+            if isinstance(origin, int):
+                st.token_order[origin, n_before] = guard
+        outgoing = _Token({**incoming.predecessors, n_before: None})
+        for rname, rtyp in results:
+            if rtyp.strip() == "Token":
+                st.env[rname] = outgoing
+    return i + 1
+
+
+# ───────────────────────── op handlers ─────────────────────────
+
+
+def _known_int(st: _State, term: Any) -> int | None:
+    """The integer a term denotes, from a literal or the captured launch.
+
+    ``Const`` needs no launch. A ``Param`` resolves only through this
+    kernel's captured scalar arguments, so a fold that consumes one is
+    exact for THAT launch and must pin the graph away from T0.
+    """
+    if isinstance(term, Const):
+        return term.value
+    if isinstance(term, Param):
+        value = st.params.get(term.name)
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+    return None
+
+
+def _floor_mod(a: Term, n: int) -> Term:
+    """``a mod n`` for n > 0, exact for EVERY integer a.
+
+    Bin("%") is C-style truncation toward zero (remsi), so the sign fix is
+    written out rather than assumed: ((a % n) + n) % n.
+    """
+    return Bin("%", Bin("+", Bin("%", a, Const(n)), Const(n)), Const(n))
+
+
+def _floor_div(a: Term, n: int) -> Term:
+    """``floor(a / n)`` for n > 0, exact for EVERY integer a: subtracting
+    the floor-remainder leaves a multiple of n, where truncating and
+    flooring division agree."""
+    return Bin("//", Bin("-", a, _floor_mod(a, n)), Const(n))
+
+
+def _fold_bitwise(st: _State, fn: str, a: Term, b: Any, rtyp: str) -> Term | None:
+    """An integer bitwise operation as exact arithmetic, or None.
+
+    Only shapes whose arithmetic identity is exact for every integer are
+    lowered, and only when the second operand is a known integer: a shift
+    by a known count, a mask that is 2^k - 1, and a xor with a single bit.
+    Everything else keeps its DataDep and the caller's refusal. Returns
+    None rather than an approximation; nothing here widens a footprint.
+    """
+    if not rtyp.strip().startswith(("Tile[int", "Tile[uint")):
+        return None
+    n = _known_int(st, b)
+    if n is None or isinstance(a, DataDep):
+        return None
+    out: Term | None = None
+    if fn in ("rshift", "lshift"):
+        if not 0 <= n < 63:
+            return None
+        out = _floor_div(a, 1 << n) if fn == "rshift" else Bin("*", a, Const(1 << n))
+    elif fn == "and_":
+        # a & (2^k - 1) keeps the low k bits, which is a mod 2^k.
+        out = _floor_mod(a, n + 1) if n >= 0 and (n + 1) & n == 0 else None
+    elif fn == "xor":
+        if n == 0:
+            out = a
+        # a ^ 2^k flips one bit: add it when clear, subtract it when set.
+        elif n > 0 and (n & (n - 1)) == 0:
+            bit = _floor_mod(_floor_div(a, n), 2)
+            out = Bin("-", Bin("+", a, Const(n)), Bin("*", Const(2 * n), bit))
+    if out is not None and isinstance(b, Param) and not isinstance(out, Const):
+        # Exact for THIS launch's value of that param only. Recorded, not
+        # yet decisive: _pinned_claim closes T0 only if it reaches a term
+        # the claim rests on.
+        st.pinned_terms.append(out)
+    return out
+
+
+def _val(st: _State, token: str) -> Any:
+    token = _strip_prov(token)
+    if token in st.env:
+        return st.env[token]
+    if re.fullmatch(r"-?\d+", token):
+        return Const(int(token))
+    if token in ("None", "True", "False"):
+        return {"None": None, "True": Const(1), "False": Const(0)}[token]
+    return DataDep(f"unresolved SSA {token}")
+
+
+def _tuple_vals(st: _State, s: str) -> list[Any]:
+    if s.startswith("(") and s.endswith(")"):
+        s = s[1:-1]
+    return [_val(st, t) for t in _split_top(s) if t]
+
+
+def _has_token_operand(st: _State, text: str) -> bool:
+    """Do not erase unfamiliar token consumers through the value fallback."""
+    text = text.strip()
+    if text.startswith(("(", "[")) and text.endswith((")", "]")):
+        return any(_has_token_operand(st, item) for item in _split_top(text[1:-1]))
+    return isinstance(_val(st, text), _Token)
+
+
+def _tile_shape_of(typ: str) -> list[int] | None:
+    m = _RE_TILE_TYPE.match(typ)
+    if not m:
+        return None
+    dims = m.group(2)
+    if not dims.strip():
+        return []
+    try:
+        return _ints(dims)
+    except ValueError:
+        return None
+
+
+def _new_arange(st: _State, size: int, dim: int) -> Term:
+    st.arange_n += 1
+    return Arange(f"ct_ar{st.arange_n}", 0, size, dim)
+
+
+def _carried_values(text: str, st: _State, where: str) -> list[tuple[str, str, Any]]:
+    carried = []
+    for item in _split_top(text):
+        if not item.strip():
+            continue
+        lhs, sep, rhs = item.partition(" = ")
+        match = _RE_TYPED_NAME.match(lhs)
+        if not sep or match is None:
+            _token_failure(f"{where}: malformed loop-carried binding")
+        name, typ = _strip_prov(match.group(1)), match.group(2).strip()
+        value = _val(st, rhs)
+        if typ == "Token":
+            value = _token_value(value, f"{where} initializer")
+        carried.append((name, typ, value))
+    return carried
+
+
+def _bind_loop_tokens(
+    carried: list[tuple[str, str, Any]], st: _State, where: str
+) -> dict[str, str]:
+    markers = {}
+    for name, typ, initial in carried:
+        if typ == "Token":
+            marker = f"{where}:{name}"
+            markers[name] = marker
+            st.env[name] = _Token({**initial.predecessors, marker: None})
+    return markers
+
+
+def _terminator_values(line: str, head: str, st: _State) -> list[Any]:
+    if line.split(" ", 1)[0] != head:
+        _token_failure(f"expected {head} loop terminator")
+    return [_val(st, t) for t in _split_top(line[len(head) :].strip()) if t]
+
+
+def _serial_loop_boundary(
+    carried: list[tuple[str, str, Any]],
+    markers: dict[str, str],
+    continued: list[Any],
+    body: range,
+    st: _State,
+    where: str,
+    *,
+    require_serial: bool = False,
+    loop_ssa: str | None = None,
+) -> None:
+    if len(continued) != len(carried):
+        _token_failure(
+            f"{where}: loop continue arity does not match its carried values"
+        )
+    slots = []
+    for index, (name, typ, _initial) in enumerate(carried):
+        if typ != "Token":
+            continue
+        value = _token_value(continued[index], f"{where} continue")
+        marker = markers[name]
+        # Initial dependencies may stand for all iterations only when each
+        # carried token preserves its own ancestry on every backedge.
+        if not _token_contains(value, marker, st.path):
+            _token_failure(
+                f"{where}: a carried token drops or swaps its prior ancestry"
+            )
+        slots.append((marker, value))
+    if not body:
+        return
+    if require_serial:
+        # Await representatives stand for every failed poll, even plain
+        # loads. Their retained edges still require one serial boundary.
+        for marker, value in slots:
+            if all(
+                _token_contains(
+                    st.token_inputs[index], marker, _access_control(st, index)
+                )
+                and _token_contains(value, index, _access_control(st, index))
+                for index in body
+            ):
+                return
+        _token_failure(
+            f"{where}: independent iteration token topology has no verified "
+            "serial memory boundary"
+        )
+
+    assert loop_ssa is not None
+    controls = {index: _access_control(st, index) for index in body}
+
+    def orders_next_iteration(first: int, second: int) -> bool:
+        # First feeds the carried value in an earlier iteration; second
+        # consumes that slot in a later iteration. Slot preservation above
+        # carries the edge through any intervening iterations. These two
+        # path implications apply independently in their own iterations.
+        return any(
+            _token_contains(value, first, controls[first])
+            and _token_contains(st.token_inputs[second], marker, controls[second])
+            for marker, value in slots
+        )
+
+    for offset, first in enumerate(body):
+        for second in body[offset:]:
+            if not (st.accesses[first].is_write or st.accesses[second].is_write):
+                continue
+            if orders_next_iteration(first, second) and orders_next_iteration(
+                second, first
+            ):
+                continue
+            # A write's self-pair matters too: the shared-iterator query
+            # cannot see two executions of that operation at different
+            # iterations. All unproved pairs survive to the encoder.
+            st.loop_token_conflicts.append(LoopTokenConflict(loop_ssa, first, second))
+
+
+def _access_control(st: _State, index: int) -> Term | None:
+    """Reachability of an operation, excluding its per-element mask."""
+    access = st.accesses[index]
+    path = access.path
+    loops = st.loops if st.multipath else ([st.loop] if st.loop is not None else [])
+    for loop in loops:
+        if loop.loop_ssa in access.loops or (not st.multipath and access.in_loop):
+            path = _token_and(path, Cmp("slt", loop.lower, loop.upper))
+    return path
+
+
+def _without_markers(token: _Token, markers: dict[str, str]) -> _Token:
+    removed = set(markers.values())
+    return _Token(
+        {key: value for key, value in token.predecessors.items() if key not in removed}
+    )
+
+
+def _handle_for(
+    lines: list[str],
+    i: int,
+    indent: int,
+    results: list[tuple[str, str]],
+    fm: re.Match,
+    st: _State,
+) -> int:
+    if (st.in_loop or st.loop is not None) and not st.multipath:
+        raise UnsupportedTTIR(
+            f"line {i + 1}: multiple/nested loops", kind="nested-loop"
+        )
+    iv = _strip_prov(fm.group(1))
+    bounds = [_as_term(_val(st, b), "loop bound") for b in _split_top(fm.group(2))]
+    if len(bounds) == 2:
+        bounds = [Const(0), *bounds, Const(1)][:3]
+    if len(bounds) != 3:
+        raise UnsupportedTTIR(
+            f"line {i + 1}: range() with {len(bounds)} bounds", kind="parse"
+        )
+    return _lift_counted_loop(
+        lines,
+        i,
+        indent,
+        results,
+        st,
+        iv=iv,
+        bounds=bounds,
+        carried_text=fm.group(3) or "",
+        where=f"line {i + 1} (for {iv})",
+        form="for",
+        exit_test_end=None,
+    )
+
+
+def _lift_counted_loop(
+    lines: list[str],
+    i: int,
+    indent: int,
+    results: list[tuple[str, str]],
+    st: _State,
+    *,
+    iv: str,
+    bounds: list[Term],
+    carried_text: str,
+    where: str,
+    form: str,
+    exit_test_end: int | None,
+) -> int:
+    """Lift a loop whose trip count is ``range(lower, upper, step)``.
+
+    Shared by the ``for`` construct and by the counted ``loop`` form the
+    cuTile frontend emits for a Python ``while`` (see
+    :func:`_counted_while_shape`). ``exit_test_end`` is the index of the
+    first body line past the counted loop's top test; ``None`` for a
+    ``for``, whose body starts right after the parameter header.
+    """
+    saved_env = st.env.copy()
+    carried = _carried_values(carried_text, st, where)
+    if len(results) != len(carried):
+        _token_failure(f"{where}: loop result arity does not match carried values")
+    trip_count = None
+    if all(isinstance(b, Const) for b in bounds):
+        lower, upper, step = (b.value for b in bounds if isinstance(b, Const))
+        if step <= 0:
+            _token_failure(f"{where}: non-positive loop step")
+        trip_count = max(0, (upper - lower + step - 1) // step)
+    if trip_count == 0:
+        # No body operation or token result is evaluated by a zero-trip loop.
+        for (name, _typ), (_arg, typ, initial) in zip(results, carried):
+            st.env[name] = initial if typ == "Token" else DataDep("loop result")
+        j = i + 1
+        if j < len(lines) and lines[j].strip().startswith("do ("):
+            j += 1
+        while j < len(lines) and len(lines[j]) - len(lines[j].lstrip()) > indent:
+            j += 1
+        return j
+    markers = _bind_loop_tokens(carried, st, where)
+    info = LoopInfo(
+        loop_ssa=iv, induction_var=iv, lower=bounds[0], upper=bounds[1], step=bounds[2]
+    )
+    if st.multipath:
+        # cuTile SSA names are unique per kernel, so the induction
+        # variable identifies the loop; opening order = outer before inner
+        st.loops.append(info)
+    else:
+        st.loop = info
+    # `do (params)` line, then the body header `(params):` one level in
+    j = i + 1
+    if j < len(lines) and lines[j].strip().startswith("do ("):
+        j += 1
+    body_indent = indent + 4
+    if j < len(lines):
+        hdr = lines[j].strip()
+        if hdr.startswith("(") and hdr.endswith("):"):
+            for item in _split_top(hdr[1:-2]):
+                m = _RE_TYPED_NAME.match(item)
+                if not m:
+                    continue
+                pname, ptyp = _strip_prov(m.group(1)), m.group(2)
+                if pname == iv:
+                    st.env[pname] = LoopVar(iv)
+                elif ptyp.strip() == "Token":
+                    if pname not in markers:
+                        _token_failure(f"{where}: unknown token body parameter {pname}")
+                else:
+                    st.env[pname] = DataDep("loop-carried value")
+            j += 1
+    if exit_test_end is not None:
+        # `_counted_while_shape` validated and located the top test; its
+        # comparison and `if`/`then`/`else` block carry no memory access
+        # and no value the body reads, so the lift steps over them.
+        j = exit_test_end
+    st.in_loop = True
+    saved_path, saved_guarded = st.path, st.guarded
+    st.loop_stack.append(iv)
+    first_access = len(st.accesses)
+    j = _walk(lines, j, body_indent, st)
+    st.loop_stack.pop()
+    st.path, st.guarded = saved_path, saved_guarded
+    st.in_loop = bool(st.loop_stack)
+    if (
+        st.multipath
+        and j < len(lines)
+        and len(lines[j]) - len(lines[j].lstrip()) == body_indent
+        and lines[j].strip().split(" ", 1)[0] in ("yield", "break")
+    ):
+        raise UnsupportedTTIR(
+            f"line {j + 1}: `{lines[j].strip().split(' ')[0]}` inside a "
+            f"`{form}` body is not modeled",
+            kind="control-flow",
+        )
+    if j == 0 or lines[j - 1].strip().split(" ", 1)[0] != "continue":
+        _token_failure(f"{where}: missing top-level continue token operands")
+    continued = _terminator_values(lines[j - 1].strip(), "continue", st)
+    if len(continued) != len(carried):
+        _token_failure(f"{where}: loop continue arity does not match carried values")
+    if trip_count != 1:
+        _serial_loop_boundary(
+            carried,
+            markers,
+            continued,
+            range(first_access, len(st.accesses)),
+            st,
+            where,
+            loop_ssa=iv,
+        )
+    nonempty = Cmp("slt", bounds[0], bounds[1])
+    st.env = saved_env
+    for index, (rname, rtyp) in enumerate(results):
+        if rtyp.strip() == "Token":
+            current = _without_markers(
+                _token_value(continued[index], f"{where} result"), markers
+            )
+            st.env[rname] = (
+                current
+                if trip_count is not None
+                else _token_union(
+                    [
+                        (current, nonempty),
+                        (carried[index][2], Not(nonempty)),
+                    ]
+                )
+            )
+        else:
+            st.env[rname] = DataDep("loop result")
+    return j
+
+
+_RE_INT_SCALAR = re.compile(r"^(?:const )?Tile\[u?int\d+,\(\)\]$")
+
+
+def _nesting_scan(
+    lines: list[str], start: int, body_indent: int
+) -> tuple[int, list[int], bool]:
+    """Walk a loop body's lines, separating this loop's own terminators
+    from those of nested constructs.
+
+    Returns ``(end, continues, has_break)``: the index one past the body,
+    the indices of the ``continue`` lines that terminate THIS body, and
+    whether any ``break`` targets THIS loop. A ``break`` inside a nested
+    `if` region still exits the enclosing loop, so only a nested ``loop``
+    / ``for`` / combiner ``do`` block shields a terminator from this
+    loop; the scan tracks exactly those.
+    """
+    n = len(lines)
+    shields: list[int] = []
+    continues: list[int] = []
+    has_break = False
+    k = start
+    while k < n:
+        raw = lines[k]
+        cur = len(raw) - len(raw.lstrip())
+        if cur < body_indent:
+            break
+        while shields and cur <= shields[-1]:
+            shields.pop()
+        line = raw.strip()
+        head = line.split(" ", 1)[0]
+        if not shields:
+            if head == "break":
+                has_break = True
+            elif head == "continue":
+                continues.append(k)
+        _lhs, eq, rhs = line.partition(" = ")
+        opened = rhs if eq else line
+        if _RE_FOR.match(opened) or _RE_LOOP.match(opened) or opened.startswith("do ("):
+            shields.append(cur)
+        k += 1
+    return k, continues, has_break
+
+
+def _counted_while_shape(
+    lines: list[str],
+    i: int,
+    indent: int,
+    results: list[tuple[str, str]],
+    lm: re.Match,
+    st: _State,
+) -> dict[str, Any] | None:
+    """Recognize the counted form of the while-form ``loop`` construct.
+
+    The cuTile frontend lowers a Python ``while i < N:`` over an integer
+    counter into a ``loop`` whose body opens with the test and exits
+    through it. Exactly this shape is lifted to the ``for`` semantics:
+
+    * one integer scalar carried slot is the induction variable, named by
+      the FIRST body line, ``raw_cmp(lhs=<induction>, rhs=<bound>,
+      fn="lt")``, immediately consumed by ``if(cond=...)`` whose ``then``
+      arm is a bare ``yield`` and whose ``else`` arm ``break``s;
+    * the bound is loop invariant. It is read on the first body line, so
+      by SSA dominance it is defined outside the loop; the scan also
+      rejects a bound that names a carried parameter;
+    * the ``break`` operands repeat the carried parameters in order, so a
+      loop result is the carried value at the top of the exiting
+      iteration, which is what :func:`_lift_counted_loop` already
+      computes for a ``for`` result;
+    * the body has exactly one terminator of its own, the trailing
+      ``continue``, and no ``break`` outside a nested loop. This is what
+      makes the trip count ``range(init, bound, step)``: without single
+      exit the zero-trip rule would DELETE in-loop accesses that a real
+      early exit still performs;
+    * the induction slot's ``continue`` operand is ``<induction> + K``
+      for a positive integer constant ``K`` defined outside the loop.
+
+    Returns the keyword arguments for :func:`_lift_counted_loop`, or
+    ``None`` when any clause fails, in which case ``_handle_loop`` falls
+    back to the await shape and to the byte-identical control-flow
+    refusal.
+    """
+    n = len(lines)
+    items = [c for c in _split_top(lm.group(1) or "") if c.strip()]
+    if not items or len(items) != len(results):
+        return None
+    names: list[str] = []
+    types: list[str] = []
+    inits: list[str] = []
+    for item in items:
+        lhs, sep, rhs = item.partition(" = ")
+        m = _RE_TYPED_NAME.match(lhs)
+        if not sep or m is None:
+            return None
+        names.append(_strip_prov(m.group(1)))
+        types.append(m.group(2).strip())
+        inits.append(rhs.strip())
+
+    j = i + 1
+    if j < n and lines[j].strip().startswith("do ("):
+        j += 1
+    body_indent = indent + 4
+    if j >= n:
+        return None
+    hdr = lines[j].strip()
+    if not (hdr.startswith("(") and hdr.endswith("):")):
+        return None
+    params: list[str] = []
+    for item in _split_top(hdr[1:-2]):
+        m = _RE_TYPED_NAME.match(item)
+        if m is None:
+            return None
+        params.append(_strip_prov(m.group(1)))
+    if params != names:
+        return None
+    j += 1
+
+    # the top test
+    if j >= n or len(lines[j]) - len(lines[j].lstrip()) != body_indent:
+        return None
+    lhs, eq, rhs = lines[j].strip().partition(" = ")
+    om = _RE_OP.match(rhs) if eq else None
+    m = _RE_TYPED_NAME.match(lhs)
+    if om is None or m is None or om.group(1) != "raw_cmp":
+        return None
+    cond = _strip_prov(m.group(1))
+    kw = _parse_kwargs(om.group(2))
+    if kw.get("fn") != '"lt"':
+        return None
+    induction = _strip_prov(kw.get("lhs", ""))
+    bound = _strip_prov(kw.get("rhs", ""))
+    if induction not in names or bound in names:
+        return None
+    slot = names.index(induction)
+    if not _RE_INT_SCALAR.match(types[slot]):
+        return None
+    j += 1
+
+    # `if(cond=$c)` / `then: yield` / `else: break <carried identity>`
+    im = _RE_IF.match(lines[j].strip()) if j < n else None
+    if (
+        im is None
+        or _strip_prov(im.group(1)) != cond
+        or len(lines[j]) - len(lines[j].lstrip()) != body_indent
+    ):
+        return None
+    j += 1
+    arm_indent = body_indent + 4
+    for label, terminator in (("then", "yield"), ("else", "break")):
+        if (
+            j >= n
+            or lines[j].strip() != label
+            or len(lines[j]) - len(lines[j].lstrip()) != body_indent
+        ):
+            return None
+        j += 1
+        if j < n and lines[j].strip() == "():":
+            j += 1
+        if j >= n or len(lines[j]) - len(lines[j].lstrip()) != arm_indent:
+            return None
+        arm = lines[j].strip()
+        if arm.split(" ", 1)[0] != terminator:
+            return None
+        operands = [t.strip() for t in _split_top(arm[len(terminator) :]) if t.strip()]
+        if terminator == "yield":
+            if operands:
+                return None
+        elif [_strip_prov(o) for o in operands] != names:
+            return None
+        j += 1
+
+    # the exit test's arms end at their terminator, so the body resumes at
+    # the loop's own level
+    if j >= n or len(lines[j]) - len(lines[j].lstrip()) != body_indent:
+        return None
+
+    # single exit, single `continue`, and it closes the body
+    end, continues, has_break = _nesting_scan(lines, j, body_indent)
+    if has_break or len(continues) != 1 or continues[0] != end - 1:
+        return None
+    if len(lines[end - 1]) - len(lines[end - 1].lstrip()) != body_indent:
+        return None
+    continued = [
+        t.strip()
+        for t in _split_top(lines[end - 1].strip()[len("continue") :])
+        if t.strip()
+    ]
+    if len(continued) != len(names):
+        return None
+
+    # the induction slot advances by a positive constant
+    advance = _strip_prov(continued[slot])
+    step: int | None = None
+    for k in range(j, end):
+        if len(lines[k]) - len(lines[k].lstrip()) != body_indent:
+            # the advance must be unconditional on every iteration that
+            # reaches the backedge, so it is a top-level body statement
+            continue
+        a_lhs, a_eq, a_rhs = lines[k].strip().partition(" = ")
+        a_m = _RE_TYPED_NAME.match(a_lhs) if a_eq else None
+        if a_m is None or _strip_prov(a_m.group(1)) != advance:
+            continue
+        a_om = _RE_OP.match(a_rhs)
+        if a_om is None or a_om.group(1) != "raw_binary_arith":
+            return None
+        a_kw = _parse_kwargs(a_om.group(2))
+        if a_kw.get("fn") != '"add"' or _strip_prov(a_kw.get("lhs", "")) != induction:
+            return None
+        delta = _val(st, a_kw.get("rhs", ""))
+        if not isinstance(delta, Const) or delta.value <= 0:
+            return None
+        step = delta.value
+        break
+    if step is None:
+        return None
+
+    return {
+        "iv": induction,
+        "bounds": [
+            _as_term(_val(st, inits[slot]), "loop bound"),
+            _as_term(_val(st, bound), "loop bound"),
+            Const(step),
+        ],
+        "carried_text": lm.group(1) or "",
+        "where": f"line {i + 1} (loop {induction})",
+        "form": "loop",
+        "exit_test_end": j,
+    }
+
+
+_WHILE_FORM_REFUSAL = (
+    "while-form `loop` construct (carried values, data-dependent trip) is not modeled"
+)
+
+
+def _handle_loop(
+    lines: list[str],
+    i: int,
+    indent: int,
+    results: list[tuple[str, str]],
+    lm: re.Match,
+    st: _State,
+) -> int:
+    """The while-form ``loop`` construct. Only the AWAIT shape is modeled
+    (the TTIR reader's scf.while contract, spec C1.1, mirrored so a
+    cuTile twin decides exactly like its Triton row): a loop whose carried
+    values and results are memory-ordering tokens only, whose body
+    re-reads ONE location without mutating it (a plain load, or an RMW
+    with an identity operand), compares the observation against a
+    loop-invariant value and breaks on that test, with nothing else in
+    the body but value bookkeeping. The loop collapses to that one access
+    stamped ``awaited`` with the EXIT predicate over its observation; the
+    encoder makes the verdict conditional on termination. Applies at
+    every ladder level: the await abstraction is a reader capability, not
+    a concretization rung.
+
+    A loop that carries data values is tried first against the COUNTED
+    shape (:func:`_counted_while_shape`), the lowering of a python
+    ``while i < N`` over an integer counter, which has an ordinary
+    ``range`` trip count and is lifted like a ``for``. Everything else -
+    a genuinely data-dependent trip count, a multi-exit walk - keeps the
+    control-flow refusal, byte for byte.
+    """
+    line_no = i + 1
+    shape = _counted_while_shape(lines, i, indent, results, lm, st)
+    if shape is not None:
+        if (st.in_loop or st.loop is not None) and not st.multipath:
+            raise UnsupportedTTIR(
+                f"line {line_no}: multiple/nested loops", kind="nested-loop"
+            )
+        return _lift_counted_loop(lines, i, indent, results, st, **shape)
+    carried = [c for c in _split_top(lm.group(1) or "") if c.strip()]
+    for c in carried:
+        lhs_c, _, _init = c.partition(" = ")
+        tm = _RE_TYPED_NAME.match(lhs_c)
+        if not tm or tm.group(2).strip() != "Token":
+            raise UnsupportedTTIR(
+                f"line {line_no}: {_WHILE_FORM_REFUSAL}", kind="control-flow"
+            )
+    if any(rtyp.strip() != "Token" for _, rtyp in results):
+        raise UnsupportedTTIR(
+            f"line {line_no}: {_WHILE_FORM_REFUSAL}", kind="control-flow"
+        )
+    where = f"line {line_no} (loop)"
+    saved_env = st.env.copy()
+    carried_values = _carried_values(lm.group(1) or "", st, where)
+    if len(carried_values) != len(results):
+        _token_failure(f"{where}: loop result arity does not match carried tokens")
+    markers = _bind_loop_tokens(carried_values, st, where)
+    if st.in_spin:
+        raise UnsupportedTTIR(
+            f"{where}: nested spin loops are not the await shape",
+            kind="spin-shape",
+        )
+    n = len(lines)
+    j = i + 1
+    if j < n and lines[j].strip().startswith("do ("):
+        j += 1
+    body_indent = indent + 4
+    if j < n:
+        hdr = lines[j].strip()
+        if hdr.startswith("(") and hdr.endswith("):"):
+            for item in _split_top(hdr[1:-2]):
+                tm = _RE_TYPED_NAME.match(item)
+                if tm:
+                    if _strip_prov(tm.group(1)) not in markers:
+                        _token_failure(f"{where}: unknown token body parameter")
+            j += 1
+    n_before = len(st.accesses)
+    exit_pred: Term | None = None
+    exit_tokens: list[Any] | None = None
+    continued: list[Any] | None = None
+    st.in_spin = True
+    try:
+        closed = False
+        while j < n:
+            raw = lines[j]
+            cur = len(raw) - len(raw.lstrip())
+            if cur < body_indent:
+                break
+            line = raw.strip()
+            head = line.split(" ", 1)[0]
+            if cur > body_indent:
+                raise UnsupportedTTIR(
+                    f"line {j + 1}: spin-loop body must be the poll and its "
+                    f"bookkeeping, found nested {head!r}",
+                    kind="spin-shape",
+                )
+            if head == "continue":
+                continued = _terminator_values(line, "continue", st)
+                closed = True
+                j += 1
+                break
+            im = _RE_IF.match(line)
+            if im:
+                if exit_pred is not None:
+                    raise UnsupportedTTIR(
+                        f"line {j + 1}: a spin loop has exactly one exit test",
+                        kind="spin-shape",
+                    )
+                j, exit_pred, exit_tokens = _spin_exit_test(
+                    lines, j, body_indent, im.group(1), st
+                )
+                continue
+            _lhs, eq, rhs = line.partition(" = ")
+            nested = (
+                not eq
+                or _RE_FOR.match(rhs)
+                or _RE_LOOP.match(rhs)
+                or rhs.startswith(("if(", "if "))
+                or line.startswith("do (")
+            )
+            if nested:
+                raise UnsupportedTTIR(
+                    f"line {j + 1}: spin-loop body must be the poll and its "
+                    f"bookkeeping, found {head!r}",
+                    kind="spin-shape",
+                )
+            if rhs.startswith(("tile_store", "store_pointer")):
+                raise UnsupportedTTIR(
+                    f"line {j + 1}: store inside a spin loop is not the await shape",
+                    kind="spin-shape",
+                )
+            before = len(st.accesses)
+            j = _handle_line(lines, j, body_indent, line, st)
+            if len(st.accesses) > before:
+                if len(st.accesses) - n_before > 1:
+                    raise UnsupportedTTIR(
+                        f"{where}: the spin condition must re-read exactly one "
+                        f"location (found {len(st.accesses) - n_before} memory "
+                        "accesses)",
+                        kind="spin-shape",
+                    )
+                # the poll's value IS an observation (the exit predicate is
+                # asserted over it, C1.2): rebind its integer result from
+                # the generic DataDep to Observed
+                idx = len(st.accesses) - 1
+                if not st.accesses[idx].elem_float:
+                    for item in _split_top(_lhs):
+                        tm = _RE_TYPED_NAME.match(item)
+                        if tm and tm.group(2).strip() != "Token":
+                            st.env[_strip_prov(tm.group(1))] = Observed(idx)
+        if not closed:
+            raise UnsupportedTTIR(
+                f"{where}: spin-loop body ended without `continue`",
+                kind="spin-shape",
+            )
+    finally:
+        st.in_spin = False
+    _finalize_await(where, n_before, exit_pred, st)
+    assert continued is not None
+    _serial_loop_boundary(
+        carried_values,
+        markers,
+        continued,
+        range(n_before, len(st.accesses)),
+        st,
+        where,
+        require_serial=True,
+    )
+    if exit_tokens is None or len(exit_tokens) != len(results):
+        _token_failure(f"{where}: break token operands do not match loop results")
+    st.env = saved_env
+    for (rname, _), value in zip(results, exit_tokens):
+        st.env[rname] = _without_markers(_token_value(value, f"{where} break"), markers)
+    return j
+
+
+def _spin_exit_test(
+    lines: list[str], j: int, indent: int, cond_token: str, st: _State
+) -> tuple[int, Term, list[Any]]:
+    """The spin loop's exit test: ``if(cond=$c)`` whose two arms are one
+    terminator each, ``yield`` (poll again) or ``break`` (exit). Returns
+    (index past the block, EXIT predicate): ``cond`` when the then-arm
+    breaks, ``Not(cond)`` when the else-arm does (the continue condition
+    negated, as the TTIR reader's ``scf.condition`` handling)."""
+    n = len(lines)
+    cv = _as_term(_val(st, cond_token), "spin exit test")
+    breaks: dict[str, bool] = {}
+    exit_tokens: list[Any] = []
+    k = j + 1
+    for label in ("then", "else"):
+        at = (
+            k < n
+            and lines[k].strip() == label
+            and len(lines[k]) - len(lines[k].lstrip()) == indent
+        )
+        if not at:
+            if label == "then":
+                raise UnsupportedTTIR(
+                    f"line {k + 1}: expected `then` after the spin exit test",
+                    kind="spin-shape",
+                )
+            break
+        k += 1
+        arm_indent = indent + 4
+        if (
+            k < n
+            and lines[k].strip().startswith("(")
+            and lines[k].strip().endswith("):")
+        ):
+            k += 1
+        term = lines[k].strip().split(" ", 1)[0] if k < n else ""
+        if (
+            term not in ("yield", "break")
+            or len(lines[k]) - len(lines[k].lstrip()) != arm_indent
+        ):
+            raise UnsupportedTTIR(
+                f"line {k + 1}: a spin exit arm must be a bare `yield` or "
+                f"`break`, found {term!r}",
+                kind="spin-shape",
+            )
+        breaks[label] = term == "break"
+        operands = _terminator_values(lines[k].strip(), term, st)
+        if term == "break":
+            exit_tokens = operands
+        elif operands:
+            _token_failure(f"line {k + 1}: result-free spin test yields token operands")
+        k += 1
+    n_break = sum(breaks.values())
+    if n_break != 1:
+        raise UnsupportedTTIR(
+            f"line {j + 1}: the spin exit test must break on exactly one arm "
+            f"(found {n_break})",
+            kind="spin-shape",
+        )
+    exit_pred: Term = cv if breaks.get("then") else Not(cv)
+    return k, exit_pred, exit_tokens
+
+
+def _finalize_await(
+    where: str, n_before: int, exit_pred: Term | None, st: _State
+) -> None:
+    """Validate the C1.1 shape contract at the loop's end and stamp the
+    poll with ``awaited`` and the exit predicate (the TTIR reader's
+    ``_finalize_await``, clause for clause). Memory order and scope stay
+    exactly as written: a relaxed spin yields no synchronizes-with edge,
+    which IS the missing-acquire bug the detector exists to find."""
+    n_new = len(st.accesses) - n_before
+    if n_new != 1:
+        raise UnsupportedTTIR(
+            f"{where}: the spin condition must re-read exactly one location "
+            f"(found {n_new} memory accesses)",
+            kind="spin-shape",
+        )
+    if exit_pred is None:
+        raise UnsupportedTTIR(
+            f"{where}: spin loop without an exit test", kind="spin-shape"
+        )
+    idx = len(st.accesses) - 1
+    acc = st.accesses[idx]
+    if acc.elem_float:
+        raise UnsupportedTTIR(
+            f"{where}: the awaited location is float-typed (the observation "
+            "model is Int-sort only)",
+            kind="spin-shape",
+        )
+    # ONE kept read stands for every dropped iteration: sound only when the
+    # re-read leaves the awaited location alone. A plain load never writes;
+    # a CAS writes exactly once, on success (the single modeled write); an
+    # RMW re-read that mutates (atomic_add(flag, 1) spins) writes on every
+    # dropped iteration and could terminate on its own increments (the
+    # self-satisfying spin). Identity operands only: add/or/xor 0.
+    if acc.kind == "atomic_cas" and (acc.atomic_cmp is None or acc.atomic_val is None):
+        raise UnsupportedTTIR(
+            f"{where}: the CAS poll's compare/desired operands are not modelable",
+            kind="spin-shape",
+        )
+    if acc.kind == "atomic_rmw":
+        op = ((acc.atomic.rmw_op if acc.atomic else None) or "").lower()
+        identity = op in ("add", "or", "xor") and acc.atomic_val == Const(0)
+        if not identity:
+            raise UnsupportedTTIR(
+                f"{where}: the spin re-read MUTATES the awaited location "
+                f"(atomic {op or '?'} with a non-identity operand); dropped "
+                "iterations would lose real writes",
+                kind="spin-shape",
+            )
+    cv = exit_pred.a if isinstance(exit_pred, Not) else exit_pred
+    if not isinstance(cv, Cmp):
+        raise UnsupportedTTIR(
+            f"{where}: the spin condition is not a comparison over the awaited read",
+            kind="spin-shape",
+        )
+    a_is_obs = isinstance(cv.a, Observed) and cv.a.access_index == idx
+    b_is_obs = isinstance(cv.b, Observed) and cv.b.access_index == idx
+    expected = cv.b if a_is_obs else cv.a
+    if a_is_obs == b_is_obs or idx in observed_indices(expected):
+        raise UnsupportedTTIR(
+            f"{where}: the spin condition must compare the awaited read "
+            "against a loop-invariant expected value",
+            kind="spin-shape",
+        )
+    st.accesses[idx] = replace(acc, awaited=True, exit_pred=exit_pred)
+
+
+def _conj(a: Term | None, b: Term | None) -> Term | None:
+    if a is None:
+        return b
+    if b is None:
+        return a
+    return BoolBin("and", a, b)
+
+
+def _disj(a: Term | None, b: Term | None) -> Term | None:
+    if a is None or b is None:
+        return None
+    return BoolBin("or", a, b)
+
+
+_FALSE: Term = Cmp("ne", Const(0), Const(0))
+
+
+def _walk_arm(
+    lines: list[str], j: int, indent: int, st: _State
+) -> tuple[int, str, list[str]]:
+    """Walk one if-arm body at ``indent``; returns (index past the arm,
+    terminator, yield operand tokens). The terminator is ``yield``,
+    ``return``, or ``dedent`` (an arm that just runs out)."""
+    k = _walk(lines, j, indent, st)
+    if k > j and lines[k - 1].strip() == "return":
+        cur = len(lines[k - 1]) - len(lines[k - 1].lstrip())
+        if cur == indent:
+            return k, "return", []
+    if k < len(lines):
+        t = lines[k].strip()
+        cur = len(lines[k]) - len(lines[k].lstrip())
+        head = t.split(" ", 1)[0]
+        if cur == indent and head == "yield":
+            toks = [x for x in _split_top(t[len("yield") :].strip()) if x]
+            return k + 1, "yield", toks
+        if cur == indent and head == "break":
+            raise UnsupportedTTIR(
+                f"line {k + 1}: `break` inside an `if` arm is not modeled",
+                kind="control-flow",
+            )
+    return k, "dedent", []
+
+
+def _handle_if(
+    lines: list[str],
+    i: int,
+    indent: int,
+    results: list[tuple[str, str]],
+    cond_token: str,
+    st: _State,
+) -> int:
+    """Multipath: both arms under path predicates (design section 3.1 of
+    Route 3, the structured case: cuTile IR has no basic blocks, so an
+    early ``return`` in one arm simply makes the code after the ``if``
+    carry the other arm's condition)."""
+    cv = _val(st, cond_token)
+    cond: Term | None = None
+    if isinstance(
+        cv, (Const, Pid, Param, Arange, LoopVar, Bin, Cmp, BoolBin, Select, Not)
+    ) and not _has_datadep(cv):
+        cond = cv  # type: ignore[assignment]
+    if any(t.strip() == "Token" for _, t in results) and (
+        cond is None or not _token_scalar(cond)
+    ):
+        _token_failure(f"line {i + 1}: token-valued if needs an exact scalar predicate")
+    saved_path, saved_guarded = st.path, st.guarded
+    saved_env = st.env.copy()
+    n = len(lines)
+    j = i + 1
+    arms: dict[str, tuple[str, list[Any]]] = {}
+    # per arm: (path and guarded flag AT ITS END, falls through). A nested
+    # if whose arm returns narrows the path for the rest of the arm, and
+    # that narrowing must survive into the code after THIS if.
+    ends: dict[str, tuple[Term | None, bool, bool]] = {}
+    arm_conds: dict[str, Term | None] = {
+        "then": cond,
+        "else": None if cond is None else Not(cond),
+    }
+    for label in ("then", "else"):
+        at_indent = (
+            j < n
+            and lines[j].strip() == label
+            and len(lines[j]) - len(lines[j].lstrip()) == indent
+        )
+        if not at_indent:
+            if label == "else":
+                break  # an if without an else arm (that line is not OUR else)
+            raise UnsupportedTTIR(
+                f"line {j + 1}: expected `{label}` after `if`", kind="parse"
+            )
+        j += 1
+        body_indent = indent + 4
+        if (
+            j < n
+            and lines[j].strip().startswith("(")
+            and lines[j].strip().endswith("):")
+        ):
+            j += 1  # the arm's (empty) parameter header
+        st.guarded = saved_guarded or cond is None
+        st.path = _conj(saved_path, arm_conds[label])
+        st.env = saved_env.copy()
+        j, term, toks = _walk_arm(lines, j, body_indent, st)
+        vals = [_val(st, t) for t in toks]  # resolved inside the arm's scope
+        arms[label] = (term, vals)
+        ends[label] = (st.path, st.guarded, term != "return")
+        st.path, st.guarded = saved_path, saved_guarded
+    if "else" not in ends:
+        # a missing else arm falls through under Not(cond) unchanged
+        ends["else"] = (
+            _conj(saved_path, arm_conds["else"]),
+            saved_guarded or cond is None,
+            True,
+        )
+    # The continuation: the code after the if runs under the disjunction
+    # of the end paths of the arms that fall through; an arm that returns
+    # (directly, or through a nested if that narrowed its end path)
+    # contributes nothing.
+    through = [lbl for lbl in ("then", "else") if ends[lbl][2]]
+    if not through:
+        st.path = _conj(saved_path, _FALSE)  # unreachable
+        st.guarded = saved_guarded
+    else:
+        untouched = all(
+            ends[lbl][0] == _conj(saved_path, arm_conds[lbl])
+            and ends[lbl][1] == (saved_guarded or cond is None)
+            for lbl in through
+        )
+        if len(through) == 2 and untouched:
+            # both arms fall through with nothing narrowed inside: the
+            # continuation is the entry path itself (keep the term small)
+            st.path = saved_path
+        elif cond is None:
+            st.path = saved_path
+        else:
+            cont: Term | None = None
+            for k, lbl in enumerate(through):
+                cont = ends[lbl][0] if k == 0 else _disj(cont, ends[lbl][0])
+            st.path = cont
+        st.guarded = (
+            saved_guarded or cond is None or any(ends[lbl][1] for lbl in through)
+        )
+    # results: a Select over the two yields when everything is modelable
+    then_vals = arms.get("then", ("", []))[1]
+    else_vals = arms.get("else", ("", []))[1]
+    st.env = saved_env
+    for idx, (rname, rtyp) in enumerate(results):
+        bound: Any = DataDep("if result")
+        if rtyp.strip() == "Token":
+            choices = []
+            for label in through:
+                term, values = arms.get(label, ("", []))
+                if term != "yield" or idx >= len(values):
+                    _token_failure(
+                        f"line {i + 1}: token-valued if has no matching yield"
+                    )
+                choices.append(
+                    (
+                        _token_value(values[idx], f"line {i + 1} {label} yield"),
+                        ends[label][0],
+                    )
+                )
+            bound = _token_union(choices)
+        elif (
+            cond is not None
+            and idx < len(then_vals)
+            and idx < len(else_vals)
+            and not isinstance(
+                then_vals[idx], (DataDep, PtrValue, _Token, _ArrayView, _PartView)
+            )
+            and not isinstance(
+                else_vals[idx], (DataDep, PtrValue, _Token, _ArrayView, _PartView)
+            )
+        ):
+            bound = Select(
+                cond, _as_term(then_vals[idx], "if"), _as_term(else_vals[idx], "if")
+            )
+        st.env[rname] = bound
+    return j
+
+
+def _record_view_access(
+    kind: str,
+    pv: Any,
+    index_vals: list[Any],
+    line_no: int,
+    st: _State,
+) -> None:
+    if not isinstance(pv, _PartView):
+        raise UnsupportedTTIR(
+            f"line {line_no}: {kind} view is not a partition view",
+            kind="parse",
+        )
+    arr = pv.array
+    rank = len(pv.tile_shape)
+    if len(index_vals) != rank or len(arr.shape) != rank or len(arr.strides) != rank:
+        raise UnsupportedTTIR(
+            f"line {line_no}: {kind} rank mismatch (index {len(index_vals)}, "
+            f"tile {rank}, array {len(arr.shape)})",
+            kind="parse",
+        )
+    offset: Term | None = None
+    mask: Term | None = None
+    mask_dropped = False
+    for ax in range(rank):
+        idx = _as_term(index_vals[ax], f"{kind} index")
+        whys = _datadep_whys(idx)
+        if whys:
+            raise UnsupportedTTIR(
+                f"line {line_no}: {kind} tile index: data-dependent "
+                f"({'; '.join(sorted(whys))})",
+                kind="indirect-address",
+            )
+        ts = pv.tile_shape[ax]
+        ar = _new_arange(st, ts, ax if rank > 1 else -1)
+        off_ax = Bin("+", Bin("*", idx, Const(ts)), ar)
+        shape_ax = arr.shape[ax]
+        shape_t = Const(shape_ax) if isinstance(shape_ax, int) else shape_ax
+        if _has_datadep(shape_t):
+            mask_dropped = True
+        else:
+            clip = BoolBin(
+                "and",
+                Cmp("sge", off_ax, Const(0)),
+                Cmp("slt", off_ax, shape_t),
+            )
+            mask = clip if mask is None else BoolBin("and", mask, clip)
+        stride_ax = arr.strides[ax]
+        stride_t = Const(stride_ax) if isinstance(stride_ax, int) else stride_ax
+        if _has_datadep(stride_t):
+            raise UnsupportedTTIR(
+                f"line {line_no}: {kind} stride: data-dependent",
+                kind="indirect-address",
+            )
+        contrib = Bin("*", off_ax, stride_t)
+        offset = contrib if offset is None else Bin("+", offset, contrib)
+    bits = _DTYPE_BITS.get(arr.dtype, 0)
+    st.accesses.append(
+        AccessEvent(
+            kind=kind,
+            base_param=arr.base,
+            offset=offset if offset is not None else Const(0),
+            mask=mask,
+            elem_bits=bits,
+            loc=None,
+            line_no=line_no,
+            in_loop=st.in_loop,
+            path=st.path,
+            guarded=st.guarded,
+            loops=tuple(st.loop_stack) if st.multipath else (),
+            mask_dropped=mask_dropped,
+            elem_float=arr.dtype in _FLOAT_DTYPES,
+        )
+    )
+
+
+def _loaded_binding(st: _State, other: Term | None = None) -> Any:
+    """Route 2 (L2 only): the VALUE of the load just recorded, as a
+    snapshot Select over its source tensor.
+
+    The TTIR reader's ``loaded_binding``, clause for clause, so a cuTile
+    row decides like its Triton twin: bound only under ``multipath``
+    (L0 and L1 keep :class:`DataDep` and every refusal fires as before);
+    a float pointee or a DROPPED mask keeps ``DataDep``, because only a
+    modeled mask can keep a masked-off lane, which holds ``other`` or an
+    undefined value, apart from the snapshot value. ``other`` is passed
+    only when it is a modelable term.
+    """
+    idx = len(st.accesses) - 1
+    acc = st.accesses[idx]
+    if not st.multipath or acc.elem_float or acc.mask_dropped:
+        return DataDep("loaded value")
+    return Loaded(idx, acc.base_param, acc.offset, acc.mask, other)
+
+
+def _handle_op(
+    op: str,
+    results: list[tuple[str, str]],
+    kw: dict[str, str],
+    line_no: int,
+    st: _State,
+) -> None:
+    env = st.env
+
+    def bind(value: Any) -> None:
+        env[results[0][0]] = value
+
+    if op in ("make_token", "join_tokens"):
+        for rname, _ in results:
+            env[rname] = _TOKEN
+        return
+    if op in ("assume_div_by", "assume_bounded"):
+        bind(_val(st, kw["x"]))
+        return
+    if op == "typed_const":
+        v = kw["value"]
+        if v in ("True", "False"):
+            bind(Const(1 if v == "True" else 0))
+            return
+        try:
+            bind(Const(int(v)))
+        except ValueError:
+            bind(DataDep(f"non-integer constant {v}"))
+        return
+    if op == "tile_bid":
+        axis = int(kw["axis"])
+        st.pid_axes.add(axis)
+        bind(Pid(axis))
+        return
+    if op == "tile_arange":
+        shape = _tile_shape_of(results[0][1])
+        if shape is None or len(shape) != 1:
+            bind(DataDep("arange with unparsable shape"))
+        else:
+            bind(_new_arange(st, shape[0], -1))
+        return
+    if op in ("tile_reshape", "tile_broadcast", "tile_astype", "tile_expand_dims"):
+        src = _val(st, kw["x"])
+        if isinstance(src, PtrValue):
+            bind(src)
+            return
+        tshape = _tile_shape_of(results[0][1])
+        if (
+            op in ("tile_reshape", "tile_expand_dims")
+            and tshape is not None
+            and len(tshape) > 1
+            and not isinstance(src, (DataDep, _Token, _ArrayView, _PartView))
+        ):
+            sized = [ax for ax, s in enumerate(tshape) if s > 1]
+            if len(sized) == 1:
+                src = _set_arange_dim(src, sized[0])
+        bind(src)
+        return
+    if op == "raw_binary_arith":
+        fn = kw["fn"].strip('"')
+        a, b = _val(st, kw["lhs"]), _val(st, kw["rhs"])
+        if fn == "cdiv":
+            at, bt = _as_term(a, "cdiv"), _as_term(b, "cdiv")
+            bind(Bin("//", Bin("+", at, Bin("-", bt, Const(1))), bt))
+        elif fn in _ARITH_FN:
+            bind(Bin(_ARITH_FN[fn], _as_term(a, fn), _as_term(b, fn)))
+        else:
+            bind(DataDep(f"arith fn {fn}"))
+        return
+    if op == "raw_cmp":
+        fn = kw["fn"].strip('"')
+        if fn in _CMP_FN:
+            bind(Cmp(_CMP_FN[fn], _as_term(_val(st, kw["lhs"]), "cmp"),
+                     _as_term(_val(st, kw["rhs"]), "cmp")))  # fmt: skip
+        else:
+            bind(DataDep(f"cmp fn {fn}"))
+        return
+    if op == "raw_binary_bitwise":
+        fn = kw["fn"].strip('"')
+        a = _as_term(_val(st, kw["lhs"]), "boolbin")
+        b = _as_term(_val(st, kw["rhs"]), "boolbin")
+        folded = _fold_bitwise(st, fn, a, b, results[0][1])
+        if folded is not None:
+            bind(folded)
+            return
+        if fn in ("and_", "or_") and results[0][1].strip().startswith("Tile[bool_"):
+            bind(BoolBin("and" if fn == "and_" else "or", a, b))
+        elif fn == "xor" and results[0][1].startswith("Tile[bool_"):
+            # boolean xor — the sign-disagreement test of the python
+            # floor-div/mod lowering (c_mod + fix). (a ∧ ¬b) ∨ (¬a ∧ b)
+            # keeps it fully modeled; INTEGER xor (bitonic partner
+            # indexing) stays DataDep below.
+            bind(
+                BoolBin(
+                    "or",
+                    BoolBin("and", a, Not(b)),
+                    BoolBin("and", Not(a), b),
+                )
+            )
+        else:
+            bind(DataDep(f"bitwise fn {fn}"))
+        return
+    if op == "raw_bitwise_shift":
+        fn = kw["fn"].strip('"')
+        a = _as_term(_val(st, kw["lhs"]), "shift")
+        b = _as_term(_val(st, kw["rhs"]), "shift")
+        folded = _fold_bitwise(st, fn, a, b, results[0][1])
+        bind(folded if folded is not None else DataDep(f"shift fn {fn}"))
+        return
+    if op == "fma":
+        # lhs*rhs + acc — an arithmetic identity, modelable for any dtype
+        bind(
+            Bin(
+                "+",
+                Bin(
+                    "*",
+                    _as_term(_val(st, kw["lhs"]), "fma"),
+                    _as_term(_val(st, kw["rhs"]), "fma"),
+                ),
+                _as_term(_val(st, kw["acc"]), "fma"),
+            )
+        )
+        return
+    if op == "unaryop":
+        fn = kw.get("fn", "").strip('"')
+        if fn == "neg":
+            bind(Bin("-", Const(0), _as_term(_val(st, kw["operand"]), "neg")))
+        else:
+            bind(DataDep(f"unary fn {fn}"))
+        return
+    if op == "raw_where":
+        c = _as_term(_val(st, kw["cond"]), "where")
+        x = _as_term(_val(st, kw["x"]), "where")
+        y = _as_term(_val(st, kw["y"]), "where")
+        bind(Select(c, x, y))
+        return
+    if op == "make_tensor_view":
+        base = _val(st, kw["base_ptr"])
+        if not isinstance(base, PtrValue):
+            raise UnsupportedTTIR(
+                f"line {line_no}: tensor view base is not a pointer",
+                kind="parse",
+            )
+        am = _RE_ARRAY_TYPE.match(results[0][1])
+        if not am:
+            raise UnsupportedTTIR(
+                f"line {line_no}: unparsable Array type {results[0][1][:60]!r}",
+                kind="parse",
+            )
+        dtype = am.group(1)
+        shape_spec = _split_top(am.group(2))
+        stride_spec = _split_top(am.group(3))
+        dyn_shapes = _tuple_vals(st, kw.get("shape", "()"))
+        dyn_strides = _tuple_vals(st, kw.get("dynamic_strides", "()"))
+        vshape: list[Any] = []
+        di = 0
+        for spec_s in shape_spec:
+            if spec_s == "?":
+                vshape.append(_as_term(dyn_shapes[di], "view shape"))
+                di += 1
+            else:
+                vshape.append(int(spec_s))
+        vstrides: list[Any] = []
+        si = 0
+        for spec_s in stride_spec:
+            if spec_s == "?":
+                vstrides.append(_as_term(dyn_strides[si], "view stride"))
+                si += 1
+            else:
+                vstrides.append(int(spec_s))
+        env[results[0][0]] = _ArrayView(base.base_param, vshape, vstrides, dtype)
+        return
+    if op == "make_partition_view":
+        arr = _val(st, kw["array"])
+        if not isinstance(arr, _ArrayView):
+            raise UnsupportedTTIR(
+                f"line {line_no}: partition view over non-array", kind="parse"
+            )
+        pm = _RE_PARTVIEW_TYPE.match(results[0][1])
+        if not pm:
+            raise UnsupportedTTIR(
+                f"line {line_no}: unparsable PartitionView type "
+                f"{results[0][1][:80]!r}",
+                kind="parse",
+            )
+        env[results[0][0]] = _PartView(arr, _ints(pm.group(1)), pm.group(3))
+        return
+    if op == "tile_load":
+        pv = _val(st, kw["view"])
+        _record_view_access("load", pv, _tuple_vals(st, kw["index"]), line_no, st)
+        # cuTile has no `other` operand: the value of a clipped lane is
+        # the partition view's padding mode. ZERO is the one mode that
+        # names a value; UNDETERMINED and NEG_INF leave the lane
+        # unspecified (a free pad array, the widening direction).
+        pad = getattr(pv, "padding", "")
+        loaded = _loaded_binding(st, Const(0) if pad == "ZERO" else None)
+        for rname, rtyp in results:
+            env[rname] = _TOKEN if rtyp.strip() == "Token" else loaded
+        return
+    if op == "tile_store":
+        pv = _val(st, kw["view"])
+        _record_view_access("store", pv, _tuple_vals(st, kw["index"]), line_no, st)
+        for rname, _ in results:
+            env[rname] = _TOKEN
+        return
+    if op in ("load_pointer", "store_pointer"):
+        # the raw-pointer gather/scatter path — semantically TTIR's
+        # tt.load/tt.store over addptr chains: per-element offsets, an
+        # explicit mask (compiler-emitted bounds + user routing)
+        ptr = _val(st, kw["pointer"])
+        if not isinstance(ptr, PtrValue):
+            raise UnsupportedTTIR(
+                f"line {line_no}: {op} base is not a pointer",
+                kind="indirect-address",
+            )
+        whys = _datadep_whys(ptr.offset)
+        if whys:
+            raise UnsupportedTTIR(
+                f"line {line_no}: pointer offset: data-dependent "
+                f"({'; '.join(sorted(whys))})",
+                kind="indirect-address",
+            )
+        mask_raw = kw.get("mask", "None")
+        if mask_raw == "None":
+            mask_v: Term | None = None
+            mask_dropped = False
+        else:
+            mv = _as_term(_val(st, mask_raw), f"{op} mask")
+            mask_dropped = _has_datadep(mv)
+            mask_v = None if mask_dropped else mv
+        bits, is_f = st.ptr_meta.get(ptr.base_param, (0, False))
+        st.accesses.append(
+            AccessEvent(
+                kind="load" if op == "load_pointer" else "store",
+                base_param=ptr.base_param,
+                offset=ptr.offset,
+                mask=mask_v,
+                elem_bits=bits,
+                loc=None,
+                line_no=line_no,
+                in_loop=st.in_loop,
+                path=st.path,
+                guarded=st.guarded,
+                loops=tuple(st.loop_stack) if st.multipath else (),
+                mask_dropped=mask_dropped,
+                elem_float=is_f,
+            )
+        )
+        if op == "load_pointer":
+            pv_raw = kw.get("padding_value", "None")
+            ov = _val(st, pv_raw) if pv_raw != "None" else None
+            unmodelable = (DataDep, PtrValue, _Token, _ArrayView, _PartView)
+            other = (
+                ov
+                if ov is not None
+                and not isinstance(ov, unmodelable)
+                and not _has_datadep(ov)
+                else None
+            )
+            bound: Any = _loaded_binding(st, other)
+        else:
+            bound = DataDep("loaded value")
+        for rname, rtyp in results:
+            env[rname] = _TOKEN if rtyp.strip() == "Token" else bound
+        return
+    if op == "pointer_offset":
+        ptr = _val(st, kw["pointer"])
+        if not isinstance(ptr, PtrValue):
+            raise UnsupportedTTIR(
+                f"line {line_no}: pointer_offset base is not a pointer",
+                kind="indirect-address",
+            )
+        off = _as_term(_val(st, kw["offset"]), "pointer offset")
+        whys = _datadep_whys(off)
+        if whys:
+            raise UnsupportedTTIR(
+                f"line {line_no}: pointer offset: data-dependent "
+                f"({'; '.join(sorted(whys))})",
+                kind="indirect-address",
+            )
+        bind(PtrValue(ptr.base_param, Bin("+", ptr.offset, off)))
+        return
+    if op == "tile_atomic_rmw":
+        ptr = _val(st, kw["pointer"])
+        if not isinstance(ptr, PtrValue):
+            raise UnsupportedTTIR(
+                f"line {line_no}: atomic_rmw of a non-pointer value",
+                kind="indirect-address",
+            )
+        mode = kw.get("mode", "").split(".")[-1]
+        rmw = _RMW_MODE.get(mode)
+        if rmw is None:
+            raise UnsupportedTTIR(
+                f"line {line_no}: unknown atomic mode {mode}", kind="parse"
+            )
+        mask_v = _as_term(_val(st, kw["mask"]), "atomic mask")
+        mask_dropped = _has_datadep(mask_v)
+        upd = _as_term(_val(st, kw["update"]), "atomic update")
+        bits, is_f = st.ptr_meta.get(ptr.base_param, (0, False))
+        sem = kw.get("memory_order", "").split(".")[-1].lower() or "acq_rel"
+        scope = _SCOPE.get(kw.get("memory_scope", "").split(".")[-1], "gpu")
+        st.accesses.append(
+            AccessEvent(
+                kind="atomic_rmw",
+                base_param=ptr.base_param,
+                offset=ptr.offset,
+                mask=None if mask_dropped else mask_v,
+                elem_bits=bits,
+                loc=None,
+                line_no=line_no,
+                in_loop=st.in_loop,
+                path=st.path,
+                guarded=st.guarded,
+                loops=tuple(st.loop_stack) if st.multipath else (),
+                atomic=AtomicInfo(rmw_op=rmw, sem=sem, scope=scope),
+                mask_dropped=mask_dropped,
+                atomic_val=None if (_has_datadep(upd) or is_f) else upd,
+                elem_float=is_f,
+            )
+        )
+        for rname, rtyp in results:
+            env[rname] = _TOKEN if rtyp.strip() == "Token" else DataDep("atomic result")
+        return
+
+    if op == "tile_atomic_cas":
+        # Recorded exactly as the TTIR reader records tt.atomic_cas: the
+        # compare and the desired operands as terms (None when they carry
+        # loaded data), the observation of the old value bound to the
+        # integer result. Ordinary and awaited integer CAS share the
+        # solver's conditional write and reads-from machinery; the encoder
+        # rejects operand expressions outside its exact value fragment.
+        ptr = _val(st, kw["pointer"])
+        if not isinstance(ptr, PtrValue):
+            raise UnsupportedTTIR(
+                f"line {line_no}: atomic_cas of a non-pointer value",
+                kind="indirect-address",
+            )
+        mask_v = _as_term(_val(st, kw["mask"]), "atomic mask")
+        mask_dropped = _has_datadep(mask_v)
+        cmp_t = _as_term(_val(st, kw["expected"]), "atomic cas cmp")
+        new_t = _as_term(_val(st, kw["desired"]), "atomic cas new")
+        bits, is_f = st.ptr_meta.get(ptr.base_param, (0, False))
+        sem = kw.get("memory_order", "").split(".")[-1].lower() or "acq_rel"
+        scope = _SCOPE.get(kw.get("memory_scope", "").split(".")[-1], "gpu")
+        st.accesses.append(
+            AccessEvent(
+                kind="atomic_cas",
+                base_param=ptr.base_param,
+                offset=ptr.offset,
+                mask=None if mask_dropped else mask_v,
+                elem_bits=bits,
+                loc=None,
+                line_no=line_no,
+                in_loop=st.in_loop,
+                path=st.path,
+                guarded=st.guarded,
+                loops=tuple(st.loop_stack) if st.multipath else (),
+                atomic=AtomicInfo(rmw_op=None, sem=sem, scope=scope),
+                mask_dropped=mask_dropped,
+                atomic_val=None if (_has_datadep(new_t) or is_f) else new_t,
+                atomic_cmp=None if (_has_datadep(cmp_t) or is_f) else cmp_t,
+                elem_float=is_f,
+            )
+        )
+        idx = len(st.accesses) - 1
+        for rname, rtyp in results:
+            if rtyp.strip() == "Token":
+                env[rname] = _TOKEN
+            else:
+                env[rname] = DataDep("atomic result") if is_f else Observed(idx)
+        return
+
+    # every other op: value-level over-approximation, never an exception
+    # (VALUE ops only -- every op with a memory effect is handled above:
+    # tile_load/tile_store, load_pointer/store_pointer, tile_atomic_rmw,
+    # tile_atomic_cas)
+    st.unknown_ops[op] = st.unknown_ops.get(op, 0) + 1
+    for rname, rtyp in results:
+        env[rname] = _TOKEN if rtyp.strip() == "Token" else DataDep(f"cutile op {op}")

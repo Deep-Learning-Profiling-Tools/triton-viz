@@ -192,6 +192,13 @@ Triton-Viz uses a small set of environment variables to configure runtime behavi
 - `PROFILER_ENABLE_LOAD_STORE_SKIPPING` (default: `1`): skip redundant load/store checks to reduce profiling overhead.
 - `PROFILER_ENABLE_BLOCK_SAMPLING` (default: `1`): sample a subset of blocks to reduce profiling overhead.
 - `PROFILER_DISABLE_BUFFER_LOAD_CHECK` (default: `0`): disable buffer load checks in the profiler.
+- `TRITON_VIZ_EVAL_ALL_FRONTENDS` (default: `0`): set to `1` to run both symbolic frontends in L2 evaluation for coverage comparisons. By default, L2 runs the interpreter only after static abstention, then concrete enumeration only if both symbolic frontends abstain. L0/L1 keep their existing behavior. See [L2 frontend execution](evaluation/L2_FRONTEND_POLICY.md) for timing and provenance rules.
+
+Evaluation experiments can use [durable pinned reruns](evaluation/PINNED_RESUME.md)
+to save each row and resume after interruption. The optional
+`TRITON_VIZ_PINNED_STATE_DIR` selects an isolated host-lock directory for
+rehearsals and tests; formal runs reject this override and use the canonical
+host registry described in that guide.
 
 ## More Puzzles
 
@@ -227,3 +234,8 @@ If you find this repo useful for your research, please cite our paper:
 }
 ```
 <p align="right">(<a href="#readme-top">back to top</a>)</p>
+
+
+### Resumable evaluation with dynamic preloading
+
+The checkout evaluation driver supports a session-owned clean preloader while retaining fresh row and analysis processes. Use `--dynamic-launcher preload` explicitly; `--prepare-only` freezes a run without starting it. See [the lifecycle, environment and timing protocol](evaluation/DYNAMIC_PRELOAD.md). The frozen environment includes `FLAGGEMS_SOURCE_DIR`, `TRITON_INTERPRET`, `TRITON_CACHE_DIR` and `TORCHINDUCTOR_CACHE_DIR`; kernel/source checks are unchanged.
