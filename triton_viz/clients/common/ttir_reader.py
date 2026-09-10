@@ -494,6 +494,12 @@ class AccessGraph:
     # success needs exact values: ordinary CAS encoding may consume this
     # conservative graph-wide fact to reject potentially changing casts.
     has_value_changing_integer_casts: bool = False
+    # True when an address term was rewritten using a scalar param's
+    # CAPTURED value (the cuTile reader's exact bitwise lowering: a shift
+    # count or mask that is only known at the launch). The rewrite is
+    # exact for THIS launch's parameters and says nothing about others,
+    # so the tier selector must not attempt T0 on such a graph.
+    param_pinned: bool = False
 
     def arg(self, name: str) -> FuncArg | None:
         for a in self.func_args:

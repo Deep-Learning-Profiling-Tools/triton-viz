@@ -81,6 +81,7 @@ come from the corresponding ``break`` operands. The other
 from __future__ import annotations
 
 import re
+from collections.abc import Mapping
 from dataclasses import dataclass, field, fields, is_dataclass, replace
 from typing import Any, NoReturn
 
@@ -333,6 +334,11 @@ class _State:
     in_spin: bool = False
     token_order: dict[tuple[int, int], Term | None] = field(default_factory=dict)
     token_inputs: dict[int, _Token] = field(default_factory=dict)
+    # Scalar arguments of the CAPTURED launch, by IR parameter name. Used
+    # only to lower an integer bitwise operation exactly (see _fold_bitwise);
+    # a fold that consumes one sets param_pinned, which closes the T0 tier.
+    params: dict[str, int] = field(default_factory=dict)
+    param_pinned: bool = False
     loop_token_conflicts: list[LoopTokenConflict] = field(default_factory=list)
 
 
@@ -378,15 +384,23 @@ def _has_datadep(t: Any) -> bool:
 
 
 def parse_cutile_ir(
-    text: str, kernel_name: str = "cutile_kernel", *, multipath: bool = False
+    text: str,
+    kernel_name: str = "cutile_kernel",
+    *,
+    multipath: bool = False,
+    params: Mapping[str, int] | None = None,
 ) -> AccessGraph:
+    """``params`` are the CAPTURED launch's scalar arguments. They are read
+    only to lower integer bitwise addressing exactly (a shift count or mask
+    is not otherwise expressible in the address fragment); a graph that used
+    one is marked ``param_pinned`` and the tier selector skips T0 for it."""
     lines = [ln.rstrip() for ln in text.splitlines() if ln.strip()]
     changing_integer_casts = "tile_atomic_cas(" in text and any(
         "= tile_astype(" in ln for ln in lines
     )
     if not lines:
         raise UnsupportedTTIR("empty CuTile IR", kind="parse")
-    st = _State(kernel_name=kernel_name, multipath=multipath)
+    st = _State(kernel_name=kernel_name, multipath=multipath, params=dict(params or {}))
     _parse_header(lines[0], st)
     end = _walk(lines, 1, 0, st)
     if end < len(lines):
@@ -399,6 +413,7 @@ def parse_cutile_ir(
         return AccessGraph(
             kernel_name=kernel_name,
             has_value_changing_integer_casts=changing_integer_casts,
+            param_pinned=st.param_pinned,
             func_args=st.func_args,
             accesses=st.accesses,
             loop=st.loops[0] if len(st.loops) == 1 else None,
@@ -413,6 +428,7 @@ def parse_cutile_ir(
     return AccessGraph(
         kernel_name=kernel_name,
         has_value_changing_integer_casts=changing_integer_casts,
+        param_pinned=st.param_pinned,
         func_args=st.func_args,
         accesses=st.accesses,
         loop=st.loop,
@@ -637,6 +653,70 @@ def _handle_line(lines: list[str], i: int, indent: int, line: str, st: _State) -
 
 
 # ───────────────────────── op handlers ─────────────────────────
+
+
+def _known_int(st: _State, term: Any) -> int | None:
+    """The integer a term denotes, from a literal or the captured launch.
+
+    ``Const`` needs no launch. A ``Param`` resolves only through this
+    kernel's captured scalar arguments, so a fold that consumes one is
+    exact for THAT launch and must pin the graph away from T0.
+    """
+    if isinstance(term, Const):
+        return term.value
+    if isinstance(term, Param):
+        value = st.params.get(term.name)
+        return value if isinstance(value, int) and not isinstance(value, bool) else None
+    return None
+
+
+def _floor_mod(a: Term, n: int) -> Term:
+    """``a mod n`` for n > 0, exact for EVERY integer a.
+
+    Bin("%") is C-style truncation toward zero (remsi), so the sign fix is
+    written out rather than assumed: ((a % n) + n) % n.
+    """
+    return Bin("%", Bin("+", Bin("%", a, Const(n)), Const(n)), Const(n))
+
+
+def _floor_div(a: Term, n: int) -> Term:
+    """``floor(a / n)`` for n > 0, exact for EVERY integer a: subtracting
+    the floor-remainder leaves a multiple of n, where truncating and
+    flooring division agree."""
+    return Bin("//", Bin("-", a, _floor_mod(a, n)), Const(n))
+
+
+def _fold_bitwise(st: _State, fn: str, a: Term, b: Any, rtyp: str) -> Term | None:
+    """An integer bitwise operation as exact arithmetic, or None.
+
+    Only shapes whose arithmetic identity is exact for every integer are
+    lowered, and only when the second operand is a known integer: a shift
+    by a known count, a mask that is 2^k - 1, and a xor with a single bit.
+    Everything else keeps its DataDep and the caller's refusal. Returns
+    None rather than an approximation; nothing here widens a footprint.
+    """
+    if not rtyp.strip().startswith(("Tile[int", "Tile[uint")):
+        return None
+    n = _known_int(st, b)
+    if n is None or isinstance(a, DataDep):
+        return None
+    if isinstance(b, Param):
+        st.param_pinned = True
+    if fn in ("rshift", "lshift"):
+        if not 0 <= n < 63:
+            return None
+        return _floor_div(a, 1 << n) if fn == "rshift" else Bin("*", a, Const(1 << n))
+    if fn == "and_":
+        # a & (2^k - 1) keeps the low k bits, which is a mod 2^k.
+        return _floor_mod(a, n + 1) if n >= 0 and (n + 1) & n == 0 else None
+    if fn == "xor":
+        if n == 0:
+            return a
+        # a ^ 2^k flips one bit: add it when clear, subtract it when set.
+        if n > 0 and (n & (n - 1)) == 0:
+            bit = _floor_mod(_floor_div(a, n), 2)
+            return Bin("-", Bin("+", a, Const(n)), Bin("*", Const(2 * n), bit))
+    return None
 
 
 def _val(st: _State, token: str) -> Any:
@@ -1568,7 +1648,11 @@ def _handle_op(
         fn = kw["fn"].strip('"')
         a = _as_term(_val(st, kw["lhs"]), "boolbin")
         b = _as_term(_val(st, kw["rhs"]), "boolbin")
-        if fn in ("and_", "or_"):
+        folded = _fold_bitwise(st, fn, a, b, results[0][1])
+        if folded is not None:
+            bind(folded)
+            return
+        if fn in ("and_", "or_") and results[0][1].strip().startswith("Tile[bool_"):
             bind(BoolBin("and" if fn == "and_" else "or", a, b))
         elif fn == "xor" and results[0][1].startswith("Tile[bool_"):
             # boolean xor — the sign-disagreement test of the python
@@ -1584,6 +1668,13 @@ def _handle_op(
             )
         else:
             bind(DataDep(f"bitwise fn {fn}"))
+        return
+    if op == "raw_bitwise_shift":
+        fn = kw["fn"].strip('"')
+        a = _as_term(_val(st, kw["lhs"]), "shift")
+        b = _as_term(_val(st, kw["rhs"]), "shift")
+        folded = _fold_bitwise(st, fn, a, b, results[0][1])
+        bind(folded if folded is not None else DataDep(f"shift fn {fn}"))
         return
     if op == "fma":
         # lhs*rhs + acc — an arithmetic identity, modelable for any dtype

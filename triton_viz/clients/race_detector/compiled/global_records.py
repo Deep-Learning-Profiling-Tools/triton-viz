@@ -1848,7 +1848,13 @@ def t0_linearity_gate(graph: AccessGraph) -> bool:
     """The tier selector's cheap syntactic gate: attempt T0 only when every
     address/mask/path term stays LINEAR once the scalar params go symbolic
     (no symbolic×symbolic product, no symbolic divisor — Z3-unknown bait).
-    T1, with params concrete, is linear again for the same terms."""
+    T1, with params concrete, is linear again for the same terms.
+
+    A graph whose addresses were rewritten from a param's captured value
+    (``param_pinned``) is refused outright: that rewrite is exact for this
+    launch's parameters only, so the ANY-params claim is not available."""
+    if graph.param_pinned:
+        return False
     terms: list[Term] = []
     for a in map(content_free_view, graph.accesses):
         terms.append(a.offset)

@@ -383,16 +383,21 @@ def _static_track_cutile(
     )
     t0 = time.perf_counter()
     graph, parse_reason = None, None
+    # Bind first: the reader lowers integer bitwise addressing exactly from
+    # the captured scalar values, and marks such a graph param-pinned so the
+    # tier selector keeps its proof at T1.
+    bound_params, bound_tensors, _ = _cutile_bindings(info["args"])
     try:
         graph = parse_cutile_ir(
-            info["ir"], kname, multipath=ladder_level >= LadderLevel.L2
+            info["ir"],
+            kname,
+            multipath=ladder_level >= LadderLevel.L2,
+            params=bound_params,
         )
     except UnsupportedTTIR as e:
         parse_reason = f"{e.kind}: {e}"
-    params: dict = {}
-    tensors: dict = {}
-    if graph is not None:
-        params, tensors, _ = _cutile_bindings(info["args"])
+    params: dict = bound_params if graph is not None else {}
+    tensors: dict = bound_tensors if graph is not None else {}
     det.analyze_graph(
         graph,
         params,

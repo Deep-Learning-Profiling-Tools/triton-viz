@@ -197,3 +197,107 @@ return
     with pytest.raises(UnsupportedTTIR) as exc:
         parse_cutile_ir(ir, "t")
     assert exc.value.kind == "control-flow"
+
+
+# ── exact lowering of integer bitwise addressing ─────────────────
+# cuda.tile emits xor/shift/mask directly in an address (the bitonic and
+# radix networks). The reader lowers them into the affine fragment ONLY
+# when the second operand is a known integer, and a lowering that consumed
+# a scalar param's captured value marks the graph param_pinned so the tier
+# selector never claims the ANY-params (T0) scope from it.
+
+_BITWISE_IR = """\
+(x_0: Tile[pointer[float32],()], x_1: Tile[int32,()], x_2: Tile[int32,()], j: Tile[int32,()]):
+$token: Token = make_token()
+$ar: Tile[int32,(64)] = tile_arange()
+$jr: Tile[int32,(1)] = tile_reshape(x=j)
+$jb: Tile[int32,(64)] = tile_broadcast(x=$jr)
+$xo: Tile[int32,(64)] = raw_binary_bitwise(lhs=$ar, rhs=$jb, fn="OP")
+$pr: Tile[pointer[float32],(1)] = tile_reshape(x=x_0)
+$pb: Tile[pointer[float32],(64)] = tile_broadcast(x=$pr)
+$p: Tile[pointer[float32],(64)] = pointer_offset(pointer=$pb, offset=$xo)
+$v: Tile[float32,(64)] = typed_const(value=0)
+$st: Token = store_pointer(pointer=$p, value=$v, mask=None, token=$token, latency=None)
+return
+"""
+
+
+def _eval_term(term, lane, params):
+    """Interpret an address term the way the encoder does: Bin // and % are
+    C-style truncation toward zero (remsi)."""
+    from triton_viz.clients.common.ttir_reader import Arange, Bin, Const, Param
+
+    if isinstance(term, Const):
+        return term.value
+    if isinstance(term, Param):
+        return params[term.name]
+    if isinstance(term, Arange):
+        return term.start + lane
+    if isinstance(term, Bin):
+        a, b = _eval_term(term.a, lane, params), _eval_term(term.b, lane, params)
+        if term.op == "+":
+            return a + b
+        if term.op == "-":
+            return a - b
+        if term.op == "*":
+            return a * b
+        quotient = abs(a) // abs(b) * (1 if (a >= 0) == (b >= 0) else -1)
+        return quotient if term.op == "//" else a - b * quotient
+    raise AssertionError(f"unexpected term {term!r}")
+
+
+@pytest.mark.parametrize("op,value", [("xor", 4), ("and_", 7), ("rshift", 3)])
+def test_integer_bitwise_address_lowers_exactly_from_a_pinned_param(op, value):
+    line = 'raw_binary_bitwise(lhs=$ar, rhs=$jb, fn="OP")'
+    if op == "rshift":
+        line = 'raw_bitwise_shift(lhs=$ar, rhs=$jb, fn="OP")'
+    ir = _BITWISE_IR.replace(
+        'raw_binary_bitwise(lhs=$ar, rhs=$jb, fn="OP")', line
+    ).replace("OP", op)
+    g = parse_cutile_ir(ir, "t", params={"j": value})
+    (ev,) = g.accesses
+    assert g.param_pinned, "a launch value went into the address"
+    native = {
+        "xor": lambda i: i ^ value,
+        "and_": lambda i: i & value,
+        "rshift": lambda i: i >> value,
+    }[op]
+    for lane in range(64):
+        assert _eval_term(ev.offset, lane, {"j": value}) == native(lane), lane
+
+
+def test_integer_bitwise_address_without_captured_params_abstains():
+    # T0 has no launch: the operand stays symbolic and the refusal stands.
+    with pytest.raises(UnsupportedTTIR) as exc:
+        parse_cutile_ir(_BITWISE_IR.replace("OP", "xor"), "t")
+    assert exc.value.kind == "indirect-address"
+
+
+def test_non_power_of_two_operands_keep_abstaining():
+    for op, value in (("xor", 6), ("and_", 6)):
+        with pytest.raises(UnsupportedTTIR) as exc:
+            parse_cutile_ir(_BITWISE_IR.replace("OP", op), "t", params={"j": value})
+        assert exc.value.kind == "indirect-address"
+
+
+def test_literal_mask_lowers_without_pinning_the_graph():
+    # A literal needs no launch, so the ANY-params tier stays available.
+    ir = _BITWISE_IR.replace(
+        "$jb: Tile[int32,(64)] = tile_broadcast(x=$jr)",
+        "$jc: const Tile[int32,()] = typed_const(value=7)\n"
+        "$jb: Tile[int32,(64)] = tile_broadcast(x=$jc)",
+    ).replace("OP", "and_")
+    g = parse_cutile_ir(ir, "t")
+    (ev,) = g.accesses
+    assert not g.param_pinned
+    for lane in range(64):
+        assert _eval_term(ev.offset, lane, {}) == lane & 7
+
+
+def test_t0_gate_refuses_a_param_pinned_graph():
+    from triton_viz.clients.race_detector.compiled.global_records import (
+        t0_linearity_gate,
+    )
+
+    g = parse_cutile_ir(_BITWISE_IR.replace("OP", "xor"), "t", params={"j": 4})
+    assert g.param_pinned and not t0_linearity_gate(g)
