@@ -225,7 +225,15 @@ class _CtLaunchRecorder:
         }
 
 
-def _run_one(op: str) -> dict:
+def _run_one(op: str, case_index: int = 0) -> dict:
+    """Capture one operator at one of its benchmark cases.
+
+    ``case_index`` selects the row of the operator's own case grid; the
+    corpus is built at case 0, and a second configuration of the SAME
+    operator lands under the case name ``<op>_case<N>`` so it is a
+    distinct corpus row with its own shapes. The case dict is recorded so
+    the configuration can be read off the corpus without the checkout.
+    """
     import sys
 
     root = str(TILEBENCH_ROOT)
@@ -239,14 +247,35 @@ def _run_one(op: str) -> dict:
     with _CtLaunchRecorder() as rec:
         try:
             tb_engine.run_benchmark_suite(
-                op, benchmark_overrides={"case_indices": [0], "autotune": False}
+                op,
+                benchmark_overrides={"case_indices": [case_index], "autotune": False},
             )
         except Exception as exc:  # noqa: BLE001
             error = f"{type(exc).__name__}: {exc}"
     if rec.errors and not error:
         error = "; ".join(rec.errors[:3])
     kernels = {f"{r['kernel']}#{i}": r for i, r in enumerate(rec.records.values())}
-    return {"case": op, "family": op, "error": error, "kernels": kernels}
+    out: dict[str, Any] = {
+        "case": op if case_index == 0 else f"{op}_case{case_index}",
+        "family": op,
+        "error": error,
+        "kernels": kernels,
+    }
+    if case_index != 0:
+        out["case_index"] = case_index
+        out["case_params"] = _case_params(op, case_index)
+    return out
+
+
+def _case_params(op: str, case_index: int) -> dict:
+    """The operator's own case dict at ``case_index``, for provenance."""
+    import yaml  # type: ignore[import-untyped]
+    from data.tensors import expand_cases
+
+    cfg = yaml.safe_load(
+        (TILEBENCH_ROOT / "benchmarks" / "operators" / op / "config.yaml").read_text()
+    )
+    return dict(expand_cases(op, cfg)[case_index])
 
 
 def main() -> None:
@@ -254,12 +283,19 @@ def main() -> None:
 
     ap = argparse.ArgumentParser()
     ap.add_argument("--one")
+    ap.add_argument(
+        "--case-index",
+        type=int,
+        default=0,
+        help="row of the operator's own case grid (default 0, the corpus "
+        "configuration); a second configuration lands under <op>_case<N>",
+    )
     ap.add_argument("--out", type=Path)
     args = ap.parse_args()
 
     if args.one:
         out = args.out.resolve()  # _run_one chdirs into the checkout
-        out.write_text(json.dumps(_run_one(args.one), indent=1) + "\n")
+        out.write_text(json.dumps(_run_one(args.one, args.case_index), indent=1) + "\n")
         return
 
     commit = tilebench_commit()

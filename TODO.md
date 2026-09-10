@@ -729,6 +729,21 @@ Queued lifts (v2):
       is 57 proofs / 4 abstentions and `tritonracebench_cutile` is
       26 race-free / 27 race / 16 abstain; none of it is adopted until a
       new pinned run.
+- [x] second configurations for the real-operator corpus —
+      `tilebench_cutile` extended 2026-09-10 from 61 to 68 rows, 64
+      proofs / 4 abstentions at L2; see
+      `evaluation/CUTILE_SECOND_CONFIGURATIONS.md`. The frozen pinned
+      roster is 1263 rows.
+
+Still open after that work, and each needs a correctness argument before
+it can land (paper repo `future_work.md`):
+- [ ] `tile_scan` in an address (radix_sort, 2 rows) — a prefix-scan
+      lemma, or a cuTile executor to concretize the scan.
+- [ ] an index source above the address-snapshot bound
+      (histogram_partial, 1 row, 262144 elements vs 16384) — the bound
+      is a structural property of the encoding, not a tunable.
+- [ ] a genuinely data-dependent walk (streamk first_wave, 1 row) —
+      its iterator advances by `min`, not by a constant.
 - [ ] C2 confirmation: mini tile-op evaluator (29-op numpy-like
       surface) or real-launch replay on the 4090 — restores the
       confirmed/unconfirmed distinction for cuTile race SATs.

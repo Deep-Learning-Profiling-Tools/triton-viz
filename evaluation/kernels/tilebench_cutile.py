@@ -16,8 +16,13 @@ tilebench_cutile_capture.trim_specializations) with the drop count
 recorded — no silent caps; the module keeps the same guard so a
 re-captured untrimmed payload cannot silently balloon the corpus.
 
-Every row has a same-operator Triton twin in the ``tilebench`` corpus —
-the cross-DSL differential pairing is by case name.
+Rows whose case name is the plain operator name have a same-operator
+Triton twin in the ``tilebench`` corpus, paired by case name. Rows whose
+case name ends in ``_case<N>`` are a SECOND configuration of that
+operator, captured at row N of its own benchmark case grid (different
+shapes, and often a different grid); they carry ``case_index`` and
+``case_params`` for provenance and have no Triton twin, so they are
+outside the cross-DSL differential.
 """
 
 from __future__ import annotations

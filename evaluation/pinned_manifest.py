@@ -302,8 +302,8 @@ def build_manifest(config: dict, *, run_id: str, only_names=None) -> tuple[dict,
         and {(r["corpus"], r["name"]) for r in roster} != only_names
     ):
         raise ValueError("requested rehearsal row is missing")
-    if not config["rehearsal"] and len(roster) != 1256:
-        raise ValueError(f"expected 1256 frozen rows, enumerated {len(roster)}")
+    if not config["rehearsal"] and len(roster) != 1263:
+        raise ValueError(f"expected 1263 frozen rows, enumerated {len(roster)}")
     # Referenced gitignored sidecars must exist before any worker runs.
     for corpus in config["corpora"]:
         specfile = ROOT / "evaluation" / "kernels" / f"{corpus}_specs.json"
