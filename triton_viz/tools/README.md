@@ -1,5 +1,9 @@
 # NKI Analysis and Cost-Model Tools
 
+The common prediction API and experimental Triton/GPU collect/fit/evaluate
+pipeline are described in [performance backends](../../docs/performance_backends.md).
+Existing NKI commands and calibration semantics remain compatible.
+
 This package turns Triton-Viz NKI traces and AWS Neuron Explorer artifacts into
 auditable per-engine performance predictions. It is intentionally separate from
 the tracing core: core modules record semantic operations and pointer ranges;

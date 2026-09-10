@@ -6,9 +6,9 @@ import hashlib
 import json
 import math
 from collections import Counter
-from collections.abc import Callable
-from dataclasses import dataclass
 from typing import Any
+
+from triton_viz.performance.grammar import GrammarMatch, GrammarRule, select_rule
 
 _REDUCTIONS = {"reduce_sum", "max", "min", "mean"}
 _TRANSCENDENTAL = {"exp", "rsqrt", "sqrt", "log", "sin", "cos", "tanh", "sigmoid"}
@@ -32,39 +32,6 @@ _KNOWN_FAMILY_OPS = (
         "where",
     }
 )
-
-
-@dataclass(frozen=True)
-class GrammarRule:
-    """One auditable region-family classification rule.
-
-    Predicates at the same priority must be mutually exclusive.  Keeping rule
-    metadata beside the predicate makes the production classifier inspectable
-    without changing the stable family strings used by calibration CSVs.
-    """
-
-    rule_id: str
-    priority: int
-    predicate: Callable[[dict[str, Any]], bool]
-    family: str | Callable[[dict[str, Any]], str]
-    condition: str
-    rationale: str
-    evidence: tuple[str, ...] = ()
-
-    def render_family(self, facts: dict[str, Any]) -> str:
-        return self.family(facts) if callable(self.family) else self.family
-
-
-@dataclass(frozen=True)
-class GrammarMatch:
-    """Classification result with evidence and explicit OOD diagnostics."""
-
-    family: str
-    rule_id: str
-    rationale: str
-    evidence: tuple[str, ...]
-    ood_reasons: tuple[str, ...]
-    consumed_features: tuple[str, ...]
 
 
 def _token(event: dict[str, Any]) -> str:
@@ -810,14 +777,7 @@ def match_structural_family(
 ) -> GrammarMatch:
     """Classify a region and return the rule explanation and OOD diagnostics."""
     facts = _family_facts(region)
-    matches = [rule for rule in rules if rule.predicate(facts)]
-    if not matches:
-        raise ValueError(f"No grammar rule matched region facts: {facts}")
-    priority = max(rule.priority for rule in matches)
-    winners = [rule for rule in matches if rule.priority == priority]
-    if len(winners) != 1:
-        ids = ", ".join(rule.rule_id for rule in winners)
-        raise ValueError(f"Ambiguous grammar rules at priority {priority}: {ids}")
+    rule = select_rule(facts, rules)
 
     unknown_ops = tuple(sorted(facts["ops"] - _KNOWN_FAMILY_OPS))
     ood_reasons = []
@@ -831,7 +791,6 @@ def match_structural_family(
     if strict and ood_reasons:
         raise ValueError("Out-of-distribution region: " + "; ".join(ood_reasons))
 
-    rule = winners[0]
     suffix = "_masked" if region.get("has_mask_or_tail") else ""
     context_suffix = ""
     if region.get("previous_family"):

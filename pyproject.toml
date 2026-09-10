@@ -54,6 +54,10 @@ triton-race-detector = "triton_viz.wrapper:apply_race_detector"
 triton-visualizer = "triton_viz.visualizer_cli:main"
 
 [project.optional-dependencies]
+gpu = [
+  "torch",
+  "nvidia-ml-py",
+]
 test = [
   "pytest",
   "pytest-xdist",

@@ -354,6 +354,11 @@ Analyze kernels across visualization, profiling, and sanitization with a single 
 - Profiler: flags non-unrolled loops, inefficient mask usage, and missing buffer_load optimizations while tracking load/store byte counts with low-overhead sampling.
 - Sanitizer: symbolically checks tensor memory accesses for out-of-bounds errors and emits reports with tensor metadata, call stack, and expression trees; optional fake-memory storage avoids real reads.
 
+Source-based latency prediction is available through the shared NKI/GPU
+[performance backend API and experiment pipeline](docs/performance_backends.md).
+The Triton/GPU backend is experimental and reports its calibration coverage and
+measurement conditions explicitly.
+
 ### Save and load traces
 
 ```py

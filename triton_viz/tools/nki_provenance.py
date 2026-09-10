@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 from triton_viz.tools.nki_region_ir import REGION_IR_SCHEMA_VERSION
+from triton_viz.performance.calibration import stable_digest as _stable_digest
 
 FINGERPRINT_SCHEMA_VERSION = 1
 PACKAGE_NAMES = (
@@ -26,11 +27,6 @@ TOOL_COMMANDS = {
     "neuron-ls": ("neuron-ls", "--version"),
     "neuronx-cc": ("neuronx-cc", "--version"),
 }
-
-
-def _stable_digest(value: Mapping[str, Any]) -> str:
-    encoded = json.dumps(value, sort_keys=True, separators=(",", ":")).encode()
-    return hashlib.sha256(encoded).hexdigest()[:20]
 
 
 def make_compiler_fingerprint(
