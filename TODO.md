@@ -723,6 +723,12 @@ Queued lifts (v2):
 - [x] integer xor in addresses (bitonic partner indexing) — landed
       2026-09-10 as an exact arithmetic lowering, not a bitvector
       side-channel; see `evaluation/CUTILE_BITWISE_ADDRESSING.md`.
+- [x] loaded values in addresses (Route 2 snapshot Selects) — landed
+      2026-09-10 for the cuTile track, reader and captures both; see
+      `evaluation/CUTILE_ROUTE2_SNAPSHOT.md`. At L2 `tilebench_cutile`
+      is 57 proofs / 4 abstentions and `tritonracebench_cutile` is
+      26 race-free / 27 race / 16 abstain; none of it is adopted until a
+      new pinned run.
 - [ ] C2 confirmation: mini tile-op evaluator (29-op numpy-like
       surface) or real-launch replay on the 4090 — restores the
       confirmed/unconfirmed distinction for cuTile race SATs.

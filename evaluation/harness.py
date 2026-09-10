@@ -311,7 +311,9 @@ def _watchdog(seconds: float):
         timing["scope_exit_at"] = time.perf_counter()
 
 
-def _cutile_bindings(args: list[dict]) -> tuple[dict, dict, bool]:
+def _cutile_bindings(
+    args: list[dict], *, snapshots: bool = False
+) -> tuple[dict, dict, bool]:
     """(params, tensors, aliased) from captured cuTile arg descriptors.
 
     Scalars bind under their python names; an array param ``p`` also
@@ -325,6 +327,11 @@ def _cutile_bindings(args: list[dict]) -> tuple[dict, dict, bool]:
     source, exactly as the Triton track captures them at pre_warmup."""
     from triton_viz.clients.race_detector.compiled.global_records import GlobalTensor
 
+    # Route 2 (L2 only, exactly as CompiledRaceDetector gates
+    # _capture_snapshot): the captured pre-launch contents of an integer
+    # tensor are the source of every Loaded term's value. Below L2 the
+    # reader binds DataDep and no snapshot is offered, so the encoder's
+    # refusals stay byte-identical.
     params: dict[str, int] = {}
     tensors: dict[str, GlobalTensor] = {}
     group_base: dict[int, int] = {}
@@ -351,6 +358,13 @@ def _cutile_bindings(args: list[dict]) -> tuple[dict, dict, bool]:
                 next_base += (d["numel"] * d["elem_size"] + 4095) & ~4095
                 next_base += 4096  # guard gap between allocations
             init = d.get("init_values")
+            snap = d.get("snapshot") if snapshots else None
+            if not snapshots:
+                why = "L2 only"
+            elif snap is not None:
+                why = ""
+            else:
+                why = d.get("snapshot_reason") or "not captured"
             tensors[nm] = GlobalTensor(
                 data_ptr=base,
                 numel=d["numel"],
@@ -359,6 +373,8 @@ def _cutile_bindings(args: list[dict]) -> tuple[dict, dict, bool]:
                 # the capture's pre-launch values (the Triton track's
                 # pre_warmup rule); absent in captures older than 2026-09-05
                 init_values=tuple(int(v) for v in init) if init is not None else None,
+                snapshot=tuple(int(v) for v in snap) if snap is not None else None,
+                snapshot_reason=why,
             )
     return params, tensors, aliased
 
@@ -386,7 +402,9 @@ def _static_track_cutile(
     # Bind first: the reader lowers integer bitwise addressing exactly from
     # the captured scalar values, and marks such a graph param-pinned so the
     # tier selector keeps its proof at T1.
-    bound_params, bound_tensors, _ = _cutile_bindings(info["args"])
+    bound_params, bound_tensors, _ = _cutile_bindings(
+        info["args"], snapshots=ladder_level >= LadderLevel.L2
+    )
     try:
         graph = parse_cutile_ir(
             info["ir"],

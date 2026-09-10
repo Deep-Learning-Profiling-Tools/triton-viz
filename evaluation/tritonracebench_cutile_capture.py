@@ -87,6 +87,16 @@ def _describe_args(
             )
             if init is not None:
                 desc["init_values"] = list(init)
+            # Route 2 (L2): the ADDRESS SNAPSHOT of an integer tensor, the
+            # source of every Loaded term's value, under the Triton track's
+            # own bound (CompiledRaceDetector.ADDRESS_SNAPSHOT_MAX_ELEMENTS).
+            snap, why = CompiledRaceDetector._capture_snapshot(
+                val, bool(val.is_contiguous())
+            )
+            if snap is not None:
+                desc["snapshot"] = list(snap)
+            elif why:
+                desc["snapshot_reason"] = why
             described.append(desc)
         elif isinstance(val, (bool, int, float)):
             described.append(

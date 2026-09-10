@@ -83,5 +83,9 @@ run.
 Superseded in part (2026-09-10): the six while-form loop abstentions this
 record leaves open were revisited in
 `evaluation/CUTILE_COUNTED_WHILE_LOOP.md`, which closes four of them and
-moves a fifth into the loaded-value group. The counts above stand as the
-state at this commit.
+moves a fifth into the loaded-value group. The loaded-value group was
+then closed by `evaluation/CUTILE_ROUTE2_SNAPSHOT.md`, which also
+narrowed `param_pinned` from a whole-graph flag to the terms the CLAIM
+rests on: a bitwise rewrite that feeds a value the footprint does not
+depend on no longer closes the ANY-params tier. The counts above stand as
+the state at this commit.

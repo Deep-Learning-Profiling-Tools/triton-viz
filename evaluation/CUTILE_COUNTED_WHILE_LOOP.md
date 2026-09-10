@@ -132,3 +132,8 @@ abstains with `token-order` rather than proving.
 
 The pinned evaluation numbers are unchanged by this commit. A cuTile
 population that includes these four new proofs requires a new pinned run.
+
+Superseded in part (2026-09-10): the seven loaded-value abstentions this
+record leaves open were closed to three by
+`evaluation/CUTILE_ROUTE2_SNAPSHOT.md`. The counts above stand as the
+state at this commit.

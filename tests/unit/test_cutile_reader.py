@@ -483,3 +483,203 @@ def test_counted_while_zero_trip_has_no_footprint():
     )
     g = parse_cutile_ir(zero, "t", multipath=True)
     assert g.accesses == []
+
+
+# ── Route 2: loaded values as snapshot Selects ───────────────────
+# Under the L2 reader mode an integer load with a MODELED mask binds a
+# Loaded term instead of DataDep, so an address built on a loaded value
+# is a Select over the launch's pre-launch contents. L0/L1 keep DataDep
+# and every refusal fires byte for byte, as before.
+
+_SCATTER_IR = """\
+(x_0: Tile[pointer[float32],()], x_1: Tile[int32,()], x_2: Tile[int32,()], idx_0: Tile[pointer[int32],()], idx_1: Tile[int32,()], idx_2: Tile[int32,()]):
+$token: Token = make_token()
+$ar: Tile[int32,(4)] = tile_arange()
+$bid: Tile[int32,()] = tile_bid(axis=0)
+$c4: const Tile[int32,()] = typed_const(value=4)
+$base: Tile[int32,()] = raw_binary_arith(lhs=$bid, rhs=$c4, fn="mul", rounding_mode=None, flush_to_zero=False)
+$br: Tile[int32,(1)] = tile_reshape(x=$base)
+$bb: Tile[int32,(4)] = tile_broadcast(x=$br)
+$off: Tile[int32,(4)] = raw_binary_arith(lhs=$bb, rhs=$ar, fn="add", rounding_mode=None, flush_to_zero=False)
+$ipr: Tile[pointer[int32],(1)] = tile_reshape(x=idx_0)
+$ipb: Tile[pointer[int32],(4)] = tile_broadcast(x=$ipr)
+$ip: Tile[pointer[int32],(4)] = pointer_offset(pointer=$ipb, offset=$off)
+$m: Tile[bool_,(4)] = raw_cmp(lhs=$off, rhs=idx_1, fn="lt")
+$zi: Tile[int32,(4)] = typed_const(value=0)
+$v: Tile[int32,(4)], $lt: Token = load_pointer(pointer=$ip, mask=$m, padding_value=$zi, token=$token, latency=None)
+$xpr: Tile[pointer[float32],(1)] = tile_reshape(x=x_0)
+$xpb: Tile[pointer[float32],(4)] = tile_broadcast(x=$xpr)
+$xp: Tile[pointer[float32],(4)] = pointer_offset(pointer=$xpb, offset=$v)
+$fv: Tile[float32,(4)] = typed_const(value=0)
+$st: Token = store_pointer(pointer=$xp, value=$fv, mask=$m, token=$token, latency=None)
+return
+"""
+
+
+def _solve_scatter(table, *, ir=_SCATTER_IR, multipath=True, snapshot=True, n=16):
+    g = parse_cutile_ir(ir, "t", multipath=multipath)
+    tensors = {
+        "x": GlobalTensor(data_ptr=1 << 40, numel=n, elem_size=4, contiguous=True),
+        "idx": GlobalTensor(
+            data_ptr=(1 << 40) + 8192,
+            numel=n,
+            elem_size=4,
+            contiguous=True,
+            snapshot=tuple(table) if snapshot else None,
+            snapshot_reason="" if snapshot else "not captured",
+        ),
+    }
+    enc = encode_graph(
+        g,
+        {"x_1": n, "x_2": 1, "idx_1": n, "idx_2": 1},
+        tensors,
+        multipath=multipath,
+    )
+    solver = TwoCopySymbolicHBSolver(
+        enc.records,
+        grid=symbolic_grid(enc, (4, 1, 1)),
+        arange_dict=enc.arange_dict,
+        fence_order=True,
+        fence_seqs=enc.fence_seqs,
+        token_order=enc.token_order,
+    )
+    return g, enc, solver.find_races()
+
+
+def test_scatter_over_a_permutation_proves_content_qualified():
+    from triton_viz.clients.common.ttir_reader import mentions_loaded
+
+    g, enc, found = _solve_scatter(range(16))
+    assert mentions_loaded(g.accesses[1].offset), "the address IS the loaded value"
+    assert enc.content_qualified, "the proof rests on this launch's contents"
+    assert found == []
+
+
+def test_scatter_over_a_duplicated_index_races():
+    table = list(range(16))
+    table[7] = 3  # two programs now write element 3
+    _g, _enc, found = _solve_scatter(table)
+    assert len(found) == 1
+
+
+def test_scatter_without_a_snapshot_refuses_by_name():
+    with pytest.raises(UnsupportedTTIR) as exc:
+        _solve_scatter(range(16), snapshot=False)
+    assert exc.value.kind == "indirect-address"
+    assert "no usable snapshot" in str(exc.value)
+
+
+def test_scatter_single_path_keeps_the_old_refusal():
+    # L0/L1 bind DataDep, so the message is the pre-Route-2 one, verbatim
+    with pytest.raises(UnsupportedTTIR) as exc:
+        parse_cutile_ir(_SCATTER_IR, "t", multipath=False)
+    assert (exc.value.kind, str(exc.value)) == (
+        "indirect-address",
+        "line 18: pointer offset: data-dependent (loaded value)",
+    )
+
+
+def test_float_loaded_value_in_an_address_stays_datadep():
+    # a float pointee is outside the Int model: no snapshot Select for it
+    ir = _SCATTER_IR.replace("pointer[int32]", "pointer[float32]").replace(
+        "$v: Tile[int32,(4)]", "$v: Tile[float32,(4)]"
+    )
+    with pytest.raises(UnsupportedTTIR) as exc:
+        parse_cutile_ir(ir, "t", multipath=True)
+    assert exc.value.kind == "indirect-address"
+    assert "loaded value" in str(exc.value)
+
+
+def test_loaded_value_under_a_dropped_mask_stays_datadep():
+    # only a MODELED mask keeps a masked-off lane (which holds `other` or
+    # an undefined value) apart from the snapshot value
+    ir = _SCATTER_IR.replace(
+        '$m: Tile[bool_,(4)] = raw_cmp(lhs=$off, rhs=idx_1, fn="lt")',
+        "$u: Tile[int32,(4)] = mystery_op(x=$off)\n"
+        '$m: Tile[bool_,(4)] = raw_cmp(lhs=$u, rhs=idx_1, fn="lt")',
+    )
+    with pytest.raises(UnsupportedTTIR) as exc:
+        parse_cutile_ir(ir, "t", multipath=True)
+    assert exc.value.kind == "indirect-address"
+
+
+_TILE_LOAD_SCATTER_IR = """\
+(x_0: Tile[pointer[float32],()], x_1: Tile[int32,()], x_2: Tile[int32,()], idx_0: Tile[pointer[int32],()], idx_1: Tile[int32,()], idx_2: Tile[int32,()]):
+$token: Token = make_token()
+$0: Tile[int32,()] = assume_bounded(x=idx_1, lower_bound=0, upper_bound=None)
+idx{idx_0, $0, idx_2}: Array[int32,(?):(1)] = make_tensor_view(base_ptr=idx_0, shape=($0), dynamic_strides=())
+$1: Tile[int32,()] = tile_bid(axis=0)
+$2{idx_0, $0, idx_2}: PartitionView[Array[int32,(?):(1)],tile_shape=(4,),order=(0,),padding_mode=PaddingMode.UNDETERMINED] = make_partition_view(array=idx{idx_0, $0, idx_2})
+$3: Tile[int32,(4)], $4: Token = tile_load(view=$2{idx_0, $0, idx_2}, index=($1), token=$token, latency=None, allow_tma=None, memory_order=MemoryOrder.WEAK, memory_scope=MemoryScope.NONE)
+$5: Tile[pointer[float32],(1)] = tile_reshape(x=x_0)
+$6: Tile[pointer[float32],(4)] = tile_broadcast(x=$5)
+$7: Tile[pointer[float32],(4)] = pointer_offset(pointer=$6, offset=$3)
+$8: Tile[float32,(4)] = typed_const(value=0)
+$9: Token = store_pointer(pointer=$7, value=$8, mask=None, token=$token, latency=None)
+return
+"""
+
+
+def _first_loaded(term):
+    from triton_viz.clients.common.ttir_reader import Loaded
+
+    if isinstance(term, Loaded):
+        return term
+    for attr in ("a", "b", "cond", "t", "f", "offset", "mask", "other"):
+        sub = getattr(term, attr, None)
+        if sub is not None:
+            hit = _first_loaded(sub)
+            if hit is not None:
+                return hit
+    return None
+
+
+def test_tile_load_takes_other_from_the_views_padding_mode():
+    # cuTile has no `other` operand: a clipped lane's value is the
+    # partition view's padding mode. ZERO names a value; UNDETERMINED
+    # leaves the lane unspecified, which is the widening direction.
+    undetermined = parse_cutile_ir(_TILE_LOAD_SCATTER_IR, "t", multipath=True)
+    zero = parse_cutile_ir(
+        _TILE_LOAD_SCATTER_IR.replace("PaddingMode.UNDETERMINED", "PaddingMode.ZERO"),
+        "t",
+        multipath=True,
+    )
+    assert _first_loaded(undetermined.accesses[1].offset).other is None
+    assert _first_loaded(zero.accesses[1].offset).other == Const(0)
+
+
+def test_load_pointer_takes_other_from_its_padding_value():
+    with_other = parse_cutile_ir(_SCATTER_IR, "t", multipath=True)
+    assert _first_loaded(with_other.accesses[1].offset).other == Const(0)
+    without = parse_cutile_ir(
+        _SCATTER_IR.replace("padding_value=$zi", "padding_value=None"),
+        "t",
+        multipath=True,
+    )
+    assert _first_loaded(without.accesses[1].offset).other is None
+
+
+def test_param_pinned_only_when_the_rewrite_reaches_the_claim():
+    """radix_sort's shape: ``(key >> bit) & 1`` is COUNTED, never used to
+    address. The rewrite is exact only for this launch's ``bit``, but the
+    footprint does not depend on it, so the ANY-params tier stays open."""
+    from triton_viz.clients.race_detector.compiled.global_records import (
+        t0_linearity_gate,
+    )
+
+    ir = (
+        _BITWISE_IR.replace("OP", "and_")
+        .replace("pointer[float32]", "pointer[int32]")
+        .replace(
+            "$p: Tile[pointer[int32],(64)] = pointer_offset(pointer=$pb, offset=$xo)",
+            "$p: Tile[pointer[int32],(64)] = pointer_offset(pointer=$pb, offset=$ar)",
+        )
+        .replace("$v: Tile[float32,(64)] = typed_const(value=0)\n", "")
+        .replace("value=$v", "value=$xo")
+    )
+    g = parse_cutile_ir(ir, "t", params={"j": 7})
+    assert not g.param_pinned, "the launch value never reaches the footprint"
+    assert t0_linearity_gate(g)
+    # the same rewrite IN the address does close the ANY-params tier
+    pinned = parse_cutile_ir(_BITWISE_IR.replace("OP", "and_"), "t", params={"j": 7})
+    assert pinned.param_pinned and not t0_linearity_gate(pinned)

@@ -54,6 +54,13 @@ TTIR reader's multipath mode does, and is byte-identical otherwise:
 - several ``for`` loops (nested or sequential) each get their own
   :class:`LoopInfo` (``AccessGraph.loops``) and induction variable; an
   access carries its enclosing loops in ``AccessEvent.loops``;
+- an integer ``tile_load`` / ``load_pointer`` with a MODELED mask binds
+  a :class:`Loaded` term (Route 2), so an address, mask, condition or
+  loop bound over a loaded value becomes a Select over the launch's
+  pre-launch contents and the verdict is content-qualified; a float
+  pointee or a dropped mask keeps :class:`DataDep`. ``other`` comes from
+  the partition view's padding mode (``ZERO``) or from
+  ``load_pointer``'s ``padding_value``;
 - structured ``if(cond=...)`` blocks contribute BOTH arms under path
   predicates (``then`` under ``cond``, ``else`` under ``Not(cond)``); an
   arm that ends in ``return`` is an early-exit guard, so the code after
@@ -99,6 +106,7 @@ from .ttir_reader import (
     Const,
     DataDep,
     FuncArg,
+    Loaded,
     LoopInfo,
     LoopTokenConflict,
     LoopVar,
@@ -341,7 +349,12 @@ class _State:
     # only to lower an integer bitwise operation exactly (see _fold_bitwise);
     # a fold that consumes one sets param_pinned, which closes the T0 tier.
     params: dict[str, int] = field(default_factory=dict)
-    param_pinned: bool = False
+    # Terms rewritten from a scalar param's CAPTURED value (see
+    # _fold_bitwise). The graph is param_pinned exactly when one of them
+    # reaches a CLAIM-bearing position (an address, mask, path, exit
+    # predicate, atomic operand or loop bound); a rewrite that only feeds
+    # a value the footprint does not depend on costs no scope.
+    pinned_terms: list[Any] = field(default_factory=list)
     loop_token_conflicts: list[LoopTokenConflict] = field(default_factory=list)
 
 
@@ -362,6 +375,7 @@ def _as_term(v: Any, ctx: str) -> Term:
             Select,
             DataDep,
             Observed,
+            Loaded,
         ),
     ):
         return v  # type: ignore[return-value]
@@ -375,7 +389,7 @@ def _datadep_whys(t: Any, out: set[str] | None = None) -> set[str]:
         out = set()
     if isinstance(t, DataDep):
         out.add(t.why)
-    for attr in ("a", "b", "cond", "t", "f"):
+    for attr in ("a", "b", "cond", "t", "f", "offset", "mask", "other"):
         sub = getattr(t, attr, None)
         if sub is not None:
             _datadep_whys(sub, out)
@@ -384,6 +398,46 @@ def _datadep_whys(t: Any, out: set[str] | None = None) -> set[str]:
 
 def _has_datadep(t: Any) -> bool:
     return bool(_datadep_whys(t))
+
+
+_TERM_ATTRS = ("a", "b", "cond", "t", "f", "offset", "mask", "other")
+
+
+def _term_contains(t: Any, needle: Any) -> bool:
+    """Structural containment. Terms are frozen dataclasses, so equality
+    is by value; an unrelated term that happens to be identical only
+    over-pins, which is the safe direction."""
+    if t == needle:
+        return True
+    for attr in _TERM_ATTRS:
+        sub = getattr(t, attr, None)
+        if sub is not None and _term_contains(sub, needle):
+            return True
+    return False
+
+
+def _pinned_claim(st: _State) -> bool:
+    """Does a param-pinned rewrite reach a term the CLAIM rests on?
+
+    A bitwise lowering that consumed a scalar param's captured value is
+    exact for this launch's parameters only, so it must close the
+    ANY-params tier. It closes it only where it matters: an address, a
+    mask, a path or exit predicate, an atomic operand, or a loop bound.
+    A rewrite that feeds a value the footprint does not depend on (a
+    radix key that is only counted, never used to address) leaves the
+    ANY-params claim intact.
+    """
+    if not st.pinned_terms:
+        return False
+    claims: list[Any] = []
+    for a in st.accesses:
+        claims += [a.offset, a.mask, a.path, a.exit_pred, a.atomic_val, a.atomic_cmp]
+    for lp in ([st.loop] if st.loop is not None else []) + list(st.loops):
+        claims += [lp.lower, lp.upper, lp.step]
+    return any(
+        c is not None and any(_term_contains(c, p) for p in st.pinned_terms)
+        for c in claims
+    )
 
 
 def parse_cutile_ir(
@@ -416,7 +470,7 @@ def parse_cutile_ir(
         return AccessGraph(
             kernel_name=kernel_name,
             has_value_changing_integer_casts=changing_integer_casts,
-            param_pinned=st.param_pinned,
+            param_pinned=_pinned_claim(st),
             func_args=st.func_args,
             accesses=st.accesses,
             loop=st.loops[0] if len(st.loops) == 1 else None,
@@ -431,7 +485,7 @@ def parse_cutile_ir(
     return AccessGraph(
         kernel_name=kernel_name,
         has_value_changing_integer_casts=changing_integer_casts,
-        param_pinned=st.param_pinned,
+        param_pinned=_pinned_claim(st),
         func_args=st.func_args,
         accesses=st.accesses,
         loop=st.loop,
@@ -703,23 +757,27 @@ def _fold_bitwise(st: _State, fn: str, a: Term, b: Any, rtyp: str) -> Term | Non
     n = _known_int(st, b)
     if n is None or isinstance(a, DataDep):
         return None
-    if isinstance(b, Param):
-        st.param_pinned = True
+    out: Term | None = None
     if fn in ("rshift", "lshift"):
         if not 0 <= n < 63:
             return None
-        return _floor_div(a, 1 << n) if fn == "rshift" else Bin("*", a, Const(1 << n))
-    if fn == "and_":
+        out = _floor_div(a, 1 << n) if fn == "rshift" else Bin("*", a, Const(1 << n))
+    elif fn == "and_":
         # a & (2^k - 1) keeps the low k bits, which is a mod 2^k.
-        return _floor_mod(a, n + 1) if n >= 0 and (n + 1) & n == 0 else None
-    if fn == "xor":
+        out = _floor_mod(a, n + 1) if n >= 0 and (n + 1) & n == 0 else None
+    elif fn == "xor":
         if n == 0:
-            return a
+            out = a
         # a ^ 2^k flips one bit: add it when clear, subtract it when set.
-        if n > 0 and (n & (n - 1)) == 0:
+        elif n > 0 and (n & (n - 1)) == 0:
             bit = _floor_mod(_floor_div(a, n), 2)
-            return Bin("-", Bin("+", a, Const(n)), Bin("*", Const(2 * n), bit))
-    return None
+            out = Bin("-", Bin("+", a, Const(n)), Bin("*", Const(2 * n), bit))
+    if out is not None and isinstance(b, Param) and not isinstance(out, Const):
+        # Exact for THIS launch's value of that param only. Recorded, not
+        # yet decisive: _pinned_claim closes T0 only if it reaches a term
+        # the claim rests on.
+        st.pinned_terms.append(out)
+    return out
 
 
 def _val(st: _State, token: str) -> Any:
@@ -1852,6 +1910,25 @@ def _record_view_access(
     )
 
 
+def _loaded_binding(st: _State, other: Term | None = None) -> Any:
+    """Route 2 (L2 only): the VALUE of the load just recorded, as a
+    snapshot Select over its source tensor.
+
+    The TTIR reader's ``loaded_binding``, clause for clause, so a cuTile
+    row decides like its Triton twin: bound only under ``multipath``
+    (L0 and L1 keep :class:`DataDep` and every refusal fires as before);
+    a float pointee or a DROPPED mask keeps ``DataDep``, because only a
+    modeled mask can keep a masked-off lane, which holds ``other`` or an
+    undefined value, apart from the snapshot value. ``other`` is passed
+    only when it is a modelable term.
+    """
+    idx = len(st.accesses) - 1
+    acc = st.accesses[idx]
+    if not st.multipath or acc.elem_float or acc.mask_dropped:
+        return DataDep("loaded value")
+    return Loaded(idx, acc.base_param, acc.offset, acc.mask, other)
+
+
 def _handle_op(
     op: str,
     results: list[tuple[str, str]],
@@ -2042,8 +2119,14 @@ def _handle_op(
     if op == "tile_load":
         pv = _val(st, kw["view"])
         _record_view_access("load", pv, _tuple_vals(st, kw["index"]), line_no, st)
+        # cuTile has no `other` operand: the value of a clipped lane is
+        # the partition view's padding mode. ZERO is the one mode that
+        # names a value; UNDETERMINED and NEG_INF leave the lane
+        # unspecified (a free pad array, the widening direction).
+        pad = getattr(pv, "padding", "")
+        loaded = _loaded_binding(st, Const(0) if pad == "ZERO" else None)
         for rname, rtyp in results:
-            env[rname] = _TOKEN if rtyp.strip() == "Token" else DataDep("loaded value")
+            env[rname] = _TOKEN if rtyp.strip() == "Token" else loaded
         return
     if op == "tile_store":
         pv = _val(st, kw["view"])
@@ -2094,8 +2177,22 @@ def _handle_op(
                 elem_float=is_f,
             )
         )
+        if op == "load_pointer":
+            pv_raw = kw.get("padding_value", "None")
+            ov = _val(st, pv_raw) if pv_raw != "None" else None
+            unmodelable = (DataDep, PtrValue, _Token, _ArrayView, _PartView)
+            other = (
+                ov
+                if ov is not None
+                and not isinstance(ov, unmodelable)
+                and not _has_datadep(ov)
+                else None
+            )
+            bound: Any = _loaded_binding(st, other)
+        else:
+            bound = DataDep("loaded value")
         for rname, rtyp in results:
-            env[rname] = _TOKEN if rtyp.strip() == "Token" else DataDep("loaded value")
+            env[rname] = _TOKEN if rtyp.strip() == "Token" else bound
         return
     if op == "pointer_offset":
         ptr = _val(st, kw["pointer"])
