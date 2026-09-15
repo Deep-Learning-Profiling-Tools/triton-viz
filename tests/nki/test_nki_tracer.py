@@ -2,15 +2,15 @@ import numpy as np
 import pytest
 from pathlib import Path
 
-import triton_viz
-from triton_viz.clients import Tracer
-from triton_viz.core.data import Grid, Load, Store, ReduceSum, Dot
-from triton_viz.core.trace import launches
+import tilelens
+from tilelens.clients import Tracer
+from tilelens.core.data import Grid, Load, Store, ReduceSum, Dot
+from tilelens.core.trace import launches
 import math
 
 try:
     import neuronxcc.nki.language as nl
-    from triton_viz.core.simulation.nki import NDArray
+    from tilelens.core.simulation.nki import NDArray
 except ModuleNotFoundError:
     pytest.skip(
         "NeuronX dependencies are missing. Install triton-viz[nki] to run these tests.",
@@ -25,9 +25,9 @@ def div_ceil(n, d):
 
 
 def test_tracer_records_masked_load_store():
-    triton_viz.clear()
+    tilelens.clear()
 
-    @triton_viz.trace(client=Tracer(), frontend="nki")
+    @tilelens.trace(client=Tracer(), frontend="nki")
     def add_kernel(x_ptr, y_ptr, out_ptr):
         block_size = 4
         pid = nl.program_id(axis=0)
@@ -71,9 +71,9 @@ def copy_kernel(x_ptr, out_ptr):
 
 
 def test_tracer_grid_idx_sampling():
-    triton_viz.clear()
+    tilelens.clear()
 
-    traced = triton_viz.trace(client=Tracer(grid_idx=1), frontend="nki")(copy_kernel)
+    traced = tilelens.trace(client=Tracer(grid_idx=1), frontend="nki")(copy_kernel)
 
     n_elements = 12
     x = NDArray(value=np.arange(n_elements, dtype=np.float32))
@@ -94,9 +94,9 @@ def test_tracer_grid_idx_sampling():
 
 
 def test_tracer_records_reduce_sum():
-    triton_viz.clear()
+    tilelens.clear()
 
-    @triton_viz.trace(client=Tracer(), frontend="nki")
+    @tilelens.trace(client=Tracer(), frontend="nki")
     def reduce_sum_kernel(x_ptr, out_ptr):
         block_m = 4
         block_n = 8
@@ -131,13 +131,13 @@ def test_tracer_records_reduce_sum():
 
 
 def test_tracer_records_dot():
-    triton_viz.clear()
+    tilelens.clear()
 
     TILE_M = 2
     TILE_K = 2
     TILE_N = 4
 
-    @triton_viz.trace(client=Tracer(), frontend="nki")
+    @tilelens.trace(client=Tracer(), frontend="nki")
     def matmul_kernel(lhs, rhs, result):
         """NKI matmul_kernel to compute a matrix multiplication operation in a tiled manner
 
@@ -212,7 +212,7 @@ def test_tracer_records_dot():
     kernel_args = (lhs_small, rhs_small, result)
 
     print("Executing matmul_kernel with NKI interpreter...")
-    traced_kernel = triton_viz.trace(client=Tracer(), frontend="nki")(matmul_kernel)
+    traced_kernel = tilelens.trace(client=Tracer(), frontend="nki")(matmul_kernel)
     kernel_instance = traced_kernel[kernel_grid]
     kernel_instance(*kernel_args)
 
@@ -227,9 +227,9 @@ def test_tracer_records_dot():
 
 
 def test_tracer_records_dot_transpose_x_kwarg():
-    triton_viz.clear()
+    tilelens.clear()
 
-    @triton_viz.trace(client=Tracer(), frontend="nki")
+    @tilelens.trace(client=Tracer(), frontend="nki")
     def dot_kernel(lhs, rhs, out):
         out[...] = nl.matmul(lhs, rhs, transpose_x=True)
 
@@ -251,9 +251,9 @@ def test_tracer_records_dot_transpose_x_kwarg():
 
 def test_nki_trace_save_load_roundtrip(tmp_path: Path):
     """NKI traces should serialize and reload through the shared .tvz path."""
-    triton_viz.clear()
+    tilelens.clear()
 
-    traced = triton_viz.trace(client=Tracer(), frontend="nki")(copy_kernel)
+    traced = tilelens.trace(client=Tracer(), frontend="nki")(copy_kernel)
 
     n_elements = 6
     x = NDArray(value=np.arange(n_elements, dtype=np.float32))
@@ -262,9 +262,9 @@ def test_nki_trace_save_load_roundtrip(tmp_path: Path):
     traced[(div_ceil(n_elements, 4),)](x, out)
 
     path = tmp_path / "nki_trace.tvz"
-    triton_viz.save(path)
-    triton_viz.clear()
-    triton_viz.load(path)
+    tilelens.save(path)
+    tilelens.clear()
+    tilelens.load(path)
 
     records = launches[-1].records
     record_types = [type(r) for r in records]

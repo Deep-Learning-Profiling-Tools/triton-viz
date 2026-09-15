@@ -2,7 +2,7 @@
 
 import numpy as np
 import pytest
-from triton_viz.utils.dtypes import STORAGE_DTYPES
+from tilelens.utils.dtypes import STORAGE_DTYPES
 
 pytest.importorskip("ml_dtypes")
 

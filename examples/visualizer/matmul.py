@@ -2,12 +2,12 @@ import torch
 import triton
 import triton.language as tl
 
-import triton_viz
-from triton_viz.clients import Tracer
+import tilelens
+from tilelens.clients import Tracer
 
 
 # Simple matmul kernel producing a C = A @ B (fp32, small sizes for demo)
-@triton_viz.trace(client=Tracer())
+@tilelens.trace(client=Tracer())
 @triton.jit
 def matmul_kernel(
     a_ptr,
@@ -86,7 +86,7 @@ def run_demo():
     assert torch.allclose(c, ref, atol=1e-3), "matmul result mismatch"
 
     # Launch viz UI in blocking (share=True) mode
-    triton_viz.launch(share=False, port=5001)
+    tilelens.launch(share=False, port=5001)
 
 
 if __name__ == "__main__":

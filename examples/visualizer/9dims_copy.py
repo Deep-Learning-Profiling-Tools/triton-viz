@@ -1,14 +1,14 @@
 import torch
 import triton
 import triton.language as tl
-import triton_viz
+import tilelens
 
 
 BLOCK = 1024
 SHAPE = (2, 3, 4, 3, 4, 2, 4, 2, 3)
 
 
-@triton_viz.trace("tracer")
+@tilelens.trace("tracer")
 @triton.jit
 def copy_9d_kernel(
     x_ptr,
@@ -26,7 +26,7 @@ def copy_9d_kernel(
 
 
 def run_demo() -> None:
-    """Run a rank-9 copy example and launch Triton Viz."""
+    """Run a rank-9 copy example and launch TileLens."""
     torch.manual_seed(0)
     x = torch.randn(SHAPE, device="cpu")
     y = torch.empty_like(x)
@@ -41,7 +41,7 @@ def run_demo() -> None:
     )
 
     assert torch.allclose(y, x), "copy kernel output mismatch"
-    triton_viz.launch(share=False, port=5001)
+    tilelens.launch(share=False, port=5001)
 
 
 if __name__ == "__main__":

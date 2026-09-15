@@ -169,6 +169,6 @@ uv.lock
 benchmarks/*.json
 
 # Auto-generated version file
-triton_viz/version.py
+tilelens/version.py
 .subagents/
 subagent*.txt

@@ -61,20 +61,20 @@ def get_base_version():
 
 
 BASE_VERSION = get_base_version()
-TRITON_VIZ_VERSION = BASE_VERSION + get_version_suffix()
+TILELENS_VERSION = BASE_VERSION + get_version_suffix()
 
 
 def generate_version_file():
-    """Generate triton_viz/version.py file."""
-    version_file = Path(__file__).parent / "triton_viz" / "version.py"
+    """Generate tilelens/version.py file."""
+    version_file = Path(__file__).parent / "tilelens" / "version.py"
     git_version = get_full_git_commit_hash() if is_git_repo() else ""
 
     content = f'''"""Auto-generated version file. Do not edit."""
-__version__ = "{TRITON_VIZ_VERSION}"
+__version__ = "{TILELENS_VERSION}"
 git_version = "{git_version}"
 '''
     version_file.write_text(content)
-    print(f"Generated {version_file} with version {TRITON_VIZ_VERSION}")
+    print(f"Generated {version_file} with version {TILELENS_VERSION}")
 
 
 class BuildPyCommand(build_py):

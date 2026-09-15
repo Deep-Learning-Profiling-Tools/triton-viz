@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-from triton_viz.core.data import Tensor, Transfer
-from triton_viz.visualizer.draw import prepare_visualization_data
+from tilelens.core.data import Tensor, Transfer
+from tilelens.visualizer.draw import prepare_visualization_data
 
 
 def _tensor(ptr, data):

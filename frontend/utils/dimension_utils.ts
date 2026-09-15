@@ -163,7 +163,7 @@ export function createVectorText(
     textMesh.sync(() => {
         applyMaterialSettings();
         if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('triton-viz-text-sync'));
+            window.dispatchEvent(new CustomEvent('tilelens-text-sync'));
         }
         onSync?.();
     });
@@ -244,7 +244,7 @@ export function createCadDimension(
         group.add(shapeMesh);
         if (fallbackSprite) fallbackSprite.visible = false;
         if (typeof window !== 'undefined') {
-            window.dispatchEvent(new CustomEvent('triton-viz-text-sync'));
+            window.dispatchEvent(new CustomEvent('tilelens-text-sync'));
         }
     });
 

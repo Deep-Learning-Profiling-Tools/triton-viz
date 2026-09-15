@@ -3,17 +3,17 @@ from typing import Any
 
 import numpy as np
 import pytest
-import triton_viz
+import tilelens
 
 try:
-    from triton_viz.core.frontend.base import _LangPatchScope
-    from triton_viz.clients import Tracer
-    from triton_viz.core.data import Dot, Transfer
-    from triton_viz.core.trace import launches
+    from tilelens.core.frontend.base import _LangPatchScope
+    from tilelens.clients import Tracer
+    from tilelens.core.data import Dot, Transfer
+    from tilelens.core.trace import launches
     import nki.isa as nisa
     import nki.language as nl
-    import triton_viz.core.simulation.nki_beta2 as b2
-    from triton_viz.utils.dtypes import STORAGE_DTYPES
+    import tilelens.core.simulation.nki_beta2 as b2
+    from tilelens.utils.dtypes import STORAGE_DTYPES
 except ModuleNotFoundError:
     pytest.skip(
         "NeuronX dependencies are missing. Install triton-viz[nki] to run these tests.",
@@ -244,7 +244,7 @@ def test_patch_surface_and_signatures(patched_scope):
 
 def test_trace_records_beta2_nc_matmul():
     """beta2 tracing should record nc_matmul via the builder surface."""
-    triton_viz.clear()
+    tilelens.clear()
 
     def kernel(lhsT, rhs, out):
         lhs_tile = nl.ndarray((128, 128), dtype=lhsT.dtype, buffer=nl.sbuf)
@@ -257,7 +257,7 @@ def test_trace_records_beta2_nc_matmul():
         nisa.tensor_copy(out_tile, res_psum)
         nisa.dma_copy(out, out_tile)
 
-    traced = triton_viz.trace(client=Tracer(), frontend="nki_beta2")(kernel)
+    traced = tilelens.trace(client=Tracer(), frontend="nki_beta2")(kernel)
     lhs = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
     rhs = np.arange(128 * 512, dtype=np.float32).reshape(128, 512)
     out = np.empty((128, 512), dtype=np.float32)
@@ -272,7 +272,7 @@ def test_trace_records_beta2_nc_matmul():
 
 def test_trace_records_beta2_transfers():
     """beta2 tracing should record dma_copy/tensor_copy as Transfer ops."""
-    triton_viz.clear()
+    tilelens.clear()
 
     # check tracer records Transfer ops
     def kernel(src, out):
@@ -284,7 +284,7 @@ def test_trace_records_beta2_transfers():
         nisa.tensor_copy(out_tile, psum_tile)
         nisa.dma_copy(out, out_tile)
 
-    traced = triton_viz.trace(client=Tracer(), frontend="nki_beta2")(kernel)
+    traced = tilelens.trace(client=Tracer(), frontend="nki_beta2")(kernel)
     src = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
     out = np.empty((128, 128), dtype=np.float32)
     traced[(1,)](src, out)
@@ -300,7 +300,7 @@ def test_trace_records_beta2_transfers():
     ]
 
     # check the visualizer interface can handle tracer-produced Transfer records
-    from triton_viz.visualizer.draw import get_visualization_data
+    from tilelens.visualizer.draw import get_visualization_data
 
     viz_data = get_visualization_data()
     ops = viz_data["visualization_data"]["(0, 0, 0)"]
@@ -311,7 +311,7 @@ def test_trace_records_beta2_transfers():
 
 def test_trace_records_beta2_transfer_bytes_for_mixed_dtypes():
     """beta2 tracing should size transfer bytes from the destination dtype."""
-    triton_viz.clear()
+    tilelens.clear()
 
     def kernel(src, out):
         src_tile = nl.ndarray((128, 128), dtype=src.dtype, buffer=nl.sbuf)
@@ -322,7 +322,7 @@ def test_trace_records_beta2_transfer_bytes_for_mixed_dtypes():
         nisa.tensor_copy(out_tile, psum_tile)
         nisa.dma_copy(out, out_tile)
 
-    traced = triton_viz.trace(client=Tracer(), frontend="nki_beta2")(kernel)
+    traced = tilelens.trace(client=Tracer(), frontend="nki_beta2")(kernel)
     src = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
     out = np.empty((128, 128), dtype=np.float16)
     traced[(1,)](src, out)
@@ -340,7 +340,7 @@ def test_trace_records_beta2_transfer_bytes_for_mixed_dtypes():
 
 def test_trace_no_grid_needed():
     """beta2 tracing should not need an SPMD grid to run."""
-    triton_viz.clear()
+    tilelens.clear()
 
     def kernel(lhsT, rhs, out):
         lhs_tile = nl.ndarray((128, 128), dtype=lhsT.dtype, buffer=nl.sbuf)
@@ -353,7 +353,7 @@ def test_trace_no_grid_needed():
         nisa.tensor_copy(out_tile, res_psum)
         nisa.dma_copy(out, out_tile)
 
-    traced = triton_viz.trace(client=Tracer(), frontend="nki_beta2")(kernel)
+    traced = tilelens.trace(client=Tracer(), frontend="nki_beta2")(kernel)
     lhs = np.arange(128 * 128, dtype=np.float32).reshape(128, 128)
     rhs = np.arange(128 * 512, dtype=np.float32).reshape(128, 512)
     out = np.empty((128, 512), dtype=np.float32)

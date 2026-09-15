@@ -2,7 +2,7 @@
 
 ## Project Structure & Module Organization
 
-Triton-Viz is a Python package with a TypeScript web UI. Core code lives in `triton_viz/`: `core/` handles tracing and client lifecycle, `core/frontend/` owns DSL operation adapters, runtime patching, and frontend-local AST rewrites, `core/simulation/` contains NKI simulation runtimes, `clients/` contains visualizer/profiler/sanitizer logic, and `visualizer/` covers visualizer APIs. Web UI source is in `frontend/`; built assets are copied into `triton_viz/static/` and `triton_viz/templates/`. Tests live in `tests/unit/`, `tests/end_to_end/`, `tests/frontend/`, and `tests/nki/`. Examples are in `examples/`; site docs are in `docs/`.
+TileLens is a Python package with a TypeScript web UI. Core code lives in `tilelens/`: `core/` handles tracing and client lifecycle, `core/frontend/` owns DSL operation adapters, runtime patching, and frontend-local AST rewrites, `core/simulation/` contains NKI simulation runtimes, `clients/` contains visualizer/profiler/sanitizer logic, and `visualizer/` covers visualizer APIs. Web UI source is in `frontend/`; built assets are copied into `tilelens/static/` and `tilelens/templates/`. Tests live in `tests/unit/`, `tests/end_to_end/`, `tests/frontend/`, and `tests/nki/`. Examples are in `examples/`; site docs are in `docs/`.
 
 ## Build, Test, and Development Commands
 
@@ -28,4 +28,4 @@ Recent commits use concise imperative summaries, often with prefixes such as `[F
 
 ## Security & Configuration Tips
 
-Do not commit local traces, credentials, or generated debug artifacts. Runtime behavior is controlled by environment variables such as `TRITON_VIZ_VERBOSE`, `TRITON_VIZ_PORT`, `ENABLE_SANITIZER`, `ENABLE_PROFILER`, and `SANITIZER_ENABLE_FAKE_TENSOR`; document any new variables in `README.md`.
+Do not commit local traces, credentials, or generated debug artifacts. Runtime behavior is controlled by environment variables such as `TILELENS_VERBOSE`, `TILELENS_PORT`, `ENABLE_SANITIZER`, `ENABLE_PROFILER`, and `SANITIZER_ENABLE_FAKE_TENSOR`; document any new variables in `README.md`.

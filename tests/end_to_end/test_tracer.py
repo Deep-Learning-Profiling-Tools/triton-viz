@@ -2,16 +2,16 @@ import torch
 import triton
 import triton.language as tl
 
-import triton_viz
-from triton_viz.clients import Tracer, Sanitizer
-from triton_viz.core.data import Grid, Load, Store, ReduceSum, Dot
-from triton_viz.core.trace import launches
+import tilelens
+from tilelens.clients import Tracer, Sanitizer
+from tilelens.core.data import Grid, Load, Store, ReduceSum, Dot
+from tilelens.core.trace import launches
 
 
 def test_tracer_records_masked_load_store():
-    triton_viz.clear()
+    tilelens.clear()
 
-    @triton_viz.trace(client=Tracer())
+    @tilelens.trace(client=Tracer())
     @triton.jit
     def add_kernel(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
@@ -55,9 +55,9 @@ def copy_kernel(x_ptr, out_ptr, BLOCK_SIZE: tl.constexpr):
 
 
 def test_tracer_grid_idx_sampling():
-    triton_viz.clear()
+    tilelens.clear()
 
-    traced = triton_viz.trace(client=Tracer(grid_idx=1))(copy_kernel)
+    traced = tilelens.trace(client=Tracer(grid_idx=1))(copy_kernel)
 
     block_size = 4
     n_elements = 12
@@ -79,9 +79,9 @@ def test_tracer_grid_idx_sampling():
 
 
 def test_tracer_records_reduce_sum():
-    triton_viz.clear()
+    tilelens.clear()
 
-    @triton_viz.trace(client=Tracer())
+    @tilelens.trace(client=Tracer())
     @triton.jit
     def reduce_sum_kernel(
         x_ptr,
@@ -126,9 +126,9 @@ def test_tracer_records_reduce_sum():
 
 
 def test_tracer_records_dot():
-    triton_viz.clear()
+    tilelens.clear()
 
-    @triton_viz.trace(client=Tracer())
+    @tilelens.trace(client=Tracer())
     @triton.jit
     def dot_kernel(
         a_ptr,
@@ -215,7 +215,7 @@ def test_kernel_cache_autotune_with_dummy_benchmarker():
         output = x + y
         tl.store(out_ptr + offsets, output, mask=mask)
 
-    traced_kernel = triton_viz.trace(client=Sanitizer())(autotune_add_kernel_cache_on)
+    traced_kernel = tilelens.trace(client=Sanitizer())(autotune_add_kernel_cache_on)
 
     # Verify dummy benchmarker is installed
     if hasattr(traced_kernel, "runner") and hasattr(traced_kernel.runner, "_do_bench"):

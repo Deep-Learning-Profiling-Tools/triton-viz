@@ -1,7 +1,7 @@
 import atexit
 import json
 
-import triton_viz as _tv
+import tilelens as _tv
 
 _orig_trace = _tv.trace
 _records = []
