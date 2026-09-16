@@ -11,9 +11,9 @@ from tilelens.core.config import config as cfg
 
 
 # Command names
-SANITIZER_COMMAND = "triton-sanitizer"
-PROFILER_COMMAND = "triton-profiler"
-RACE_DETECTOR_COMMAND = "triton-race-detector"
+SANITIZER_COMMAND = "tile-sanitizer"
+PROFILER_COMMAND = "tile-profiler"
+RACE_DETECTOR_COMMAND = "tile-race-detector"
 
 # store the original triton.jit
 _original_jit = triton.jit

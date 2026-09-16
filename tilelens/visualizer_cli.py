@@ -5,7 +5,7 @@ from pathlib import Path
 def build_parser() -> argparse.ArgumentParser:
     """Build the CLI parser for loading a saved trace into the visualizer."""
     parser = argparse.ArgumentParser(
-        prog="triton-visualizer",
+        prog="tile-visualizer",
         description="Launch the TileLens visualizer from a saved trace archive.",
     )
     parser.add_argument("trace_file", type=Path, help="Path to a .tvz trace archive.")

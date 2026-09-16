@@ -48,10 +48,10 @@ include-package-data = true
 homepage = "https://github.com/Deep-Learning-Profiling-Tools/tilelens"
 
 [project.scripts]
-triton-sanitizer = "tilelens.wrapper:apply_sanitizer"
-triton-profiler = "tilelens.wrapper:apply_profiler"
-triton-race-detector = "tilelens.wrapper:apply_race_detector"
-triton-visualizer = "tilelens.visualizer_cli:main"
+tile-sanitizer = "tilelens.wrapper:apply_sanitizer"
+tile-profiler = "tilelens.wrapper:apply_profiler"
+tile-race-detector = "tilelens.wrapper:apply_race_detector"
+tile-visualizer = "tilelens.visualizer_cli:main"
 
 [project.optional-dependencies]
 test = [

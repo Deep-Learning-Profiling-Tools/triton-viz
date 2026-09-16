@@ -67,7 +67,7 @@ The GitHub repository is now `tilelens`, while the PyPI distribution remains `tr
 
 Existing `.tvz` traces can still be loaded with `tilelens.load(...)`.
 
-CLI commands remain `triton-sanitizer`, `triton-profiler`, `triton-race-detector`, and `triton-visualizer`.
+CLI commands are `tile-sanitizer`, `tile-profiler`, `tile-race-detector`, and `tile-visualizer`.
 
 ### Web UI Build
 
@@ -135,9 +135,9 @@ wrappers patch plain `@triton.jit` kernels, so use them with scripts that do not
 already apply `@tilelens.trace(...)`.
 
 ```sh
-triton-sanitizer examples/sanitizer/oob_cli.py
-triton-profiler examples/profiler/load_store_cli.py
-triton-visualizer trace.tvz
+tile-sanitizer examples/sanitizer/oob_cli.py
+tile-profiler examples/profiler/load_store_cli.py
+tile-visualizer trace.tvz
 ```
 
 For visualizer workflows, save a trace and launch the UI from Python:
@@ -183,7 +183,7 @@ tilelens.load(
 tilelens.launch()
 ```
 
-CLI: `triton-visualizer trace.tvz`. The archive is a zip file containing `manifest.json` plus `tensors.npz`, and `tilelens.load(...)` restores the normal trace state for existing consumers.
+CLI: `tile-visualizer trace.tvz`. The archive is a zip file containing `manifest.json` plus `tensors.npz`, and `tilelens.load(...)` restores the normal trace state for existing consumers.
 
 
 ### Environment variables

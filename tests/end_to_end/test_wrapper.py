@@ -22,7 +22,7 @@ def load_template(name: str, **kwargs) -> str:
     return template.substitute(**kwargs)
 
 
-def test_triton_sanitizer_injects_trace_outermost(tmp_path: Path, monkeypatch):
+def test_tile_sanitizer_injects_trace_outermost(tmp_path: Path, monkeypatch):
     """
     Black-box verification:
     - Pure @triton.jit kernels have exactly one @tilelens.trace at the outermost layer;
@@ -55,7 +55,7 @@ def test_triton_sanitizer_injects_trace_outermost(tmp_path: Path, monkeypatch):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
 
-    # 4) Find triton-sanitizer executable - fail if not found
+    # 4) Find tile-sanitizer executable - fail if not found
     exe = shutil.which(SANITIZER_COMMAND)
     assert exe is not None, (
         f"{SANITIZER_COMMAND} command not found. "
@@ -98,9 +98,9 @@ def test_triton_sanitizer_injects_trace_outermost(tmp_path: Path, monkeypatch):
         )
 
 
-def test_triton_profiler_injects_trace_outermost(tmp_path: Path, monkeypatch):
+def test_tile_profiler_injects_trace_outermost(tmp_path: Path, monkeypatch):
     """
-    Black-box verification for triton-profiler:
+    Black-box verification for tile-profiler:
     - Pure @triton.jit kernels have exactly one @tilelens.trace at the outermost layer;
     - @triton.autotune + @triton.jit kernels: trace is only added at the autotune outer
       layer, inner jit should not be traced again.
@@ -131,7 +131,7 @@ def test_triton_profiler_injects_trace_outermost(tmp_path: Path, monkeypatch):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
 
-    # 4) Find triton-profiler executable - fail if not found
+    # 4) Find tile-profiler executable - fail if not found
     exe = shutil.which(PROFILER_COMMAND)
     assert exe is not None, (
         f"{PROFILER_COMMAND} command not found. "
@@ -174,9 +174,9 @@ def test_triton_profiler_injects_trace_outermost(tmp_path: Path, monkeypatch):
         )
 
 
-def test_triton_race_detector_injects_trace_outermost(tmp_path: Path, monkeypatch):
+def test_tile_race_detector_injects_trace_outermost(tmp_path: Path, monkeypatch):
     """
-    Black-box verification for triton-race-detector:
+    Black-box verification for tile-race-detector:
     - Pure @triton.jit kernels have exactly one @tilelens.trace at the outermost layer;
     - @triton.autotune + @triton.jit kernels: trace is only added at the autotune outer
       layer, inner jit should not be traced again.
@@ -207,7 +207,7 @@ def test_triton_race_detector_injects_trace_outermost(tmp_path: Path, monkeypatc
     env = os.environ.copy()
     env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
 
-    # 4) Find triton-race-detector executable - fail if not found
+    # 4) Find tile-race-detector executable - fail if not found
     exe = shutil.which(RACE_DETECTOR_COMMAND)
     assert exe is not None, (
         f"{RACE_DETECTOR_COMMAND} command not found. "
@@ -253,7 +253,7 @@ def test_triton_race_detector_injects_trace_outermost(tmp_path: Path, monkeypatc
 def test_cli_invocation():
     """
     Simulate running:
-        $ triton-sanitizer dummy_program.py
+        $ tile-sanitizer dummy_program.py
     and assert that tilelens.trace is invoked exactly once.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
@@ -274,8 +274,8 @@ def test_cli_invocation():
         env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
         env["TRITON_INTERPRET"] = "1"
 
-        # Run the dummy program using triton-sanitizer
-        cmd = ["triton-sanitizer", str(tmp_path / "dummy_program.py")]
+        # Run the dummy program using tile-sanitizer
+        cmd = ["tile-sanitizer", str(tmp_path / "dummy_program.py")]
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -293,7 +293,7 @@ def test_cli_invocation():
 
 def test_cli_rejects_trace_decorator(tmp_path: Path):
     """
-    When a user script contains @tilelens.trace() and is run via triton-sanitizer,
+    When a user script contains @tilelens.trace() and is run via tile-sanitizer,
     the process should exit with a non-zero code and report a RuntimeError.
     """
     # 1) Write a script that has both @tilelens.trace and @triton.jit
@@ -303,7 +303,7 @@ def test_cli_rejects_trace_decorator(tmp_path: Path):
         encoding="utf-8",
     )
 
-    # 2) Find triton-sanitizer executable
+    # 2) Find tile-sanitizer executable
     exe = shutil.which(SANITIZER_COMMAND)
     assert exe is not None, (
         f"{SANITIZER_COMMAND} command not found. "

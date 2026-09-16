@@ -399,13 +399,13 @@ def trace(client: str | Client | None = None, frontend: str = "triton"):
         if cfg.cli_active and isinstance(kernel, TraceInterface):
             raise RuntimeError(
                 "@tilelens.trace() decorator cannot be used together with "
-                "CLI wrapper (e.g., triton-sanitizer / triton-profiler). "
+                "CLI wrapper (e.g., tile-sanitizer / tile-profiler). "
                 "Please remove the @tilelens.trace() decorator from your code "
                 "when using CLI tools."
             )
 
         if _is_sanitizer_client(client) and not cfg.enable_sanitizer:
-            # when dry-running triton-sanitizer CLI (i.e. wrap kernels with sanitizer
+            # when dry-running tile-sanitizer CLI (i.e. wrap kernels with sanitizer
             # tracing but don't actually sanitize), don't actually trace the kernel
             return kernel
 

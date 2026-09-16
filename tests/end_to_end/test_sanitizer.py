@@ -895,7 +895,7 @@ def test_block_tensor_2d_loop_advance_non_oob():
 
 def test_cli_code_context_points_to_kernel():
     """
-    Run a minimal OOB kernel via ``triton-sanitizer`` CLI and verify the
+    Run a minimal OOB kernel via ``tile-sanitizer`` CLI and verify the
     Code Context section points to the actual kernel line, not the CLI
     entry-point wrapper.
     """
@@ -926,7 +926,7 @@ def test_cli_code_context_points_to_kernel():
         tmp_path = tmp.name
 
     try:
-        sanitizer = os.path.join(os.path.dirname(sys.executable), "triton-sanitizer")
+        sanitizer = os.path.join(os.path.dirname(sys.executable), "tile-sanitizer")
         result = subprocess.run(
             [sanitizer, tmp_path],
             capture_output=True,
