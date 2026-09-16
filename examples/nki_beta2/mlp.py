@@ -4,8 +4,8 @@ import nki.language as nl
 
 import numpy as np
 
-TRITON_VIZ_ENABLED = True
-PRE_TRACE = True  # Run NKI Beta 2 compiler tracing before Triton-Viz simulation for stronger semantic checks.
+TILELENS_ENABLED = True
+PRE_TRACE = True  # Run NKI Beta 2 compiler tracing before TileLens simulation for stronger semantic checks.
 TILE_M = 128
 TILE_K = 128
 TILE_H = 128
@@ -170,14 +170,14 @@ def _run_demo():
     kernel_args = (x_t, w1_padded, w2_padded, out)
     expected = np.maximum(x @ w1, 0.0) @ w2
 
-    if TRITON_VIZ_ENABLED:
-        import triton_viz
+    if TILELENS_ENABLED:
+        import tilelens
 
-        traced_kernel = triton_viz.trace("tracer", frontend="nki_beta2")(mlp_kernel)
+        traced_kernel = tilelens.trace("tracer", frontend="nki_beta2")(mlp_kernel)
         traced_kernel[kernel_grid](*kernel_args, pre_trace=PRE_TRACE)
         assert np.allclose(expected, out[:batch, :out_dim], atol=1e-4, rtol=1e-4)
         print("☑️ Actual equals expected!")
-        triton_viz.launch(share=False)
+        tilelens.launch(share=False)
     else:
         out = _run_with_xla(mlp_kernel, kernel_grid, *kernel_args)
         assert np.allclose(expected, out[:batch, :out_dim], atol=1e-4, rtol=1e-4)

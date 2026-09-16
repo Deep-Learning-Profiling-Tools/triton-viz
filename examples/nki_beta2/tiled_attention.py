@@ -4,8 +4,8 @@ import nki.isa as nisa
 import nki.language as nl
 import numpy as np
 
-TRITON_VIZ_ENABLED = True
-PRE_TRACE = True  # Run NKI Beta 2 compiler tracing before Triton-Viz simulation for stronger semantic checks.
+TILELENS_ENABLED = True
+PRE_TRACE = True  # Run NKI Beta 2 compiler tracing before TileLens simulation for stronger semantic checks.
 
 
 def tiled_attention_kernel(
@@ -372,16 +372,16 @@ def _run_demo():
     )
     expected4d = _numpy_tiled_attention(q4d, k4d, v4d)
 
-    if TRITON_VIZ_ENABLED:
-        import triton_viz
+    if TILELENS_ENABLED:
+        import tilelens
 
-        traced_kernel = triton_viz.trace("tracer", frontend="nki_beta2")(
+        traced_kernel = tilelens.trace("tracer", frontend="nki_beta2")(
             tiled_attention_kernel
         )
         traced_kernel[kernel_grid](*kernel_args, pre_trace=PRE_TRACE)
         assert np.allclose(expected4d, out4d)
         print("☑️ Actual equals expected!")
-        triton_viz.launch(share=False)
+        tilelens.launch(share=False)
     else:
         out4d = _run_with_xla(tiled_attention_kernel, kernel_grid, *kernel_args)
         assert np.allclose(expected4d, out4d)

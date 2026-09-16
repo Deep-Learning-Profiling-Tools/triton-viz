@@ -9,15 +9,15 @@ iterator variable.
 import triton
 import triton.language as tl  # noqa: F401  (the interpreter requires tl in the kernel's globals)
 
-import triton_viz
-from triton_viz.clients.sanitizer.sanitizer import SymbolicSanitizer
+import tilelens
+from tilelens.clients.sanitizer.sanitizer import SymbolicSanitizer
 
 from .loop_site_cross_file_helper import inner_store_helper
 
 cross_file_loop_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
-@triton_viz.trace(client=cross_file_loop_sanitizer)
+@tilelens.trace(client=cross_file_loop_sanitizer)
 @triton.jit
 def cross_file_outer_loop_kernel(out_ptr):
     for i in range(0, 8):

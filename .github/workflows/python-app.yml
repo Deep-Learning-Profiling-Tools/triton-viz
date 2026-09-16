@@ -25,7 +25,7 @@ jobs:
     steps:
     - uses: actions/checkout@v3
       with:
-        path: 'triton_viz'
+        path: 'tilelens'
 
     - name: Set up Python 3.12
       uses: actions/setup-python@v3
@@ -39,46 +39,46 @@ jobs:
 
     - name: Lint with pre-commit
       run: |
-        cd triton_viz
+        cd tilelens
         pip install pre-commit
         pre-commit run --all-files
 
     - name: Install Dependencies
       run: |
-        cd triton_viz
+        cd tilelens
         uv sync --extra test
 
     - name: Upgrade Triton to latest from main
       run: |
-        cd triton_viz
+        cd tilelens
         uv pip install --pre -U triton
         uv pip install "git+https://github.com/triton-lang/triton.git#subdirectory=python/triton_kernels"
 
     - name: Run frontend tests
       run: |
-        cd triton_viz
+        cd tilelens
         npm install
         npm run test:frontend
 
     - name: Test with pytest
       run: |
-        cd triton_viz
+        cd tilelens
         uv run pytest tests -n auto --ignore=tests/end_to_end/test_triton_kernels.py
 
-    - name: Install Triton-Viz with NKI extras
+    - name: Install TileLens with NKI extras
       run: |
-        cd triton_viz
+        cd tilelens
         uv sync --extra test --extra nki
 
     - name: Upgrade Triton to latest from main (NKI)
       run: |
-        cd triton_viz
+        cd tilelens
         uv pip install --pre -U triton
         uv pip install "git+https://github.com/triton-lang/triton.git#subdirectory=python/triton_kernels"
 
     - name: Run full (Triton + NKI) pytest suite
       run: |
-        cd triton_viz
+        cd tilelens
         uv run pytest tests -m "" -n auto --ignore=tests/end_to_end/test_triton_kernels.py
 
   test-pip-install:
@@ -96,4 +96,4 @@ jobs:
       run: pip install -e ".[test]"
 
     - name: Verify installation
-      run: python -c "import triton_viz; print(triton_viz.__version__)"
+      run: python -c "import tilelens; print(tilelens.__version__)"

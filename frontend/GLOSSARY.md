@@ -1,6 +1,6 @@
 # Glossary
 
-This glossary defines the canonical UI terms, data types, and events used across the Triton-Viz frontend.
+This glossary defines the canonical UI terms, data types, and events used across the TileLens frontend.
 
 ## UI Surfaces
 - Control Panel: left sidebar with program controls, operation controls, and the code peek panel.
