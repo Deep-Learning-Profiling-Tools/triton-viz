@@ -1,4 +1,4 @@
-"""Backward compatability with triton_viz"""
+"""Backward compatibility with triton_viz"""
 
 from tilelens import (
     __all__ as __all__,
