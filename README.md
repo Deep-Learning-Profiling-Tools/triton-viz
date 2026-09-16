@@ -61,6 +61,14 @@ cd tilelens
 uv sync # or "uv sync --extra test" if you're running tests
 ```
 
+### Transitioning from Triton-viz to TileLens
+
+The GitHub repository is now `tilelens`, while the PyPI distribution remains `triton-viz`. 
+
+Existing `.tvz` traces can still be loaded with `tilelens.load(...)`.
+
+CLI commands remain `triton-sanitizer`, `triton-profiler`, `triton-race-detector`, and `triton-visualizer`.
+
 ### Web UI Build
 
 The PyPI package ships with prebuilt web UI assets in `tilelens/static`, so
@@ -177,7 +185,6 @@ tilelens.launch()
 
 CLI: `triton-visualizer trace.tvz`. The archive is a zip file containing `manifest.json` plus `tensors.npz`, and `tilelens.load(...)` restores the normal trace state for existing consumers.
 
-Existing `.tvz` traces can still be loaded with `tilelens.load(...)`.
 
 ### Environment variables
 
