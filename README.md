@@ -63,7 +63,7 @@ uv sync # or "uv sync --extra test" if you're running tests
 
 ### Transitioning from Triton-viz to TileLens
 
-The GitHub repository is now `tilelens`, while the PyPI distribution remains `triton-viz`. 
+The GitHub repository is now `tilelens`, while the PyPI distribution remains `triton-viz`.
 
 Existing `.tvz` traces can still be loaded with `tilelens.load(...)`.
 
