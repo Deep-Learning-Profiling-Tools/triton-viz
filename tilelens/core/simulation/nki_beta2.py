@@ -17,7 +17,7 @@ except (
     ModuleNotFoundError
 ) as exc:  # pragma: no cover - only hit when optional deps missing
     raise ModuleNotFoundError(
-        "NKI dependencies are missing. Install triton-viz[nki] to enable the "
+        "NKI dependencies are missing. Install tilelens[nki] to enable the "
         "NKI Beta 2 interpreter."
     ) from exc
 

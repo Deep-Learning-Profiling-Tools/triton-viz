@@ -76,7 +76,8 @@ def _apply_wrapper(wrapper_func, command_name, usage_msg):
     """
     Generic function to apply a wrapper to triton.jit and run the user script.
     """
-    if os.path.basename(sys.argv[0]) != command_name:
+    legacy_command = command_name.replace("tile-", "triton-", 1)
+    if os.path.basename(sys.argv[0]) not in (command_name, legacy_command):
         raise RuntimeError(
             f"{command_name} must be used as a CLI tool, not called from Python. "
             f"Usage: {usage_msg}"

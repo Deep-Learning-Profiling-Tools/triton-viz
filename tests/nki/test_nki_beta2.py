@@ -16,7 +16,7 @@ try:
     from tilelens.utils.dtypes import STORAGE_DTYPES
 except ModuleNotFoundError:
     pytest.skip(
-        "NeuronX dependencies are missing. Install triton-viz[nki] to run these tests.",
+        "NeuronX dependencies are missing. Install tilelens[nki] to run these tests.",
         allow_module_level=True,
     )
 

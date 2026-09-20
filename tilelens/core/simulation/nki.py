@@ -7,7 +7,7 @@ except (
     ModuleNotFoundError
 ) as exc:  # pragma: no cover - only hit when optional deps missing
     raise ModuleNotFoundError(
-        "NeuronX dependencies are missing. Install triton-viz[nki] to enable the NKI interpreter."
+        "NeuronX dependencies are missing. Install tilelens[nki] to enable the NKI interpreter."
     ) from exc
 import inspect
 import textwrap

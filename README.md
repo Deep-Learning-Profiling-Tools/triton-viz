@@ -47,10 +47,10 @@ TileLens helps developers inspect Triton kernels with visualization, profiling, 
 
 > **Windows Note:** TileLens depends on Triton, which can only be installed on Windows Subsystem for Linux (WSL). Once installed, follow below instructions in WSL.
 
-TileLens is distributed on PyPI under the existing name `triton-viz`:
+Install TileLens from PyPI:
 
 ```sh
-pip install triton-viz
+pip install tilelens
 ```
 
 If you want to run examples from this repo, contribute, or build the web UI, install from source instead:
@@ -63,11 +63,14 @@ uv sync # or "uv sync --extra test" if you're running tests
 
 ### Transitioning from Triton-viz to TileLens
 
-The GitHub repository is now `tilelens`, while the PyPI distribution remains `triton-viz`.
+The GitHub repository and PyPI distribution are named `tilelens`. Use
+`import tilelens` in new code. The legacy `triton_viz` import continues to expose
+the same public API for existing code, including Triton-Puzzles.
 
 Existing `.tvz` traces can still be loaded with `tilelens.load(...)`.
 
 CLI commands are `tile-sanitizer`, `tile-profiler`, `tile-race-detector`, and `tile-visualizer`.
+The old `triton-*` command names remain available as compatibility aliases.
 
 ### Web UI Build
 
@@ -85,7 +88,7 @@ npm run build:frontend
 For PyPI installs, install with the `nki` extra and AWS Neuron repository:
 
 ```sh
-pip install "triton-viz[nki]" --extra-index-url https://pip.repos.neuron.amazonaws.com
+pip install "tilelens[nki]" --extra-index-url https://pip.repos.neuron.amazonaws.com
 ```
 
 For source installs:
