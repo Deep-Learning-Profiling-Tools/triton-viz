@@ -1003,7 +1003,9 @@ def launch(share: bool = True, port: int | None = None, block: bool | None = Non
                   True outside interactive sessions.
     """
     default_port = 8000 if share else 5001
-    actual_port = port or int(os.getenv("TILELENS_PORT", default_port))
+    actual_port = port or int(
+        os.getenv("TILELENS_PORT", os.getenv("TRITON_VIZ_PORT", default_port))
+    )
     if block is None:
         block = share and not _is_interactive()
 

@@ -1,13 +1,21 @@
 import os
 
 
+def _get_env(env: str, default: str) -> str:
+    """Prefer TileLens settings, falling back to the former variable names."""
+    if env.startswith("TILELENS_"):
+        legacy = env.replace("TILELENS_", "TRITON_VIZ_", 1)
+        return os.getenv(env, os.getenv(legacy, default))
+    return os.getenv(env, default)
+
+
 def _is_one(env: str, default: str = "0") -> bool:
-    return os.getenv(env, default) == "1"
+    return _get_env(env, default) == "1"
 
 
 def _get_int_env(env: str, default: int, minimum: int | None = None) -> int:
     try:
-        value = int(os.getenv(env, str(default)))
+        value = int(_get_env(env, str(default)))
     except ValueError:
         value = default
     return max(minimum, value) if minimum is not None else value
