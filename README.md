@@ -63,14 +63,28 @@ uv sync # or "uv sync --extra test" if you're running tests
 
 ### Transitioning from Triton-viz to TileLens
 
-The GitHub repository and PyPI distribution are named `tilelens`. Use
-`import tilelens` in new code. The legacy `triton_viz` import continues to expose
-the same public API for existing code, including Triton-Puzzles.
+The GitHub repo and PyPI package are now named `tilelens`. Use `import tilelens`
+in new code. Old `triton_viz` imports, including submodule imports, still work.
+
+If you already have `triton-viz` installed, uninstall it before installing
+TileLens. The two packages share files, so keeping both installed can break
+imports and CLI commands:
+
+```sh
+pip uninstall -y triton-viz
+pip install tilelens
+```
+
+For source installs, use `pip install .` after uninstalling the old package.
+If you already installed both, uninstall `triton-viz` first, then run
+`pip install --force-reinstall tilelens` (or `pip install --force-reinstall .`
+from this repo). Restart Python or your notebook kernel after upgrading.
 
 Existing `.tvz` traces can still be loaded with `tilelens.load(...)`.
+Traces saved by TileLens cannot be loaded by older Triton-Viz versions.
 
 CLI commands are `tile-sanitizer`, `tile-profiler`, `tile-race-detector`, and `tile-visualizer`.
-The old `triton-*` command names remain available as compatibility aliases.
+The old `triton-*` commands still work.
 
 ### Web UI Build
 
@@ -192,6 +206,9 @@ CLI: `tile-visualizer trace.tvz`. The archive is a zip file containing `manifest
 ### Environment variables
 
 TileLens uses a small set of environment variables to configure runtime behavior. Unless noted, boolean flags are enabled only when set to `1`.
+
+The old names `TRITON_VIZ_VERBOSE`, `TRITON_VIZ_NUM_SMS`, and `TRITON_VIZ_PORT`
+still work. If both names are set, TileLens uses the `TILELENS_*` value.
 
 - `TILELENS_VERBOSE` (default: `0`): enable verbose logging and extra debug output.
 - `TILELENS_NUM_SMS` (default: `1`): number of concurrent SMs to emulate for the CPU interpreter (min 1).
