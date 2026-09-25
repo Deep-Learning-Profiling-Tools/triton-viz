@@ -77,8 +77,10 @@ pip install tilelens
 
 For source installs, use `pip install .` after uninstalling the old package.
 If you already installed both, uninstall `triton-viz` first, then run
-`pip install --force-reinstall tilelens` (or `pip install --force-reinstall .`
-from this repo). Restart Python or your notebook kernel after upgrading.
+`pip install --force-reinstall --no-deps tilelens` (or
+`pip install --force-reinstall --no-deps .` from this repo). This restores the
+shared files without reinstalling or upgrading dependencies such as Triton.
+Restart Python or your notebook kernel after upgrading.
 
 Existing `.tvz` traces can still be loaded with `tilelens.load(...)`.
 Traces saved by TileLens cannot be loaded by older Triton-Viz versions.
