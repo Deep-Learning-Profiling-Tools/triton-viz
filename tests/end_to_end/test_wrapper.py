@@ -174,9 +174,9 @@ def test_tile_profiler_injects_trace_outermost(tmp_path: Path, monkeypatch):
         )
 
 
-def test_tile_race_detector_injects_trace_outermost(tmp_path: Path, monkeypatch):
+def test_tile_race_injects_trace_outermost(tmp_path: Path, monkeypatch):
     """
-    Black-box verification for tile-race-detector:
+    Black-box verification for tile-race:
     - Pure @triton.jit kernels have exactly one @tilelens.trace at the outermost layer;
     - @triton.autotune + @triton.jit kernels: trace is only added at the autotune outer
       layer, inner jit should not be traced again.
@@ -207,7 +207,7 @@ def test_tile_race_detector_injects_trace_outermost(tmp_path: Path, monkeypatch)
     env = os.environ.copy()
     env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
 
-    # 4) Find tile-race-detector executable - fail if not found
+    # 4) Find tile-race executable - fail if not found
     exe = shutil.which(RACE_DETECTOR_COMMAND)
     assert exe is not None, (
         f"{RACE_DETECTOR_COMMAND} command not found. "

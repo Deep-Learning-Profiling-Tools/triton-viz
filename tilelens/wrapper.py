@@ -13,7 +13,14 @@ from tilelens.core.config import config as cfg
 # Command names
 SANITIZER_COMMAND = "tile-sanitizer"
 PROFILER_COMMAND = "tile-profiler"
-RACE_DETECTOR_COMMAND = "tile-race-detector"
+RACE_DETECTOR_COMMAND = "tile-race"
+
+# Former Triton-Viz command names, still installed as aliases.
+LEGACY_COMMANDS = {
+    SANITIZER_COMMAND: "triton-sanitizer",
+    PROFILER_COMMAND: "triton-profiler",
+    RACE_DETECTOR_COMMAND: "triton-race-detector",
+}
 
 # store the original triton.jit
 _original_jit = triton.jit
@@ -76,7 +83,7 @@ def _apply_wrapper(wrapper_func, command_name, usage_msg):
     """
     Generic function to apply a wrapper to triton.jit and run the user script.
     """
-    legacy_command = command_name.replace("tile-", "triton-", 1)
+    legacy_command = LEGACY_COMMANDS[command_name]
     if os.path.basename(sys.argv[0]) not in (command_name, legacy_command):
         raise RuntimeError(
             f"{command_name} must be used as a CLI tool, not called from Python. "

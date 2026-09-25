@@ -83,8 +83,9 @@ from this repo). Restart Python or your notebook kernel after upgrading.
 Existing `.tvz` traces can still be loaded with `tilelens.load(...)`.
 Traces saved by TileLens cannot be loaded by older Triton-Viz versions.
 
-CLI commands are `tile-sanitizer`, `tile-profiler`, `tile-race-detector`, and `tile-visualizer`.
-The old `triton-*` commands still work.
+CLI commands are `tile-sanitizer`, `tile-profiler`, `tile-race`, and `tile-visualizer`.
+The old `triton-sanitizer`, `triton-profiler`, `triton-race-detector`, and
+`triton-visualizer` commands still work.
 
 ### Web UI Build
 
