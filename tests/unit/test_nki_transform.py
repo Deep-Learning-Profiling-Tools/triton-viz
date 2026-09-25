@@ -1,4 +1,4 @@
-from triton_viz.core.frontend.nki_transform import transform_code
+from tilelens.core.frontend.nki_transform import transform_code
 
 
 def test_transform_code_rewrites_load():

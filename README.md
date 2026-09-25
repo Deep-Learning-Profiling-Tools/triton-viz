@@ -1,5 +1,5 @@
 <a name="readme-top"></a>
-# Triton-Viz: A Visualization Toolkit for programming with Triton
+# TileLens: A Visualization Toolkit for programming with Triton
 <!-- PROJECT LOGO -->
 <br />
 <div align="center">
@@ -7,9 +7,9 @@
 </div>
 <br/>
 
-Welcome to Triton-Viz, a visualization and profiling toolkit designed for deep learning applications. Built with the intention of making kernel programming in tile-based DSLs like Triton more intuitive.
+Welcome to TileLens, a visualization and profiling toolkit designed for deep learning applications. Built with the intention of making kernel programming in tile-based DSLs like Triton more intuitive.
 
-Visit our [site](https://deep-learning-profiling-tools.github.io/triton-viz/) to see our tool in action!
+Visit our [site](https://deep-learning-profiling-tools.github.io/tilelens/) to see our tool in action!
 
 <!-- TABLE OF CONTENTS -->
 <details>
@@ -20,7 +20,7 @@ Visit our [site](https://deep-learning-profiling-tools.github.io/triton-viz/) to
       <a href="#getting-started">Getting Started</a>
       <ul>
         <li><a href="#prerequisites">Prerequisites</a></li>
-        <li><a href="#installation-of-triton-viz">Installation of Triton-Viz</a></li>
+        <li><a href="#installation-of-tilelens">Installation of TileLens</a></li>
       </ul>
     </li>
     <li>
@@ -34,7 +34,7 @@ Visit our [site](https://deep-learning-profiling-tools.github.io/triton-viz/) to
 
 ## About
 
-Triton-Viz helps developers inspect Triton kernels with visualization, profiling, and memory-safety analysis tools. It can run many examples through Triton's interpreter, so GPU access is not required for basic debugging workflows.
+TileLens helps developers inspect Triton kernels with visualization, profiling, and memory-safety analysis tools. It can run many examples through Triton's interpreter, so GPU access is not required for basic debugging workflows.
 
 
 ## Getting Started
@@ -43,27 +43,55 @@ Triton-Viz helps developers inspect Triton kernels with visualization, profiling
 - Python >= 3.10
 
 
-### Installation of Triton-Viz
+### Installation of TileLens
 
-> **Windows Note:** Triton-viz depends on Triton, which can only be installed on Windows Subsystem for Linux (WSL). Once installed, follow below instructions in WSL.
+> **Windows Note:** TileLens depends on Triton, which can only be installed on Windows Subsystem for Linux (WSL). Once installed, follow below instructions in WSL.
 
-Most users can install directly from PyPI:
+Install TileLens from PyPI:
 
 ```sh
-pip install triton-viz
+pip install tilelens
 ```
 
 If you want to run examples from this repo, contribute, or build the web UI, install from source instead:
 
 ```sh
-git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git
-cd triton-viz
+git clone https://github.com/Deep-Learning-Profiling-Tools/tilelens.git
+cd tilelens
 uv sync # or "uv sync --extra test" if you're running tests
 ```
 
+### Transitioning from Triton-viz to TileLens
+
+The GitHub repo and PyPI package are now named `tilelens`. Use `import tilelens`
+in new code. Old `triton_viz` imports, including submodule imports, still work.
+
+If you already have `triton-viz` installed, uninstall it before installing
+TileLens. The two packages share files, so keeping both installed can break
+imports and CLI commands:
+
+```sh
+pip uninstall -y triton-viz
+pip install tilelens
+```
+
+For source installs, use `pip install .` after uninstalling the old package.
+If you already installed both, uninstall `triton-viz` first, then run
+`pip install --force-reinstall --no-deps tilelens` (or
+`pip install --force-reinstall --no-deps .` from this repo). This restores the
+shared files without reinstalling or upgrading dependencies such as Triton.
+Restart Python or your notebook kernel after upgrading.
+
+Existing `.tvz` traces can still be loaded with `tilelens.load(...)`.
+Traces saved by TileLens cannot be loaded by older Triton-Viz versions.
+
+CLI commands are `tile-sanitizer`, `tile-profiler`, `tile-race`, and `tile-visualizer`.
+The old `triton-sanitizer`, `triton-profiler`, `triton-race-detector`, and
+`triton-visualizer` commands still work.
+
 ### Web UI Build
 
-The PyPI package ships with prebuilt web UI assets in `triton_viz/static`, so
+The PyPI package ships with prebuilt web UI assets in `tilelens/static`, so
 you do not need npm to run the visualizer. If you want to modify the web UI,
 rebuild the TS sources:
 
@@ -77,7 +105,7 @@ npm run build:frontend
 For PyPI installs, install with the `nki` extra and AWS Neuron repository:
 
 ```sh
-pip install triton-viz[nki] --extra-index-url https://pip.repos.neuron.amazonaws.com
+pip install "tilelens[nki]" --extra-index-url https://pip.repos.neuron.amazonaws.com
 ```
 
 For source installs:
@@ -93,7 +121,7 @@ uv sync --extra test # tests but no NKI support
 ```
 
 ### Testing
-* To run core Triton-viz tests, run `pytest tests/`.
+* To run core TileLens tests, run `pytest tests/`.
 * (if NKI installed) To run NKI-specific tests, run `pytest tests/ -m nki`.
 * To run all tests (Triton + NKI), run `pytest tests/ -m ""`.
 * To run visualizer web UI tests, run `npm run test:frontend`.
@@ -111,10 +139,10 @@ Use the decorator API when writing or modifying a Triton kernel:
 ```py
 import triton
 import triton.language as tl
-import triton_viz
+import tilelens
 
 
-@triton_viz.trace("sanitizer")  # also supports "tracer" and "profiler"
+@tilelens.trace("sanitizer")  # also supports "tracer" and "profiler"
 @triton.jit
 def kernel(x_ptr, out_ptr, BLOCK: tl.constexpr):
     offsets = tl.arange(0, BLOCK)
@@ -124,21 +152,21 @@ def kernel(x_ptr, out_ptr, BLOCK: tl.constexpr):
 
 Use the CLI wrappers to run an existing Python script without editing it. These
 wrappers patch plain `@triton.jit` kernels, so use them with scripts that do not
-already apply `@triton_viz.trace(...)`.
+already apply `@tilelens.trace(...)`.
 
 ```sh
-triton-sanitizer examples/sanitizer/oob_cli.py
-triton-profiler examples/profiler/load_store_cli.py
-triton-visualizer trace.tvz
+tile-sanitizer examples/sanitizer/oob_cli.py
+tile-profiler examples/profiler/load_store_cli.py
+tile-visualizer trace.tvz
 ```
 
 For visualizer workflows, save a trace and launch the UI from Python:
 
 ```py
-import triton_viz
+import tilelens
 
-triton_viz.save("trace.tvz")
-triton_viz.launch()
+tilelens.save("trace.tvz")
+tilelens.launch()
 ```
 
 ## DSL Frontends
@@ -147,13 +175,13 @@ Triton is the default DSL frontend. NKI support is optional and selected with
 the `frontend` argument:
 
 ```py
-triton_viz.trace("tracer")  # Triton
-triton_viz.trace("tracer", frontend="nki")  # NKI
-triton_viz.trace("tracer", frontend="nki_beta2")  # NKI Beta 2
+tilelens.trace("tracer")  # Triton
+tilelens.trace("tracer", frontend="nki")  # NKI
+tilelens.trace("tracer", frontend="nki_beta2")  # NKI Beta 2
 ```
 
-The runtime integration code lives under `triton_viz/core/frontend/`. NKI
-simulation runtimes live under `triton_viz/core/simulation/`.
+The runtime integration code lives under `tilelens/core/frontend/`. NKI
+simulation runtimes live under `tilelens/core/simulation/`.
 
 ## Analysis Clients
 
@@ -166,24 +194,28 @@ Analyze kernels across visualization, profiling, and sanitization with a single 
 ### Save and load traces
 
 ```py
-import triton_viz
+import tilelens
 
-triton_viz.save("trace.tvz")
-triton_viz.load(
+tilelens.save("trace.tvz")
+tilelens.load(
     "trace.tvz"
 )  # automatically clears out existing records, use kwarg "append=True" to prevent this
-triton_viz.launch()
+tilelens.launch()
 ```
 
-CLI: `triton-visualizer trace.tvz`. The archive is a zip file containing `manifest.json` plus `tensors.npz`, and `triton_viz.load(...)` restores the normal trace state for existing consumers.
+CLI: `tile-visualizer trace.tvz`. The archive is a zip file containing `manifest.json` plus `tensors.npz`, and `tilelens.load(...)` restores the normal trace state for existing consumers.
+
 
 ### Environment variables
 
-Triton-Viz uses a small set of environment variables to configure runtime behavior. Unless noted, boolean flags are enabled only when set to `1`.
+TileLens uses a small set of environment variables to configure runtime behavior. Unless noted, boolean flags are enabled only when set to `1`.
 
-- `TRITON_VIZ_VERBOSE` (default: `0`): enable verbose logging and extra debug output.
-- `TRITON_VIZ_NUM_SMS` (default: `1`): number of concurrent SMs to emulate for the CPU interpreter (min 1).
-- `TRITON_VIZ_PORT` (default: `8000` with `share=True`, `5001` with `share=False`): port for the Flask server.
+The old names `TRITON_VIZ_VERBOSE`, `TRITON_VIZ_NUM_SMS`, and `TRITON_VIZ_PORT`
+still work. If both names are set, TileLens uses the `TILELENS_*` value.
+
+- `TILELENS_VERBOSE` (default: `0`): enable verbose logging and extra debug output.
+- `TILELENS_NUM_SMS` (default: `1`): number of concurrent SMs to emulate for the CPU interpreter (min 1).
+- `TILELENS_PORT` (default: `8000` with `share=True`, `5001` with `share=False`): port for the Flask server.
 - `ENABLE_SANITIZER` (default: `1`): enable the sanitizer pipeline that checks memory accesses.
 - `ENABLE_PROFILER` (default: `1`): enable the profiler pipeline that collects performance data.
 - `ENABLE_TIMING` (default: `0`): collect timing data during execution.
@@ -199,7 +231,7 @@ If you're interested in fun puzzles to work with in Triton, do check out: [Trito
 
 ## License
 
-Triton-Viz is licensed under the MIT License. See the [LICENSE](LICENSE) for details.
+TileLens is licensed under the MIT License. See the [LICENSE](LICENSE) for details.
 
 ## Publication
 If you find this repo useful for your research, please cite our paper:

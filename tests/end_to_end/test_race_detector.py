@@ -4,11 +4,11 @@ import torch
 import triton
 import triton.language as tl
 
-import triton_viz
-from triton_viz.clients.race_detector.race_detector import SymbolicRaceDetector
-from triton_viz.clients.race_detector.data import AccessEventRecord
-from triton_viz.core.config import config as cfg
-from triton_viz.core.data import Load, Store
+import tilelens
+from tilelens.clients.race_detector.race_detector import SymbolicRaceDetector
+from tilelens.clients.race_detector.data import AccessEventRecord
+from tilelens.core.config import config as cfg
+from tilelens.core.data import Load, Store
 
 
 @pytest.fixture
@@ -59,7 +59,7 @@ def _dispatch_kernel(x_ptr, BLOCK: tl.constexpr):
 
 def test_basic_capture(_isolate_race_detector_cfg):
     detector = SymbolicRaceDetector()
-    traced = triton_viz.trace(client=detector)(_basic_kernel)
+    traced = tilelens.trace(client=detector)(_basic_kernel)
 
     x = torch.zeros(16, dtype=torch.float32)
     traced[(1,)](x, BLOCK=16)
@@ -78,7 +78,7 @@ def test_basic_capture(_isolate_race_detector_cfg):
 
 def test_loop_load_and_store_same_addr_not_merged(_isolate_race_detector_cfg):
     detector = SymbolicRaceDetector()
-    traced = triton_viz.trace(client=detector)(_load_store_loop_kernel)
+    traced = tilelens.trace(client=detector)(_load_store_loop_kernel)
 
     x = torch.zeros(16, dtype=torch.float32)
     traced[(1,)](x, BLOCK=16)
@@ -92,7 +92,7 @@ def test_loop_load_and_store_same_addr_not_merged(_isolate_race_detector_cfg):
 
 def test_loop_repeated_access_deduped(_isolate_race_detector_cfg):
     detector = SymbolicRaceDetector()
-    traced = triton_viz.trace(client=detector)(_loop_dedup_kernel)
+    traced = tilelens.trace(client=detector)(_loop_dedup_kernel)
 
     x = torch.zeros(16, dtype=torch.float32)
     traced[(1,)](x, BLOCK=16)
@@ -105,7 +105,7 @@ def test_loop_repeated_access_deduped(_isolate_race_detector_cfg):
 
 def test_loop_event_premises_include_iterator(_isolate_race_detector_cfg):
     detector = SymbolicRaceDetector()
-    traced = triton_viz.trace(client=detector)(_loop_premises_kernel)
+    traced = tilelens.trace(client=detector)(_loop_premises_kernel)
 
     x = torch.zeros(16, dtype=torch.float32)
     traced[(1,)](x, BLOCK=16)
@@ -120,7 +120,7 @@ def test_loop_event_premises_include_iterator(_isolate_race_detector_cfg):
 
 
 def test_string_dispatch_and_manager_lookup(_isolate_race_detector_cfg):
-    traced = triton_viz.trace("race_detector")(_dispatch_kernel)
+    traced = tilelens.trace("race_detector")(_dispatch_kernel)
 
     x = torch.zeros(8, dtype=torch.float32)
     traced[(1,)](x, BLOCK=8)
@@ -137,9 +137,9 @@ def test_flag_off_does_not_swallow_explicit_instance():
     try:
         cfg.enable_race_detector = False
         detector = SymbolicRaceDetector()
-        traced = triton_viz.trace(client=detector)(_dispatch_kernel)
+        traced = tilelens.trace(client=detector)(_dispatch_kernel)
 
-        from triton_viz.core.trace import TritonTrace
+        from tilelens.core.trace import TritonTrace
 
         assert isinstance(
             traced, TritonTrace
@@ -160,7 +160,7 @@ def test_repeat_launches_are_consistent(_isolate_race_detector_cfg):
     non-deterministic representative. This regression asserts every launch
     behaves the same."""
     detector = SymbolicRaceDetector()
-    traced = triton_viz.trace(client=detector)(_dispatch_kernel)
+    traced = tilelens.trace(client=detector)(_dispatch_kernel)
 
     x1 = torch.zeros(8, dtype=torch.float32)
     traced[(2,)](x1, BLOCK=8)

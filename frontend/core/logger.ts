@@ -1,4 +1,4 @@
-const LOG_PREFIX = '[triton-viz]';
+const LOG_PREFIX = '[tilelens]';
 
 export function logAction(action: string, details: Record<string, unknown> = {}): void {
     console.info(LOG_PREFIX, action, details);

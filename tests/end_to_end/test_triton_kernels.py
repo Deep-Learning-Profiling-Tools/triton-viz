@@ -45,7 +45,7 @@ def assert_outputs(pytestconfig):
 
 @pytest.fixture
 def sanitizer_only(assert_outputs):
-    config_mod = pytest.importorskip("triton_viz.core.config")
+    config_mod = pytest.importorskip("tilelens.core.config")
     old_virtual_memory = config_mod.config.virtual_memory
     enabled = not assert_outputs
     config_mod.config.virtual_memory = enabled
@@ -56,14 +56,14 @@ def sanitizer_only(assert_outputs):
 
 
 def _new_sanitizer():
-    pytest.importorskip("triton_viz")
-    sanitizer_mod = pytest.importorskip("triton_viz.clients.sanitizer.sanitizer")
+    pytest.importorskip("tilelens")
+    sanitizer_mod = pytest.importorskip("tilelens.clients.sanitizer.sanitizer")
     return sanitizer_mod.SymbolicSanitizer(abort_on_error=True)
 
 
 def _trace_kernel(monkeypatch, module, name, sanitizer):
-    triton_viz = pytest.importorskip("triton_viz")
-    traced = triton_viz.trace(client=sanitizer)(getattr(module, name))
+    tilelens = pytest.importorskip("tilelens")
+    traced = tilelens.trace(client=sanitizer)(getattr(module, name))
     monkeypatch.setattr(module, name, traced)
 
 
@@ -81,7 +81,7 @@ def _assert_equal(ref, tri):
     ("n_tokens", "n_cols", "k", "keep_prob"),
     COMPACTION_CASES,
 )
-def test_triton_viz_sanitizer_masked_compaction(
+def test_tilelens_sanitizer_masked_compaction(
     monkeypatch, device, sanitizer_only, assert_outputs, n_tokens, n_cols, k, keep_prob
 ):
     compaction_mod = pytest.importorskip("triton_kernels.compaction")
@@ -121,7 +121,7 @@ def test_triton_viz_sanitizer_masked_compaction(
     strict=True,
 )
 @pytest.mark.parametrize("n_slices", RAGGED_METADATA_N_SLICES)
-def test_triton_viz_sanitizer_make_ragged_tensor_metadata(
+def test_tilelens_sanitizer_make_ragged_tensor_metadata(
     monkeypatch, device, sanitizer_only, assert_outputs, n_slices
 ):
     ragged_mod = pytest.importorskip("triton_kernels.tensor_details.ragged_tensor")
@@ -155,7 +155,7 @@ def test_triton_viz_sanitizer_make_ragged_tensor_metadata(
     strict=True,
 )
 @pytest.mark.parametrize("n_slices", REMAP_RAGGED_METADATA_N_SLICES)
-def test_triton_viz_sanitizer_remap_ragged_tensor_metadata(
+def test_tilelens_sanitizer_remap_ragged_tensor_metadata(
     monkeypatch, device, sanitizer_only, assert_outputs, n_slices
 ):
     ragged_mod = pytest.importorskip("triton_kernels.tensor_details.ragged_tensor")
@@ -199,7 +199,7 @@ def test_triton_viz_sanitizer_remap_ragged_tensor_metadata(
     ("n_rows", "n_cols", "k", "apply_softmax", "dtype"),
     TOPK_FORWARD_CASES,
 )
-def test_triton_viz_sanitizer_topk_forward(
+def test_tilelens_sanitizer_topk_forward(
     monkeypatch,
     device,
     sanitizer_only,
@@ -234,7 +234,7 @@ def test_triton_viz_sanitizer_topk_forward(
     ("n_rows", "n_cols", "k", "apply_softmax", "dtype"),
     TOPK_BACKWARD_CASES,
 )
-def test_triton_viz_sanitizer_topk_backward(
+def test_tilelens_sanitizer_topk_backward(
     monkeypatch,
     device,
     sanitizer_only,
@@ -292,7 +292,7 @@ def test_triton_viz_sanitizer_topk_backward(
 
 
 @pytest.mark.parametrize(("m", "n", "limit"), SWIGLU_CASES)
-def test_triton_viz_sanitizer_swiglu(
+def test_tilelens_sanitizer_swiglu(
     monkeypatch, device, sanitizer_only, assert_outputs, m, n, limit
 ):
     swiglu_mod = pytest.importorskip("triton_kernels.swiglu")
@@ -313,7 +313,7 @@ def test_triton_viz_sanitizer_swiglu(
 
 
 @triton.jit
-def _triton_viz_mxfp4_tile_upcast_kernel(
+def _tilelens_mxfp4_tile_upcast_kernel(
     out,
     tensor,
     scale,
@@ -345,7 +345,7 @@ def _triton_viz_mxfp4_tile_upcast_kernel(
 
 
 @pytest.mark.parametrize("dst_dtype", MXFP4_TILE_UPCAST_CASES)
-def test_triton_viz_sanitizer_mxfp4_tile_upcast(
+def test_tilelens_sanitizer_mxfp4_tile_upcast(
     device, sanitizer_only, assert_outputs, dst_dtype
 ):
     global _mxfp4_tile_upcast
@@ -372,7 +372,7 @@ def test_triton_viz_sanitizer_mxfp4_tile_upcast(
         torch.float32: tl.float32,
     }[torch_dtype]
 
-    kernel = _triton_viz_mxfp4_tile_upcast_kernel
+    kernel = _tilelens_mxfp4_tile_upcast_kernel
     if assert_outputs:
         tri_out = torch.empty_like(out)
         kernel[(1,)](
@@ -391,7 +391,7 @@ def test_triton_viz_sanitizer_mxfp4_tile_upcast(
         _assert_close(ref_out, tri_out)
 
     sanitizer = _new_sanitizer()
-    traced = pytest.importorskip("triton_viz").trace(client=sanitizer)(kernel)
+    traced = pytest.importorskip("tilelens").trace(client=sanitizer)(kernel)
     traced[(1,)](
         torch.empty_like(out),
         tensor,

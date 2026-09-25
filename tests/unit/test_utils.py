@@ -6,20 +6,20 @@ import pytest
 import torch
 from z3 import Int
 
-from triton_viz.clients.sanitizer.sanitizer import SymbolicSanitizer
-from triton_viz.clients.symbolic_engine import LoopContext
-from triton_viz.core.patch import LoopSite, loop_file_token
-from triton_viz.clients.tracer.tracer import Tracer
-from triton_viz.clients.utils import (
+from tilelens.clients.sanitizer.sanitizer import SymbolicSanitizer
+from tilelens.clients.symbolic_engine import LoopContext
+from tilelens.core.patch import LoopSite, loop_file_token
+from tilelens.clients.tracer.tracer import Tracer
+from tilelens.clients.utils import (
     check_inner_stride_equal_to_one,
     check_storage_contiguous,
     get_physical_addr_from_tensor_slice,
     get_physical_addr_per_element,
 )
-from triton_viz.core.data import Load
-from triton_viz.core.trace import trace_source
-from triton_viz.utils import traceback_utils
-from triton_viz.utils.traceback_utils import (
+from tilelens.core.data import Load
+from tilelens.core.trace import trace_source
+from tilelens.utils import traceback_utils
+from tilelens.utils.traceback_utils import (
     TracebackInfo,
     extract_user_frames,
     location_to_traceback_info,

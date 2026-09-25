@@ -3,9 +3,9 @@ import os
 import neuronxcc.nki.language as nl
 import torch
 from neuronxcc import nki
-import triton_viz
-from triton_viz.clients import Tracer
-from triton_viz.core.trace import launches
+import tilelens
+from tilelens.clients import Tracer
+from tilelens.core.trace import launches
 import numpy as np
 
 os.environ["NEURON_FRAMEWORK_DEBUG"] = "1"
@@ -209,11 +209,11 @@ def torch_rope_kernel(q, k, cos, sin):
 
 
 def _run_demo():
-    triton_viz_enabled = True
+    tilelens_enabled = True
     h_dim, s_dim, d_dim = 2, 4, 8
     kernel_grid = (h_dim,)
 
-    if triton_viz_enabled:
+    if tilelens_enabled:
         q = torch.randn(h_dim, s_dim, d_dim)
         k = torch.randn(h_dim, s_dim, d_dim)
         position_ids = torch.arange(s_dim)
@@ -231,9 +231,7 @@ def _run_demo():
         )
 
         print("Executing rotary embedding kernel with NKI interpreter...")
-        traced_kernel = triton_viz.trace(client=Tracer(), frontend="nki")(
-            nki_rope_kernel
-        )
+        traced_kernel = tilelens.trace(client=Tracer(), frontend="nki")(nki_rope_kernel)
         kernel_instance = traced_kernel[kernel_grid]
         kernel_instance(*kernel_args)
 
@@ -243,7 +241,7 @@ def _run_demo():
             print(f"Number of records: {len(launch.records)}")
 
         try:
-            triton_viz.launch(share=False)
+            tilelens.launch(share=False)
         except Exception as e:
             print(f"Visualization error: {e}")
     else:

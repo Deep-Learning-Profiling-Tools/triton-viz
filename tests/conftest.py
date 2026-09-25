@@ -2,7 +2,7 @@ import pytest
 
 
 def pytest_addoption(parser):
-    group = parser.getgroup("triton-viz")
+    group = parser.getgroup("tilelens")
     group.addoption(
         "--triton-kernels-device",
         choices=("auto", "cuda", "cpu"),

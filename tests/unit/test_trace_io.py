@@ -1,3 +1,5 @@
+import json
+import zipfile
 from pathlib import Path
 from unittest.mock import patch
 
@@ -5,19 +7,40 @@ import numpy as np
 import pytest
 import torch
 
-import triton_viz
-from triton_viz.clients.sanitizer.data import OutOfBoundsRecordZ3
-from triton_viz.clients.sanitizer.report import print_oob_record
-from triton_viz.core.data import Grid, Launch, Load
-from triton_viz.core.trace import launches
-from triton_viz.utils.traceback_utils import TracebackInfo
-from triton_viz.visualizer.draw import collect_grid
+import tilelens
+from tilelens.clients.sanitizer.data import OutOfBoundsRecordZ3
+from tilelens.clients.sanitizer.report import print_oob_record
+from tilelens.core.data import Grid, Launch, Load
+from tilelens.core.trace import launches
+from tilelens.utils.traceback_utils import TracebackInfo
+from tilelens.visualizer.draw import collect_grid
 
 
-def _roundtrip(path: Path, launch: Launch) -> None:
+def _legacy_class_names(value):
+    if isinstance(value, list):
+        return [_legacy_class_names(item) for item in value]
+    if isinstance(value, dict):
+        result = {key: _legacy_class_names(item) for key, item in value.items()}
+        if result.get("kind") == "dataclass":
+            result["type"] = result["type"].replace("tilelens.", "triton_viz.", 1)
+        return result
+    return value
+
+
+def _roundtrip(path: Path, launch: Launch, legacy: bool) -> None:
     launches[:] = [launch]
-    triton_viz.save(path)
-    triton_viz.load(path)
+    tilelens.save(path)
+    if legacy:
+        with zipfile.ZipFile(path) as archive:
+            manifest = json.loads(archive.read("manifest.json"))
+            assert manifest["format"] == "tilelens_trace"
+            manifest["format"] = "triton_viz_trace"
+            manifest["launches"] = _legacy_class_names(manifest["launches"])
+            tensors = archive.read("tensors.npz")
+        with zipfile.ZipFile(path, "w") as archive:
+            archive.writestr("manifest.json", json.dumps(manifest))
+            archive.writestr("tensors.npz", tensors)
+    tilelens.load(path)
 
 
 @pytest.mark.parametrize(
@@ -26,7 +49,8 @@ def _roundtrip(path: Path, launch: Launch) -> None:
         torch.float32,
     ],
 )  # TODO: support bf16/other dtypes with ml_dtypes
-def test_trace_save_load_roundtrip_supports_visualizer(tmp_path: Path, dtype):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_trace_save_load_roundtrip_supports_visualizer(tmp_path: Path, dtype, legacy):
     tensor = torch.arange(4, dtype=dtype)
     ptr = tensor.data_ptr()
     _roundtrip(
@@ -43,6 +67,7 @@ def test_trace_save_load_roundtrip_supports_visualizer(tmp_path: Path, dtype):
                 ),
             ],
         ),
+        legacy,
     )
 
     records, tensor_table, failures = collect_grid()
@@ -57,7 +82,10 @@ def test_trace_save_load_roundtrip_supports_visualizer(tmp_path: Path, dtype):
     assert saved_tensor.data.float().tolist() == [0.0, 1.0, 2.0, 3.0]
 
 
-def test_trace_save_load_roundtrip_supports_sanitizer_report(tmp_path: Path, capsys):
+@pytest.mark.parametrize("legacy", [False, True])
+def test_trace_save_load_roundtrip_supports_sanitizer_report(
+    tmp_path: Path, capsys, legacy
+):
     tensor = torch.arange(4, dtype=torch.float32)
     ptr = tensor.data_ptr()
     _roundtrip(
@@ -80,6 +108,7 @@ def test_trace_save_load_roundtrip_supports_sanitizer_report(tmp_path: Path, cap
                 )
             ]
         ),
+        legacy,
     )
 
     print_oob_record(launches[-1].records[0])
@@ -90,12 +119,10 @@ def test_trace_save_load_roundtrip_supports_sanitizer_report(tmp_path: Path, cap
 
 
 def test_visualizer_cli_forwards_trace_file_and_flags():
-    from triton_viz.visualizer_cli import main
+    from tilelens.visualizer_cli import main
 
     trace_file = Path("trace.tvz")
-    with patch("triton_viz.load") as mock_load, patch(
-        "triton_viz.launch"
-    ) as mock_launch:
+    with patch("tilelens.load") as mock_load, patch("tilelens.launch") as mock_launch:
         main([str(trace_file), "--port", "9000", "--no-block"])
 
     mock_load.assert_called_once_with(trace_file)

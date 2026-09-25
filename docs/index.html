@@ -3,7 +3,7 @@
 <head>
     <meta charset="UTF-8">
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
-    <title>Triton-Viz | Visualization Toolkit for Triton GPU Programming</title>
+    <title>TileLens | Visualization Toolkit for Triton GPU Programming</title>
     <link rel="icon" href="logo.png">
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
@@ -559,8 +559,8 @@
     <nav>
         <div class="nav-container">
             <a href="#" class="logo">
-                <img src="logo.png" alt="Triton-Viz">
-                <span>Triton-Viz</span>
+                <img src="logo.png" alt="TileLens">
+                <span>TileLens</span>
             </a>
         </div>
     </nav>
@@ -578,8 +578,8 @@
                 <div class="install-step">
                     <div class="install-label">Install</div>
                     <div class="install-command">
-                        <code style="white-space: pre-wrap;">pip install triton-viz</code>
-                        <button class="copy-btn" onclick="navigator.clipboard.writeText('pip install triton-viz')" title="Copy to clipboard">
+                        <code style="white-space: pre-wrap;">pip install tilelens</code>
+                        <button class="copy-btn" onclick="navigator.clipboard.writeText('pip install tilelens')" title="Copy to clipboard">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                         </button>
                     </div>
@@ -587,8 +587,8 @@
                 <div class="install-step">
                     <div class="install-label">Install (NKI support)</div>
                     <div class="install-command">
-                        <code style="white-space: pre-wrap;">pip install triton-viz[nki] --extra-index-url https://pip.repos.neuron.amazonaws.com</code>
-                        <button class="copy-btn" onclick="navigator.clipboard.writeText('pip install triton-viz[nki] --extra-index-url https://pip.repos.neuron.amazonaws.com')" title="Copy to clipboard">
+                        <code style="white-space: pre-wrap;">pip install "tilelens[nki]" --extra-index-url https://pip.repos.neuron.amazonaws.com</code>
+                        <button class="copy-btn" onclick="navigator.clipboard.writeText('pip install &quot;tilelens[nki]&quot; --extra-index-url https://pip.repos.neuron.amazonaws.com')" title="Copy to clipboard">
                             <svg width="18" height="18" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="13" height="13" rx="2" ry="2"></rect><path d="M5 15H4a2 2 0 0 1-2-2V4a2 2 0 0 1 2-2h9a2 2 0 0 1 2 2v1"></path></svg>
                         </button>
                     </div>
@@ -596,7 +596,7 @@
             </div>
             <p style="font-size: 0.9rem; color: var(--text-muted); text-align: center; margin-top: 1rem;">
                 Note: A browser with <strong>WebGL/OpenGL enabled</strong> is required (standard in modern browsers). <br>
-                See <a href="https://github.com/Deep-Learning-Profiling-Tools/triton-viz#readme" target="_blank" style="color: var(--accent); text-decoration: underline;">README.md</a> for development installs, web UI builds, DSL frontend selection, and full documentation.
+                See <a href="https://github.com/Deep-Learning-Profiling-Tools/tilelens#readme" target="_blank" style="color: var(--accent); text-decoration: underline;">README.md</a> for development installs, web UI builds, DSL frontend selection, and full documentation.
             </p>
         </div>
     </section>
@@ -637,10 +637,10 @@
                                         <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
-import triton_viz
+import tilelens
 
 
-@triton_viz.trace("tracer")
+@tilelens.trace("tracer")
 @triton.jit
 def add_3d_slices_kernel(
     input_ptr1,
@@ -689,7 +689,7 @@ if __name__ == "__main__":
         BLOCK_SIZE_Y=BLOCK_SIZE_Y,
         BLOCK_SIZE_Z=BLOCK_SIZE_Z,
     )
-    triton_viz.launch(share=False, port=5001)
+    tilelens.launch(share=False, port=5001)
 </code></pre>
                                     </div>
                                 </div>
@@ -713,14 +713,14 @@ if __name__ == "__main__":
                                         <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
-import triton_viz
+import tilelens
 
 
 BLOCK = 1024
 SHAPE = (2, 3, 4, 3, 4, 2, 4, 2, 3)
 
 
-@triton_viz.trace("tracer")
+@tilelens.trace("tracer")
 @triton.jit
 def copy_9d_kernel(x_ptr, y_ptr, n_elements, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
@@ -736,7 +736,7 @@ if __name__ == "__main__":
     n_elements = x.numel()
     grid = (triton.cdiv(n_elements, BLOCK),)
     copy_9d_kernel[grid](x, y, n_elements, BLOCK=BLOCK)
-    triton_viz.launch(share=False, port=5001)
+    tilelens.launch(share=False, port=5001)
 </code></pre>
                                     </div>
                                 </div>
@@ -760,10 +760,10 @@ if __name__ == "__main__":
                                         <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
-import triton_viz
+import tilelens
 
 
-@triton_viz.trace("tracer")
+@tilelens.trace("tracer")
 @triton.jit
 def add_3d_slices_kernel(
     input_ptr1,
@@ -812,7 +812,7 @@ if __name__ == "__main__":
         BLOCK_SIZE_Y=BLOCK_SIZE_Y,
         BLOCK_SIZE_Z=BLOCK_SIZE_Z,
     )
-    triton_viz.launch(share=False, port=5001)
+    tilelens.launch(share=False, port=5001)
 </code></pre>
                                     </div>
                                 </div>
@@ -836,10 +836,10 @@ if __name__ == "__main__":
                                         <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
-import triton_viz
+import tilelens
 
 
-@triton_viz.trace("tracer")
+@tilelens.trace("tracer")
 @triton.jit
 def matmul_kernel(
     a_ptr,
@@ -888,7 +888,7 @@ if __name__ == "__main__":
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
     )
-    triton_viz.launch(share=False, port=5001)
+    tilelens.launch(share=False, port=5001)
 </code></pre>
                                     </div>
                                 </div>
@@ -912,10 +912,10 @@ if __name__ == "__main__":
                                         <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
-import triton_viz
+import tilelens
 
 
-@triton_viz.trace("tracer")
+@tilelens.trace("tracer")
 @triton.jit
 def matmul_kernel(
     a_ptr,
@@ -964,7 +964,7 @@ if __name__ == "__main__":
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
     )
-    triton_viz.launch(share=False, port=5001)
+    tilelens.launch(share=False, port=5001)
 </code></pre>
                                     </div>
                                 </div>
@@ -988,10 +988,10 @@ if __name__ == "__main__":
                                         <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
-import triton_viz
+import tilelens
 
 
-@triton_viz.trace("tracer")
+@tilelens.trace("tracer")
 @triton.jit
 def matmul_kernel(
     a_ptr,
@@ -1040,7 +1040,7 @@ if __name__ == "__main__":
         BLOCK_N=BLOCK_N,
         BLOCK_K=BLOCK_K,
     )
-    triton_viz.launch(share=False, port=5001)
+    tilelens.launch(share=False, port=5001)
 </code></pre>
                                     </div>
                                 </div>
@@ -1066,10 +1066,10 @@ if __name__ == "__main__":
                                     <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
-import triton_viz
+import tilelens
 
 
-@triton_viz.trace("profiler")
+@tilelens.trace("profiler")
 @triton.jit
 def simple_kernel(
     x_ptr,
@@ -1164,10 +1164,10 @@ Consider enabling Buffer Load optimization.
                                                                             <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
-import triton_viz
+import tilelens
 
 
-@triton_viz.trace("sanitizer")
+@tilelens.trace("sanitizer")
 @triton.jit
 def gemm_kernel(
     A, B, C, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr, TILE_SIZE: tl.constexpr
@@ -1225,10 +1225,10 @@ test_gemm()
                                                                             <pre><code class="language-python">import torch
 import triton
 import triton.language as tl
-import triton_viz
+import tilelens
 
 
-@triton_viz.trace("sanitizer")
+@tilelens.trace("sanitizer")
 @triton.jit
 def gemm_kernel(
     A, B, C, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr, TILE_SIZE: tl.constexpr
@@ -1274,7 +1274,7 @@ test_gemm()
                                                                             <div class="term-header">TERMINAL OUTPUT</div>
                                                                             <pre class="term-body" style="font-size: 0.8rem;"><span class="term-red">🚨 ILLEGAL MEMORY ACCESS DETECTED 🚨</span>
 ━━━ Code Context ━━━
-File: triton-viz/examples/sanitizer/gemm_oob.py
+File: tilelens/examples/sanitizer/gemm_oob.py
 Function: gemm_kernel
 Line 25:
   22 │     for k_block in range(K // TILE_SIZE):
@@ -1385,27 +1385,27 @@ End of IMA Diagnostic Report</pre>
     </script>
     <section class="sponsors">
         <h3>Sponsored by</h3>
-        <p>Special thanks to <a href="https://www.amd.com/" target="_blank">AMD</a> for supporting Triton-Viz.</p>
+        <p>Special thanks to <a href="https://www.amd.com/" target="_blank">AMD</a> for supporting TileLens.</p>
     </section>
     <!-- CTA Section -->
     <section class="cta">
         <h2>Ready to visualize your kernels?</h2>
-        <p>Get started with Triton-Viz in minutes. No GPU required for development.</p>
+        <p>Get started with TileLens in minutes. No GPU required for development.</p>
         <div class="cta-buttons">
-            <a href="https://github.com/Deep-Learning-Profiling-Tools/triton-viz" class="btn btn-primary btn-large" target="_blank">View on GitHub</a>
-            <a href="https://github.com/Deep-Learning-Profiling-Tools/triton-viz/tree/main/examples" class="btn btn-outline btn-large" target="_blank">Browse Examples</a>
+            <a href="https://github.com/Deep-Learning-Profiling-Tools/tilelens" class="btn btn-primary btn-large" target="_blank">View on GitHub</a>
+            <a href="https://github.com/Deep-Learning-Profiling-Tools/tilelens/tree/main/examples" class="btn btn-outline btn-large" target="_blank">Browse Examples</a>
         </div>
     </section>
     <!-- Footer -->
     <footer>
         <div class="footer-content">
             <div class="footer-links">
-                <a href="https://github.com/Deep-Learning-Profiling-Tools/triton-viz" target="_blank">GitHub</a>
-                <a href="https://github.com/Deep-Learning-Profiling-Tools/triton-viz/blob/main/LICENSE" target="_blank">MIT License</a>
-                <a href="https://github.com/Deep-Learning-Profiling-Tools/triton-viz/issues" target="_blank">Issues</a>
+                <a href="https://github.com/Deep-Learning-Profiling-Tools/tilelens" target="_blank">GitHub</a>
+                <a href="https://github.com/Deep-Learning-Profiling-Tools/tilelens/blob/main/LICENSE" target="_blank">MIT License</a>
+                <a href="https://github.com/Deep-Learning-Profiling-Tools/tilelens/issues" target="_blank">Issues</a>
             </div>
             <div class="footer-copy">
-                &copy; 2025 Triton-Viz. Built for the deep learning community.
+                &copy; 2025 TileLens. Built for the deep learning community.
             </div>
         </div>
     </footer>
@@ -1456,12 +1456,12 @@ End of IMA Diagnostic Report</pre>
         }
         return highlighted;
     }
-    function highlightTritonVizLines() {
+    function highlightTileLensLines() {
         const patterns = [
-            'import triton_viz',
-            'from triton_viz',
-            '@triton_viz.trace',
-            'triton_viz.launch',
+            'import tilelens',
+            'from tilelens',
+            '@tilelens.trace',
+            'tilelens.launch',
         ];
         document.querySelectorAll('pre code.language-python').forEach(code => {
             const lines = code.textContent.split('\n');
@@ -1478,7 +1478,7 @@ End of IMA Diagnostic Report</pre>
             code.innerHTML = updated.join('\n');
         });
     }
-    highlightTritonVizLines();
+    highlightTileLensLines();
 </script>
 </body>
 </html>

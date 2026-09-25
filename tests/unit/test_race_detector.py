@@ -1,13 +1,13 @@
 import triton
 import triton.language as tl
 
-import triton_viz
-from triton_viz.clients import RaceDetector
-from triton_viz.clients.race_detector.race_detector import (
+import tilelens
+from tilelens.clients import RaceDetector
+from tilelens.clients.race_detector.race_detector import (
     SymbolicRaceDetector,
     NullRaceDetector,
 )
-from triton_viz.core.config import config as cfg
+from tilelens.core.config import config as cfg
 
 
 # ======== Factory Test ========
@@ -41,10 +41,10 @@ def test_flag_off_returns_raw_kernel():
     saved = cfg.enable_race_detector
     try:
         cfg.enable_race_detector = False
-        traced = triton_viz.trace("race_detector")(_dispatch_kernel)
+        traced = tilelens.trace("race_detector")(_dispatch_kernel)
 
         # Should be the raw JIT kernel, not a TritonTrace wrapper.
-        from triton_viz.core.trace import TritonTrace
+        from tilelens.core.trace import TritonTrace
 
         assert not isinstance(traced, TritonTrace)
         assert traced is _dispatch_kernel
@@ -68,9 +68,9 @@ def test_flag_off_returns_raw_kernel_for_factory_instance():
         cfg.enable_race_detector = False
         # The factory call happens after the flag flip, so __new__ dispatches
         # to NullRaceDetector.
-        traced = triton_viz.trace(client=RaceDetector())(_dispatch_kernel)
+        traced = tilelens.trace(client=RaceDetector())(_dispatch_kernel)
 
-        from triton_viz.core.trace import TritonTrace
+        from tilelens.core.trace import TritonTrace
 
         assert not isinstance(traced, TritonTrace)
         assert traced is _dispatch_kernel

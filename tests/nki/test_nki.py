@@ -4,10 +4,10 @@ Test script to verify NDArray slicing functionality after fixes
 """
 import numpy as np
 import pytest
-from triton_viz.core.frontend.base import _LangPatchScope
+from tilelens.core.frontend.base import _LangPatchScope
 
 try:
-    from triton_viz.core.simulation.nki import (
+    from tilelens.core.simulation.nki import (
         Builder,
         NDArray,
         nki_patch_lang,
@@ -16,7 +16,7 @@ try:
     import neuronxcc.nki.language as nl
 except ModuleNotFoundError:
     pytest.skip(
-        "NeuronX dependencies are missing. Install triton-viz[nki] to run these tests.",
+        "NeuronX dependencies are missing. Install tilelens[nki] to run these tests.",
         allow_module_level=True,
     )
 
@@ -101,7 +101,7 @@ def test_slicing():
         np.arange(5)[None, :, None],
         np.arange(2, 4)[None, None, :],
         2,
-    )  # this is what the above slice would be represented as after triton-viz tracing
+    )  # this is what the above slice would be represented as after tilelens tracing
     slice_advanced = nd_array[rewritten_slice]
     assert np.allclose(slice_advanced.data, data[rewritten_slice])
     assert np.allclose(slice_advanced.data, data[0, :3, :, 2:4, 2])

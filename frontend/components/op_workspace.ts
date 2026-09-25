@@ -79,7 +79,7 @@ export class OpWorkspace {
 
         this.ensureGlobalCodeToggle();
         try {
-            window.__tritonVizActiveBlock = this;
+            window.__tileLensActiveBlock = this;
         } catch (error) {}
     }
 
@@ -303,7 +303,7 @@ export class OpWorkspace {
         const canReuseViz = !!options.preserveViewState && isSameTab && !!this.contentArea.__vizGetState;
         const preserveCodePanel = options.refreshCodePanel === false;
         if (preserveCodePanel) {
-            try { window.__tritonVizPreserveCodePanel = true; } catch (error) {}
+            try { window.__tileLensPreserveCodePanel = true; } catch (error) {}
         }
         const isTensorOp = op.type === 'Dot' || op.type === 'Load' || op.type === 'Store' || op.type === 'Transfer';
         const reuseTensorView = canReuseViz && isTensorOp && this.lastOpType === op.type;
@@ -314,7 +314,7 @@ export class OpWorkspace {
             }
         } finally {
             if (preserveCodePanel) {
-                try { window.__tritonVizPreserveCodePanel = false; } catch (error) {}
+                try { window.__tileLensPreserveCodePanel = false; } catch (error) {}
             }
         }
         if (!reuseTensorView) {
@@ -366,7 +366,7 @@ export class OpWorkspace {
     }
 
     ensureGlobalCodeToggle(): void {
-        if (window.__tritonVizCodeToggle) return;
+        if (window.__tileLensCodeToggle) return;
         let panel: HTMLDivElement | null = null;
         let visible = false;
 
@@ -380,7 +380,7 @@ export class OpWorkspace {
         };
 
         const getActiveUuid = (): string | null => {
-            const activeBlock = window.__tritonVizActiveBlock;
+            const activeBlock = window.__tileLensActiveBlock;
             const candidate = window.current_op_uuid ?? activeBlock?.blockData?.[0]?.uuid;
             return candidate ?? null;
         };
@@ -461,16 +461,16 @@ export class OpWorkspace {
             return visible;
         };
 
-        window.__tritonVizCodeToggle = togglePanel;
-        window.__tritonVizCodeHide = hidePanel;
-        window.__tritonVizCodeVisible = () => visible;
+        window.__tileLensCodeToggle = togglePanel;
+        window.__tileLensCodeHide = hidePanel;
+        window.__tileLensCodeVisible = () => visible;
     }
 
     syncCodePanel(forceShow = false): void {
-        if (!window.__tritonVizCodeToggle) return;
-        const isVisible = window.__tritonVizCodeVisible ? window.__tritonVizCodeVisible() : false;
+        if (!window.__tileLensCodeToggle) return;
+        const isVisible = window.__tileLensCodeVisible ? window.__tileLensCodeVisible() : false;
         if (!forceShow && !isVisible) return;
-        const result = window.__tritonVizCodeToggle(true);
+        const result = window.__tileLensCodeToggle(true);
         const setOpControlState = window.setOpControlState;
         if (!setOpControlState) return;
         if (result && typeof (result as any).then === 'function') {

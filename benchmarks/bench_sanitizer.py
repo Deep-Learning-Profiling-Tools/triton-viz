@@ -35,8 +35,8 @@ import torch
 import triton
 import triton.language as tl
 
-import triton_viz
-from triton_viz.clients.sanitizer.sanitizer import (
+import tilelens
+from tilelens.clients.sanitizer.sanitizer import (
     SymbolicSanitizer,
     _fn_symbolic_cache_set,
 )
@@ -77,7 +77,7 @@ cross_entropy_sanitizer = SymbolicSanitizer(abort_on_error=False)
 # ---------------------------------------------------------------------------
 
 
-@triton_viz.trace(client=gemm_sanitizer)
+@tilelens.trace(client=gemm_sanitizer)
 @triton.jit
 def gemm_kernel(
     A,
@@ -107,7 +107,7 @@ def gemm_kernel(
     tl.store(C + C_off, accum)
 
 
-@triton_viz.trace(client=gemm_oob_sanitizer)
+@tilelens.trace(client=gemm_oob_sanitizer)
 @triton.jit
 def gemm_oob_kernel(
     A,
@@ -137,7 +137,7 @@ def gemm_oob_kernel(
     tl.store(C + C_off, accum)
 
 
-@triton_viz.trace(client=indirect_sanitizer)
+@tilelens.trace(client=indirect_sanitizer)
 @triton.jit
 def indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
@@ -147,7 +147,7 @@ def indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, BLOCK: tl.constexpr):
     tl.store(dst_ptr + offs, vals)
 
 
-@triton_viz.trace(client=nested_sanitizer)
+@tilelens.trace(client=nested_sanitizer)
 @triton.jit
 def nested_loop_kernel(out_ptr, OUTER: tl.constexpr, INNER: tl.constexpr):
     for i in range(0, OUTER):
@@ -156,7 +156,7 @@ def nested_loop_kernel(out_ptr, OUTER: tl.constexpr, INNER: tl.constexpr):
             tl.store(out_ptr + idx, idx)
 
 
-@triton_viz.trace(client=block_ptr_sanitizer)
+@tilelens.trace(client=block_ptr_sanitizer)
 @triton.jit
 def block_pointer_loop_advance_kernel(ptr, N: tl.constexpr, BLOCK: tl.constexpr):
     block_ptr = tl.make_block_ptr(
@@ -182,7 +182,7 @@ def silu(x):
     return x * tl.sigmoid(x)
 
 
-@triton_viz.trace(client=swiglu_fwd_sanitizer)
+@tilelens.trace(client=swiglu_fwd_sanitizer)
 @triton.jit
 def swiglu_forward_kernel(
     a_ptr, b_ptr, c_ptr, stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr
@@ -203,7 +203,7 @@ def swiglu_forward_kernel(
     tl.store(c_ptr + col_offsets, c_row, mask=mask)
 
 
-@triton_viz.trace(client=swiglu_bwd_sanitizer)
+@tilelens.trace(client=swiglu_bwd_sanitizer)
 @triton.jit
 def swiglu_backward_kernel(
     dc_ptr, a_ptr, b_ptr, stride, n_cols: tl.constexpr, BLOCK_SIZE: tl.constexpr
@@ -237,7 +237,7 @@ def swiglu_backward_kernel(
 # ---------------------------------------------------------------------------
 
 
-@triton_viz.trace(client=cross_entropy_sanitizer)
+@tilelens.trace(client=cross_entropy_sanitizer)
 @triton.jit
 def liger_cross_entropy_kernel(
     X_ptr,
@@ -329,7 +329,7 @@ def liger_cross_entropy_kernel(
     tl.store(X_ptr + y, X_y)
 
 
-@triton_viz.trace(client=jsd_sanitizer)
+@tilelens.trace(client=jsd_sanitizer)
 @triton.jit
 def jsd_kernel(
     X_ptr,  # input in logspace, X = log Q
@@ -382,7 +382,7 @@ def jsd_kernel(
         tl.store(dX_ptr + offsets, dX, mask=mask)
 
 
-@triton_viz.trace(client=element_mul_sanitizer)
+@tilelens.trace(client=element_mul_sanitizer)
 @triton.jit
 def element_mul_kernel(
     X_ptr,
@@ -408,7 +408,7 @@ def element_mul_kernel(
 # ---------------------------------------------------------------------------
 
 
-@triton_viz.trace(client=flaggems_sanitizer)
+@tilelens.trace(client=flaggems_sanitizer)
 @triton.jit
 def flaggems_ln_persistent_kernel(
     in_ptr,
@@ -449,7 +449,7 @@ def flaggems_ln_persistent_kernel(
     tl.store(out_ptr + pid * N + n_offsets, out, mask=mask)
 
 
-@triton_viz.trace(client=flaggems_sanitizer)
+@tilelens.trace(client=flaggems_sanitizer)
 @triton.jit
 def flaggems_ln_multiline_kernel(
     in_ptr,
@@ -497,7 +497,7 @@ def flaggems_ln_multiline_kernel(
     tl.store(out_ptr + m_offsets[:, None] * N + n_offsets, out, mask=mask)
 
 
-@triton_viz.trace(client=flaggems_sanitizer)
+@tilelens.trace(client=flaggems_sanitizer)
 @triton.jit
 def flaggems_ln_loop_kernel(
     in_ptr,
@@ -580,7 +580,7 @@ def flaggems_ln_loop_kernel(
         tl.store(out_ptr + pid * N + n_offsets, out)
 
 
-@triton_viz.trace(client=flaggems_sanitizer)
+@tilelens.trace(client=flaggems_sanitizer)
 @triton.jit
 def flaggems_ln_backward_kernel(
     dY,
@@ -647,7 +647,7 @@ def flaggems_ln_backward_kernel(
         tl.store(dX + cols, dx, mask=mask)
 
 
-@triton_viz.trace(client=flaggems_sanitizer)
+@tilelens.trace(client=flaggems_sanitizer)
 @triton.jit
 def flaggems_ln_wb_backward_kernel(
     dY,
@@ -1409,33 +1409,33 @@ TRITON_KERNEL_BENCHMARKS = [
     (
         "triton_kernels._masked_compaction",
         "masked-compaction",
-        "test_triton_viz_sanitizer_masked_compaction",
+        "test_tilelens_sanitizer_masked_compaction",
     ),
     (
         "triton_kernels._ragged_tensor_metadata_memset_compute",
         "ragged-metadata-make",
-        "test_triton_viz_sanitizer_make_ragged_tensor_metadata",
+        "test_tilelens_sanitizer_make_ragged_tensor_metadata",
     ),
     (
         "triton_kernels._remap_ragged_tensor_metadata",
         "ragged-metadata-remap",
-        "test_triton_viz_sanitizer_remap_ragged_tensor_metadata",
+        "test_tilelens_sanitizer_remap_ragged_tensor_metadata",
     ),
     (
         "triton_kernels._topk_forward",
         "topk-forward",
-        "test_triton_viz_sanitizer_topk_forward",
+        "test_tilelens_sanitizer_topk_forward",
     ),
     (
         "triton_kernels._topk_backward",
         "topk-backward",
-        "test_triton_viz_sanitizer_topk_backward",
+        "test_tilelens_sanitizer_topk_backward",
     ),
-    ("triton_kernels._swiglu", "swiglu", "test_triton_viz_sanitizer_swiglu"),
+    ("triton_kernels._swiglu", "swiglu", "test_tilelens_sanitizer_swiglu"),
     (
         "triton_kernels.upcast_mxfp4_tile",
         "mxfp4-tile-upcast",
-        "test_triton_viz_sanitizer_mxfp4_tile_upcast",
+        "test_tilelens_sanitizer_mxfp4_tile_upcast",
     ),
 ]
 
