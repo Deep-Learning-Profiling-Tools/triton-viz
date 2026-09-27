@@ -1,3 +1,6 @@
+import subprocess
+import sys
+
 import pytest
 from unittest.mock import MagicMock, patch
 
@@ -246,3 +249,10 @@ def test_apply_wrapper_rejects_non_cli_invocation():
         apply_sanitizer()
     with pytest.raises(RuntimeError, match="must be used as a CLI tool"):
         apply_profiler()
+
+
+def test_wrapper_imports_without_pytest():
+    """The CLIs import tilelens.wrapper; pytest is only a test extra."""
+    code = "import sys; sys.modules['pytest'] = None; import tilelens.wrapper"
+    proc = subprocess.run([sys.executable, "-c", code], capture_output=True, text=True)
+    assert proc.returncode == 0, proc.stderr

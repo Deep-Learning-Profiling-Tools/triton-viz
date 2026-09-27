@@ -2,7 +2,6 @@ import os
 import shutil
 import runpy
 import sys
-import pytest
 import triton
 import tilelens
 from triton.experimental import gluon as _gluon
@@ -132,6 +131,10 @@ def _apply_wrapper(wrapper_func, command_name, usage_msg):
         # Check if it's an executable command
         if shutil.which(cmd[0]):
             if cmd[0] == "pytest":
+                # pytest is only a test extra; import it just for this branch
+                # so the CLIs work in a plain `pip install tilelens`.
+                import pytest
+
                 sys.exit(pytest.main(cmd[1:]))
             elif cmd[0] == "python":
                 sys.argv = cmd[1:]
