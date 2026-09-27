@@ -1,7 +1,7 @@
 """Unit tests for the shared SymbolicClient substrate.
 
 These tests are client-agnostic — they exercise pieces of
-``triton_viz/clients/symbolic_engine.py`` (the ``_range_to_iterator_constraint``
+``tilelens/clients/symbolic_engine.py`` (the ``_range_to_iterator_constraint``
 Z3 helper, the ``SymbolicExpr`` tree and its subclasses, reduce-shape
 inference, block-pointer construction, load/store dtype derivation) that
 every symbolic client relies on. Sanitizer- and race-detector-specific
@@ -17,7 +17,7 @@ from typing import cast
 
 import numpy as np
 
-from triton_viz.clients.symbolic_engine import (
+from tilelens.clients.symbolic_engine import (
     SymbolicClient,
     SymbolicExpr,
     ConstSymbolicExpr,
@@ -27,9 +27,9 @@ from triton_viz.clients.symbolic_engine import (
     StoreSymbolicExpr,
     _range_to_iterator_constraint,
 )
-from triton_viz.core.data import Sort
-from triton_viz.core.patch import LoopSite, loop_file_token
-from triton_viz.core.symbolic_metadata import (
+from tilelens.core.data import Sort
+from tilelens.core.patch import LoopSite, loop_file_token
+from tilelens.core.symbolic_metadata import (
     FLOAT16,
     FLOAT32,
     INT1,
@@ -73,7 +73,7 @@ def guarded_import(name, globals=None, locals=None, fromlist=(), level=0):
         raise RuntimeError(f"blocked import: {name}")
     return original_import(name, globals, locals, fromlist, level)
 builtins.__import__ = guarded_import
-import triton_viz.clients.symbolic_engine
+import tilelens.clients.symbolic_engine
 """
     result = subprocess.run(
         [sys.executable, "-c", code],
@@ -591,7 +591,7 @@ def test_tensor_pointer_load_z3_eval():
 
 def test_resolve_block_ptr_through_advance_chain():
     """Create make_block_ptr -> advance -> advance, verify accumulated offsets."""
-    from triton_viz.clients.symbolic_engine import TensorPointerLoadSymbolicExpr
+    from tilelens.clients.symbolic_engine import TensorPointerLoadSymbolicExpr
 
     base = SymbolicExpr.create("const", 1000, pointer_type(FLOAT32))
     shape_list = [SymbolicExpr.create("const", 128, INT32)]

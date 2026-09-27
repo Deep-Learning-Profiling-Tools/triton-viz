@@ -7,40 +7,40 @@ import importlib
 import triton
 import triton.language as tl
 
-import triton_viz
-from triton_viz.clients.profiler.profiler import Profiler
-from triton_viz.core.config import config as cfg
+import tilelens
+from tilelens.clients.profiler.profiler import Profiler
+from tilelens.core.config import config as cfg
 import os
 
-# TODO: remove this fixture once we unpatch triton-viz properly
+# TODO: remove this fixture once we unpatch tilelens properly
 os.environ["TRITON_INTERPRET"] = "1"
-trace_state = importlib.import_module("triton_viz.core.trace")
+trace_state = importlib.import_module("tilelens.core.trace")
 
 
 @pytest.fixture
 def one_sm():
-    previous = triton_viz.config.num_sms
-    triton_viz.config.num_sms = 1
+    previous = tilelens.config.num_sms
+    tilelens.config.num_sms = 1
     yield
-    triton_viz.config.num_sms = previous
+    tilelens.config.num_sms = previous
 
 
 @pytest.fixture
 def two_sms():
-    previous = triton_viz.config.num_sms
-    triton_viz.config.num_sms = 2
+    previous = tilelens.config.num_sms
+    tilelens.config.num_sms = 2
     yield
-    triton_viz.config.num_sms = previous
+    tilelens.config.num_sms = previous
 
 
 @pytest.fixture(autouse=True)
 def _clear_traces():
-    triton_viz.core.clear()
+    tilelens.core.clear()
     yield
-    triton_viz.core.clear()
+    tilelens.core.clear()
 
 
-@triton_viz.trace("tracer")
+@tilelens.trace("tracer")
 @triton.jit
 def _producer_consumer(x, out):
     pid = tl.program_id(0)
@@ -69,7 +69,7 @@ def test_producer_consumer_hang(one_sm):
     thread.start()
 
     # note: don't use timeout=2 for this, it'll cause the next
-    # test to run before this thread unpatches triton-viz ->
+    # test to run before this thread unpatches tilelens ->
     # this thread will unpatch while the next test
     # needs patched ops, causing weird failures
     thread.join()
@@ -91,7 +91,7 @@ def test_producer_consumer_converges(two_sms):
     ), "producer_consumer should complete and PID 0 shouldn't spin to max limit (10K) when blocks run concurrently"
 
 
-@triton_viz.trace("tracer")
+@tilelens.trace("tracer")
 @triton.jit
 def _racing_threads(x, out):
     pid = tl.program_id(0)
@@ -126,7 +126,7 @@ def test_racing_threads_prefers_fast_block(two_sms):
     ), "PID 1 in racing_threads should win when blocks run concurrently"
 
 
-@triton_viz.trace("tracer")
+@tilelens.trace("tracer")
 @triton.jit
 def _write_pid(out):
     pid = tl.program_id(0)
@@ -142,7 +142,7 @@ def _profiler_load_store(x, out):
     tl.store(out + offset, vals)
 
 
-@triton_viz.trace("sanitizer")
+@tilelens.trace("sanitizer")
 @triton.jit
 def _sanitizer_two_blocks(x, out):
     pid = tl.program_id(0)
@@ -207,7 +207,7 @@ def _no_profiler_sampling():
 
 def _run_profiler_load_store():
     profiler = Profiler()
-    traced = triton_viz.trace(profiler)(_profiler_load_store)
+    traced = tilelens.trace(profiler)(_profiler_load_store)
     x = torch.ones((16,), dtype=torch.float32)
     out = torch.zeros_like(x)
     traced[(2,)](x, out)

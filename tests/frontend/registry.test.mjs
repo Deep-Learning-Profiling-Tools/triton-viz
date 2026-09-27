@@ -5,7 +5,7 @@ import {
     hasVisualizer,
     listVisualizers,
     registerVisualizer,
-} from '../../triton_viz/static/ops/registry.js';
+} from '../../tilelens/static/ops/registry.js';
 
 test('registry stores and returns visualizers', () => {
     const type = 'TestRegistry';

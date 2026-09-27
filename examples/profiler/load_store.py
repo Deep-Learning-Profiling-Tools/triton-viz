@@ -1,11 +1,11 @@
 import torch
 import triton
 import triton.language as tl
-import triton_viz
-from triton_viz.core.config import config as cfg
+import tilelens
+from tilelens.core.config import config as cfg
 
 
-@triton_viz.trace("profiler")
+@tilelens.trace("profiler")
 @triton.jit
 def simple_kernel(
     x_ptr,

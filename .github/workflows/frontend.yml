@@ -21,7 +21,7 @@ jobs:
     steps:
       - uses: actions/checkout@v3
         with:
-          path: 'triton_viz'
+          path: 'tilelens'
 
       - name: Set up Node
         uses: actions/setup-node@v4
@@ -30,6 +30,6 @@ jobs:
 
       - name: Run frontend tests
         run: |
-          cd triton_viz
+          cd tilelens
           npm ci
           npm run test:frontend

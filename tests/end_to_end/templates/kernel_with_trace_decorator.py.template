@@ -1,9 +1,9 @@
 import triton
 import triton.language as tl
-import triton_viz
+import tilelens
 
 
-@triton_viz.trace("tracer")
+@tilelens.trace("tracer")
 @triton.jit
 def k1(X, n: tl.constexpr):
     return

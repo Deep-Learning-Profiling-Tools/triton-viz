@@ -2,13 +2,13 @@ import torch
 import triton
 import triton.language as tl
 
-import triton_viz
+import tilelens
 
 N = 64
 BLOCK = 16
 
 
-@triton_viz.trace("tracer")
+@tilelens.trace("tracer")
 @triton.jit
 def indirect_load_kernel(x_ptr, rand_ptr, out_ptr, BLOCK: tl.constexpr):
     offs = tl.arange(0, BLOCK)
@@ -24,7 +24,7 @@ def run():
     rand = torch.randperm(N, dtype=torch.int32, device=device)
     out = torch.zeros_like(x)
     indirect_load_kernel[(1,)](x, rand, out, BLOCK=BLOCK)
-    triton_viz.launch(share=False, port=5001)
+    tilelens.launch(share=False, port=5001)
 
 
 if __name__ == "__main__":

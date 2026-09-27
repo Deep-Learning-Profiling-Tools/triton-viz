@@ -1,17 +1,17 @@
 interface Window {
-    __TRITON_VIZ_API__?: string;
-    __tritonVizOpState?: {
+    __TILELENS_API__?: string;
+    __tileLensOpState?: {
         colorize?: boolean;
         histogram?: boolean;
         allPrograms?: boolean;
         showCode?: boolean;
         editTensorView?: boolean;
     };
-    __tritonVizCodeToggle?: (force?: boolean) => boolean | Promise<boolean>;
-    __tritonVizCodeHide?: () => boolean;
-    __tritonVizCodeVisible?: () => boolean;
-    __tritonVizActiveBlock?: { blockData?: Array<{ uuid?: string | null }> };
-    __tritonVizPreserveCodePanel?: boolean;
+    __tileLensCodeToggle?: (force?: boolean) => boolean | Promise<boolean>;
+    __tileLensCodeHide?: () => boolean;
+    __tileLensCodeVisible?: () => boolean;
+    __tileLensActiveBlock?: { blockData?: Array<{ uuid?: string | null }> };
+    __tileLensPreserveCodePanel?: boolean;
     setOpControlHandlers?: (handlers: {
         toggleColorize?: () => boolean | Promise<boolean>;
         toggleShowCode?: () => boolean | Promise<boolean> | void;

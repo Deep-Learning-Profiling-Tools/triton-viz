@@ -3,8 +3,8 @@ from unittest.mock import MagicMock
 
 import numpy as np
 
-from triton_viz.clients.tracer.tracer import Tracer, _convert_grid_idx
-from triton_viz.core.data import Transfer
+from tilelens.clients.tracer.tracer import Tracer, _convert_grid_idx
+from tilelens.core.data import Transfer
 
 
 # ======== _convert_grid_idx Tests ===========

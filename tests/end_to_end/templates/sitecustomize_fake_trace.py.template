@@ -1,4 +1,4 @@
-import triton_viz
+import tilelens
 
 
 def fake_trace(*args, **kwargs):
@@ -10,4 +10,4 @@ def fake_trace(*args, **kwargs):
     return _decorator
 
 
-triton_viz.trace = fake_trace
+tilelens.trace = fake_trace

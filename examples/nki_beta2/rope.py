@@ -4,8 +4,8 @@ import nki.language as nl
 
 import numpy as np
 
-TRITON_VIZ_ENABLED = True
-PRE_TRACE = True  # Run NKI Beta 2 compiler tracing before Triton-Viz simulation for stronger semantic checks.
+TILELENS_ENABLED = True
+PRE_TRACE = True  # Run NKI Beta 2 compiler tracing before TileLens simulation for stronger semantic checks.
 
 
 def _rotate_half(x):
@@ -216,15 +216,15 @@ def _run_demo():
         head_dim,
     )
 
-    if TRITON_VIZ_ENABLED:
-        import triton_viz
+    if TILELENS_ENABLED:
+        import tilelens
 
-        traced_kernel = triton_viz.trace("tracer", frontend="nki_beta2")(rope_kernel)
+        traced_kernel = tilelens.trace("tracer", frontend="nki_beta2")(rope_kernel)
         traced_kernel[kernel_grid](*kernel_args, pre_trace=PRE_TRACE)
         assert np.allclose(expected_q, out_q4d)
         assert np.allclose(expected_k, out_k4d)
         print("☑️ Actual equals expected!")
-        triton_viz.launch(share=False)
+        tilelens.launch(share=False)
     else:
         out_q4d, out_k4d = _run_with_xla(rope_kernel, kernel_grid, *kernel_args)
         assert np.allclose(expected_q, out_q4d)

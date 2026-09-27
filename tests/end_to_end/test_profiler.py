@@ -4,9 +4,9 @@ import pytest
 import triton
 import triton.language as tl
 
-import triton_viz
-from triton_viz.clients import Profiler
-from triton_viz.core.config import config as cfg
+import tilelens
+from tilelens.clients import Profiler
+from tilelens.core.config import config as cfg
 
 
 @pytest.fixture
@@ -88,7 +88,7 @@ def test_for_loop_statistics(_isolate_profiler_cfg):
     cfg.profiler_enable_block_sampling = False
     cfg.profiler_disable_buffer_load_check = True
     loop_profiler = Profiler(disable_load_mask_percentage_check=True)
-    traced_kernel = triton_viz.trace(loop_profiler)(for_loop_test_kernel)
+    traced_kernel = tilelens.trace(loop_profiler)(for_loop_test_kernel)
 
     # Run the kernel
     grid = (num_blocks,)
@@ -196,7 +196,7 @@ def test_mask_percentage(_isolate_profiler_cfg):
     cfg.profiler_enable_block_sampling = False
     cfg.profiler_disable_buffer_load_check = True
     mask_profiler = Profiler()
-    traced_kernel = triton_viz.trace(mask_profiler)(mask_percentage_test_kernel)
+    traced_kernel = tilelens.trace(mask_profiler)(mask_percentage_test_kernel)
 
     # Run the kernel
     grid = (num_blocks,)
@@ -332,7 +332,7 @@ def test_block_sampling(
     )
 
     # Apply trace decorator and run kernel
-    traced_kernel = triton_viz.trace(profiler)(block_sampling_test_kernel)
+    traced_kernel = tilelens.trace(profiler)(block_sampling_test_kernel)
     traced_kernel[grid](x, y, counter, n_elements, BLOCK_SIZE=BLOCK_SIZE)
 
     # Get actual execution count
@@ -382,7 +382,7 @@ def test_load_store_skip_disabled(_isolate_profiler_cfg):
 
     # Create profiler and traced kernel
     profiler = Profiler()
-    traced_kernel = triton_viz.trace(profiler)(simple_kernel)
+    traced_kernel = tilelens.trace(profiler)(simple_kernel)
 
     # Run kernel
     grid = (triton.cdiv(N, BLOCK_SIZE),)
@@ -411,7 +411,7 @@ def test_load_store_skip_enabled(_isolate_profiler_cfg):
 
     # Create profiler and traced kernel
     profiler = Profiler()
-    traced_kernel = triton_viz.trace(profiler)(simple_kernel)
+    traced_kernel = tilelens.trace(profiler)(simple_kernel)
 
     # Run kernel
     grid = (triton.cdiv(N, BLOCK_SIZE),)

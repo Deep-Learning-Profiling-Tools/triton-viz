@@ -1,8 +1,8 @@
 from contextlib import contextmanager
 
-from triton_viz.core.callbacks import ForLoopCallbacks, OpCallbacks
-from triton_viz.core.client import Client, ClientManager
-from triton_viz.core.config import config as cfg
+from tilelens.core.callbacks import ForLoopCallbacks, OpCallbacks
+from tilelens.core.client import Client, ClientManager
+from tilelens.core.config import config as cfg
 
 
 class _DummyClient(Client):

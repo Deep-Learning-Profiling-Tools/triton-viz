@@ -4,9 +4,9 @@ import torch
 from typing import cast
 from z3 import Int
 
-from triton_viz.core.config import config as cfg
-from triton_viz.core.data import Load, Store
-from triton_viz.core.symbolic_metadata import (
+from tilelens.core.config import config as cfg
+from tilelens.core.data import Load, Store
+from tilelens.core.symbolic_metadata import (
     INT1,
     INT32,
     SymbolicTensorValue,
@@ -14,17 +14,17 @@ from triton_viz.core.symbolic_metadata import (
     pointer_type,
     type_spec,
 )
-from triton_viz.clients import Sanitizer
-from triton_viz.clients.sanitizer.report import _classify_layout_and_segments
-from triton_viz.clients.sanitizer.sanitizer import (
+from tilelens.clients import Sanitizer
+from tilelens.clients.sanitizer.report import _classify_layout_and_segments
+from tilelens.clients.sanitizer.sanitizer import (
     NullSanitizer,
     SymbolicSanitizer,
     _fn_symbolic_cache_set,
 )
-from triton_viz.clients.sanitizer.range_summary import IntRange, access_interval_summary
-from triton_viz.clients.symbolic_engine import LoopContext, PendingCheck, SymbolicExpr
-from triton_viz.clients.symbolic_engine import symbolic_tensor_descriptor_access
-from triton_viz.core.patch import LoopSite, loop_file_token
+from tilelens.clients.sanitizer.range_summary import IntRange, access_interval_summary
+from tilelens.clients.symbolic_engine import LoopContext, PendingCheck, SymbolicExpr
+from tilelens.clients.symbolic_engine import symbolic_tensor_descriptor_access
+from tilelens.core.patch import LoopSite, loop_file_token
 
 
 # ======== Init Tests ===========

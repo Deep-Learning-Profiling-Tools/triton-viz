@@ -5,7 +5,7 @@ import subprocess
 from pathlib import Path
 from string import Template
 import shutil
-from triton_viz.wrapper import (
+from tilelens.wrapper import (
     SANITIZER_COMMAND,
     PROFILER_COMMAND,
     RACE_DETECTOR_COMMAND,
@@ -22,14 +22,14 @@ def load_template(name: str, **kwargs) -> str:
     return template.substitute(**kwargs)
 
 
-def test_triton_sanitizer_injects_trace_outermost(tmp_path: Path, monkeypatch):
+def test_tile_sanitizer_injects_trace_outermost(tmp_path: Path, monkeypatch):
     """
     Black-box verification:
-    - Pure @triton.jit kernels have exactly one @triton_viz.trace at the outermost layer;
+    - Pure @triton.jit kernels have exactly one @tilelens.trace at the outermost layer;
     - @triton.autotune + @triton.jit kernels: trace is only added at the autotune outer
       layer, inner jit should not be traced again.
     Implementation approach:
-      Use sitecustomize to monkey-patch triton_viz.trace at subprocess startup,
+      Use sitecustomize to monkey-patch tilelens.trace at subprocess startup,
       record each trace decorator application target (function name/type),
       write to JSON on exit.
     """
@@ -55,7 +55,7 @@ def test_triton_sanitizer_injects_trace_outermost(tmp_path: Path, monkeypatch):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
 
-    # 4) Find triton-sanitizer executable - fail if not found
+    # 4) Find tile-sanitizer executable - fail if not found
     exe = shutil.which(SANITIZER_COMMAND)
     assert exe is not None, (
         f"{SANITIZER_COMMAND} command not found. "
@@ -98,14 +98,14 @@ def test_triton_sanitizer_injects_trace_outermost(tmp_path: Path, monkeypatch):
         )
 
 
-def test_triton_profiler_injects_trace_outermost(tmp_path: Path, monkeypatch):
+def test_tile_profiler_injects_trace_outermost(tmp_path: Path, monkeypatch):
     """
-    Black-box verification for triton-profiler:
-    - Pure @triton.jit kernels have exactly one @triton_viz.trace at the outermost layer;
+    Black-box verification for tile-profiler:
+    - Pure @triton.jit kernels have exactly one @tilelens.trace at the outermost layer;
     - @triton.autotune + @triton.jit kernels: trace is only added at the autotune outer
       layer, inner jit should not be traced again.
     Implementation approach:
-      Use sitecustomize to monkey-patch triton_viz.trace at subprocess startup,
+      Use sitecustomize to monkey-patch tilelens.trace at subprocess startup,
       record each trace decorator application target (function name/type),
       write to JSON on exit.
     """
@@ -131,7 +131,7 @@ def test_triton_profiler_injects_trace_outermost(tmp_path: Path, monkeypatch):
     env = os.environ.copy()
     env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
 
-    # 4) Find triton-profiler executable - fail if not found
+    # 4) Find tile-profiler executable - fail if not found
     exe = shutil.which(PROFILER_COMMAND)
     assert exe is not None, (
         f"{PROFILER_COMMAND} command not found. "
@@ -174,14 +174,14 @@ def test_triton_profiler_injects_trace_outermost(tmp_path: Path, monkeypatch):
         )
 
 
-def test_triton_race_detector_injects_trace_outermost(tmp_path: Path, monkeypatch):
+def test_tile_race_injects_trace_outermost(tmp_path: Path, monkeypatch):
     """
-    Black-box verification for triton-race-detector:
-    - Pure @triton.jit kernels have exactly one @triton_viz.trace at the outermost layer;
+    Black-box verification for tile-race:
+    - Pure @triton.jit kernels have exactly one @tilelens.trace at the outermost layer;
     - @triton.autotune + @triton.jit kernels: trace is only added at the autotune outer
       layer, inner jit should not be traced again.
     Implementation approach:
-      Use sitecustomize to monkey-patch triton_viz.trace at subprocess startup,
+      Use sitecustomize to monkey-patch tilelens.trace at subprocess startup,
       record each trace decorator application target (function name/type),
       write to JSON on exit.
     """
@@ -207,7 +207,7 @@ def test_triton_race_detector_injects_trace_outermost(tmp_path: Path, monkeypatc
     env = os.environ.copy()
     env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
 
-    # 4) Find triton-race-detector executable - fail if not found
+    # 4) Find tile-race executable - fail if not found
     exe = shutil.which(RACE_DETECTOR_COMMAND)
     assert exe is not None, (
         f"{RACE_DETECTOR_COMMAND} command not found. "
@@ -253,8 +253,8 @@ def test_triton_race_detector_injects_trace_outermost(tmp_path: Path, monkeypatc
 def test_cli_invocation():
     """
     Simulate running:
-        $ triton-sanitizer dummy_program.py
-    and assert that triton_viz.trace is invoked exactly once.
+        $ tile-sanitizer dummy_program.py
+    and assert that tilelens.trace is invoked exactly once.
     """
     with tempfile.TemporaryDirectory() as tmpdir:
         tmp_path = Path(tmpdir)
@@ -264,7 +264,7 @@ def test_cli_invocation():
             load_template("kernel_dummy.py.template")
         )
 
-        # 2) Patch triton_viz.trace to count invocations
+        # 2) Patch tilelens.trace to count invocations
         (tmp_path / "sitecustomize.py").write_text(
             load_template("sitecustomize_fake_trace.py.template")
         )
@@ -274,8 +274,8 @@ def test_cli_invocation():
         env["PYTHONPATH"] = str(tmp_path) + os.pathsep + env.get("PYTHONPATH", "")
         env["TRITON_INTERPRET"] = "1"
 
-        # Run the dummy program using triton-sanitizer
-        cmd = ["triton-sanitizer", str(tmp_path / "dummy_program.py")]
+        # Run the dummy program using tile-sanitizer
+        cmd = ["tile-sanitizer", str(tmp_path / "dummy_program.py")]
         proc = subprocess.run(
             cmd,
             capture_output=True,
@@ -288,22 +288,22 @@ def test_cli_invocation():
         trace_count = proc.stdout.count("TRACE_CALLED")
         assert (
             trace_count == 1
-        ), "triton_viz.trace should be invoked exactly once via CLI path"
+        ), "tilelens.trace should be invoked exactly once via CLI path"
 
 
 def test_cli_rejects_trace_decorator(tmp_path: Path):
     """
-    When a user script contains @triton_viz.trace() and is run via triton-sanitizer,
+    When a user script contains @tilelens.trace() and is run via tile-sanitizer,
     the process should exit with a non-zero code and report a RuntimeError.
     """
-    # 1) Write a script that has both @triton_viz.trace and @triton.jit
+    # 1) Write a script that has both @tilelens.trace and @triton.jit
     my_program = tmp_path / "my_program.py"
     my_program.write_text(
         load_template("kernel_with_trace_decorator.py.template"),
         encoding="utf-8",
     )
 
-    # 2) Find triton-sanitizer executable
+    # 2) Find tile-sanitizer executable
     exe = shutil.which(SANITIZER_COMMAND)
     assert exe is not None, (
         f"{SANITIZER_COMMAND} command not found. "
@@ -324,7 +324,7 @@ def test_cli_rejects_trace_decorator(tmp_path: Path):
     # 4) Assertion: should fail with RuntimeError about CLI wrapper conflict
     assert (
         proc.returncode != 0
-    ), "Expected non-zero exit code when @triton_viz.trace() is used with CLI wrapper"
+    ), "Expected non-zero exit code when @tilelens.trace() is used with CLI wrapper"
     assert (
         "CLI wrapper" in proc.stderr
     ), f"Expected error message about CLI wrapper conflict in stderr, got:\n{proc.stderr}"

@@ -1,10 +1,10 @@
 import pytest
 from unittest.mock import MagicMock, patch
 
-import triton_viz
-from triton_viz.core.config import config as cfg
-from triton_viz.core.trace import TraceInterface
-from triton_viz.wrapper import (
+import tilelens
+from tilelens.core.config import config as cfg
+from tilelens.core.trace import TraceInterface
+from tilelens.wrapper import (
     create_patched_jit,
     create_patched_autotune,
     sanitizer_wrapper,
@@ -29,7 +29,7 @@ def test_sanitizer_wrapper_applies_trace():
     mock_kernel = MagicMock()
     mock_kernel.__name__ = "test_kernel"
 
-    with patch("triton_viz.wrapper.triton_viz.trace") as mock_trace:
+    with patch("tilelens.wrapper.tilelens.trace") as mock_trace:
         mock_decorator = MagicMock()
         mock_trace.return_value = mock_decorator
         mock_decorator.return_value = "wrapped_kernel"
@@ -45,7 +45,7 @@ def test_sanitizer_wrapper_accepts_frontend():
     mock_kernel = MagicMock()
     mock_kernel.__name__ = "test_kernel"
 
-    with patch("triton_viz.wrapper.triton_viz.trace") as mock_trace:
+    with patch("tilelens.wrapper.tilelens.trace") as mock_trace:
         mock_decorator = MagicMock()
         mock_trace.return_value = mock_decorator
         mock_decorator.return_value = "wrapped_kernel"
@@ -61,7 +61,7 @@ def test_profiler_wrapper_applies_trace():
     mock_kernel = MagicMock()
     mock_kernel.__name__ = "test_kernel"
 
-    with patch("triton_viz.wrapper.triton_viz.trace") as mock_trace:
+    with patch("tilelens.wrapper.tilelens.trace") as mock_trace:
         mock_decorator = MagicMock()
         mock_trace.return_value = mock_decorator
         mock_decorator.return_value = "wrapped_kernel"
@@ -169,7 +169,7 @@ def test_create_patched_autotune_with_kwargs():
     mock_autotune_decorator = MagicMock(return_value="autotune_kernel")
     mock_original_autotune = MagicMock(return_value=mock_autotune_decorator)
 
-    with patch("triton_viz.wrapper._original_autotune", mock_original_autotune):
+    with patch("tilelens.wrapper._original_autotune", mock_original_autotune):
         patched_autotune = create_patched_autotune(mock_wrapper)
 
         decorator = patched_autotune(configs=[], key=["n"])
@@ -189,7 +189,7 @@ def test_create_patched_autotune_direct_decorator():
     mock_wrapper = MagicMock(return_value="final_kernel")
     mock_original_autotune = MagicMock(return_value="autotune_kernel")
 
-    with patch("triton_viz.wrapper._original_autotune", mock_original_autotune):
+    with patch("tilelens.wrapper._original_autotune", mock_original_autotune):
         patched_autotune = create_patched_autotune(mock_wrapper)
 
         mock_fn = MagicMock()
@@ -207,7 +207,7 @@ def test_trace_decorator_raises_when_cli_active(_isolate_cli_active):
     """trace() should raise RuntimeError on an already-wrapped kernel when CLI is active."""
     cfg.cli_active = True
     mock_kernel = MagicMock(spec=TraceInterface)
-    decorator = triton_viz.trace("tracer")
+    decorator = tilelens.trace("tracer")
     with pytest.raises(RuntimeError, match="CLI wrapper"):
         decorator(mock_kernel)
 
@@ -221,7 +221,7 @@ def test_trace_decorator_allows_cli_own_wrapping(_isolate_cli_active):
     mock_kernel = MagicMock(spec=InterpretedFunction)
     mock_kernel.fn = lambda: None
     mock_kernel.arg_names = []
-    decorator = triton_viz.trace("sanitizer")
+    decorator = tilelens.trace("sanitizer")
     # Should not raise — this is the CLI's own first-time wrapping
     result = decorator(mock_kernel)
     assert isinstance(result, TraceInterface)
@@ -235,7 +235,7 @@ def test_trace_decorator_works_when_cli_inactive(_isolate_cli_active):
     mock_kernel = MagicMock(spec=InterpretedFunction)
     mock_kernel.fn = lambda: None
     mock_kernel.arg_names = []
-    decorator = triton_viz.trace("tracer")
+    decorator = tilelens.trace("tracer")
     result = decorator(mock_kernel)
     assert isinstance(result, TraceInterface)
 

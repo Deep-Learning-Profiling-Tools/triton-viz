@@ -30,7 +30,7 @@ let maxZ = 0;
 const PROGRAM_AXES: Array<keyof ProgramAxes> = ['x', 'y', 'z'];
 const appDisposer = createDisposer();
 let pidDisposer = createDisposer();
-const THEME_STORAGE_KEY = 'triton-viz-theme';
+const THEME_STORAGE_KEY = 'tilelens-theme';
 const DEV_OVERLAY_QUERY_KEY = 'dev';
 const DEV_OVERLAY_TOGGLE = 'KeyD';
 let devOverlayEnabled = false;
@@ -69,7 +69,7 @@ function setOpControlState(nextState: Partial<Record<ToggleKey, boolean>> = {}):
         ...nextState,
     };
     setToggles(toggles);
-    try { window.__tritonVizOpState = { ...toggles }; } catch (err) {}
+    try { window.__tileLensOpState = { ...toggles }; } catch (err) {}
     updateOpControls(toggles);
 }
 
@@ -82,9 +82,9 @@ function resetOpControls(): void {
     opControls.handlers = null;
     closeDownloadModal();
     const nextState = resetToggles();
-    try { window.__tritonVizOpState = { ...nextState.toggles }; } catch (err) {}
-    if (window.__tritonVizCodeHide) {
-        window.__tritonVizCodeHide();
+    try { window.__tileLensOpState = { ...nextState.toggles }; } catch (err) {}
+    if (window.__tileLensCodeHide) {
+        window.__tileLensCodeHide();
     }
     updateOpControls(nextState.toggles);
 }

@@ -3,8 +3,8 @@ from triton.experimental import gluon
 from triton.experimental.gluon import language as gl
 from triton.experimental.gluon.language.nvidia.hopper import mbarrier, tma
 
-import triton_viz
-from triton_viz.clients.sanitizer.sanitizer import Sanitizer
+import tilelens
+from tilelens.clients.sanitizer.sanitizer import Sanitizer
 
 
 BLOCK_M = 16
@@ -40,7 +40,7 @@ def gluon_tma_oob_kernel(
 def run(abort_on_error: bool = True):
     x = torch.zeros((BLOCK_M, BLOCK_N), dtype=torch.float32)
     layout = gl.NVMMASharedLayout.get_default_for([BLOCK_M, BLOCK_N], gl.float32)
-    kernel = triton_viz.trace(
+    kernel = tilelens.trace(
         client=Sanitizer(abort_on_error=abort_on_error),
         frontend="gluon",
     )(gluon_tma_oob_kernel)

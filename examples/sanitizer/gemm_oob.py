@@ -3,10 +3,10 @@ import torch
 import triton
 import triton.language as tl
 
-import triton_viz
+import tilelens
 
 
-@triton_viz.trace("sanitizer")
+@tilelens.trace("sanitizer")
 @triton.jit
 def gemm_kernel(
     A, B, C, M: tl.constexpr, N: tl.constexpr, K: tl.constexpr, TILE_SIZE: tl.constexpr

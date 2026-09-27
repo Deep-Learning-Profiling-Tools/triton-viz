@@ -1,11 +1,11 @@
 from neuronxcc import nki
 import neuronxcc.nki.language as nl
 
-import triton_viz
+import tilelens
 import numpy as np
 import math
 
-TRITON_VIZ_ENABLED = True  # True = enable visualizer, False = run compiler
+TILELENS_ENABLED = True  # True = enable visualizer, False = run compiler
 TRANSPOSED = False  # True = run matmul_kernel, False = run matmul_kernel_lhsT
 
 
@@ -137,12 +137,12 @@ def _run_demo():
     result = np.empty((M, N), dtype=lhs_small.dtype)
     kernel_args = (lhs_small, rhs_small, result)
 
-    if TRITON_VIZ_ENABLED:
+    if TILELENS_ENABLED:
         print("Executing matmul_kernel with NKI interpreter...")
-        traced_kernel = triton_viz.trace("tracer", frontend="nki")(kernel)
+        traced_kernel = tilelens.trace("tracer", frontend="nki")(kernel)
         kernel_instance = traced_kernel[kernel_grid]
         kernel_instance(*kernel_args)
-        triton_viz.launch(share=False)
+        tilelens.launch(share=False)
     else:
         print("Executing NKI JIT-ed matmul kernel...")
         compiled_kernel = nki.jit(kernel, kernel_return=False)

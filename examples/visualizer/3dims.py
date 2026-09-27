@@ -3,15 +3,15 @@ import triton
 import triton.language as tl
 
 
-import triton_viz
-from triton_viz.clients import Tracer
+import tilelens
+from tilelens.clients import Tracer
 
 BLOCK_SIZE_X = 32
 BLOCK_SIZE_Y = 8
 BLOCK_SIZE_Z = 4
 
 
-@triton_viz.trace(client=Tracer())
+@tilelens.trace(client=Tracer())
 @triton.jit
 def add_3d_slices_kernel(
     input_ptr1,
@@ -109,7 +109,7 @@ if __name__ == "__main__":
 
     # Call the kernel
     add_3d_slices(input1, input2, output)
-    triton_viz.launch(share=False, port=5001)
+    tilelens.launch(share=False, port=5001)
 
     # Verify the result
     expected_output = input1 + input2

@@ -3,14 +3,14 @@ from unittest.mock import patch
 
 import pytest
 
-from triton_viz.core.config import config as cfg
-from triton_viz.clients.profiler.profiler import (
+from tilelens.core.config import config as cfg
+from tilelens.clients.profiler.profiler import (
     Profiler,
     LoopInfo,
     MaskOpStats,
     AggregatedMaskOpStats,
 )
-from triton_viz.clients.profiler.data import LoadStoreBytes
+from tilelens.clients.profiler.data import LoadStoreBytes
 
 
 @pytest.fixture

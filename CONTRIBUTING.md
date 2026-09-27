@@ -1,11 +1,11 @@
-# Contributing to Triton-Viz
+# Contributing to TileLens
 
 ## Quick Start
 
 ```bash
 # Clone repo
-git clone https://github.com/Deep-Learning-Profiling-Tools/triton-viz.git
-cd triton-viz
+git clone https://github.com/Deep-Learning-Profiling-Tools/tilelens.git
+cd tilelens
 
 # Setup dev environment and install dependencies
 uv sync --extra test  # append "--extra nki" if developing NKI functionality
@@ -23,9 +23,9 @@ npm run test:frontend            # test the web UI (if working on the visualizer
 
 ```
 frontend/             # TypeScript web UI source code
-examples/             # Entry points for new users to try out triton-viz functionality
-docs/                 # triton-viz website
-triton_viz/
+examples/             # Entry points for new users to try out tilelens functionality
+docs/                 # tilelens website
+tilelens/
   core/frontend/      # DSL operation adapters and runtime patching
   core/simulation/    # NKI simulation runtimes
   clients/            # Visualizer, profiler, and sanitizer clients

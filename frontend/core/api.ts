@@ -8,7 +8,7 @@ export type RequestOptions = {
 
 const getDefaultBase = (): string => {
     if (typeof globalThis === 'undefined') return '';
-    const globalBase = (globalThis as typeof globalThis & { __TRITON_VIZ_API__?: string }).__TRITON_VIZ_API__;
+    const globalBase = (globalThis as typeof globalThis & { __TILELENS_API__?: string }).__TILELENS_API__;
     if (globalBase) return globalBase;
     if (typeof window === 'undefined' || !window.location) return '';
     // derive a stable base from the current page location for proxy paths

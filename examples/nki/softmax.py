@@ -1,9 +1,9 @@
 from neuronxcc import nki
 import neuronxcc.nki.language as nl
 
-import triton_viz
-from triton_viz.clients import Tracer
-from triton_viz.core.trace import launches
+import tilelens
+from tilelens.clients import Tracer
+from tilelens.core.trace import launches
 import numpy as np
 import math
 
@@ -31,17 +31,15 @@ def softmax_kernel(in_tensor, out_tensor):
 
 
 def _run_demo():
-    triton_viz_enabled = True
+    tilelens_enabled = True
     kernel_grid = (1, 1, 1)
     x_small = np.random.rand(16, 32).astype(np.float32)
     y_small = np.empty(x_small.shape, dtype=x_small.dtype)
     kernel_args = (x_small, y_small)
 
-    if triton_viz_enabled:
+    if tilelens_enabled:
         print("Executing softmax_kernel with NKI interpreter...")
-        traced_kernel = triton_viz.trace(client=Tracer(), frontend="nki")(
-            softmax_kernel
-        )
+        traced_kernel = tilelens.trace(client=Tracer(), frontend="nki")(softmax_kernel)
         kernel_instance = traced_kernel[kernel_grid]
         kernel_instance(*kernel_args)
 
@@ -59,7 +57,7 @@ def _run_demo():
                     print(f"  masks shape: {record.masks.shape}")
 
         try:
-            triton_viz.launch(share=False)
+            tilelens.launch(share=False)
         except Exception as e:
             print(f"\nError during visualization: {e}")
             import traceback

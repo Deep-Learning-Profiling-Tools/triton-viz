@@ -60,7 +60,7 @@ def main():
     parser.add_argument(
         "--viz",
         action="store_true",
-        help="Enable triton-viz tracing (uses tracer client).",
+        help="Enable tilelens tracing (uses tracer client).",
     )
     parser.add_argument(
         "--num-sms",
@@ -73,16 +73,16 @@ def main():
 
     trace_decorator = None
     if args.viz:
-        import triton_viz
+        import tilelens
 
-        triton_viz.config.num_sms = max(1, args.num_sms)
-        trace_decorator = triton_viz.trace("tracer")
+        tilelens.config.num_sms = max(1, args.num_sms)
+        trace_decorator = tilelens.trace("tracer")
 
     producer_consumer, racing_threads = make_kernels(trace_decorator)
 
     device = (
         "cpu" if args.viz else "cuda"
-    )  # triton-viz only supports CPU, triton only supports CUDA (TRITON_INTERPRET=1 runs on CPU but hangs)
+    )  # tilelens only supports CPU, triton only supports CUDA (TRITON_INTERPRET=1 runs on CPU but hangs)
 
     # Use smaller workloads on CPU to keep interpreter runs snappy.
     pc_N = 16384 * 16 if device == "cuda" else 2048

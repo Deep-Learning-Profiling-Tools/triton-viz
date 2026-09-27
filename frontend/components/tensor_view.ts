@@ -1932,8 +1932,8 @@ export function createTensorVisualization(
             state.rafId = requestAnimationFrame(() => { state.rafId = null; orbitControls.update(); syncClipPlanes(); renderer.render(scene, camera); if (state.renderPending) { state.renderPending = false; ctx.requestRender(); } });
         };
         const handleTextSync = (): void => { ctx.requestRender(); };
-        window.addEventListener('triton-viz-text-sync', handleTextSync);
-        disposer.add(() => window.removeEventListener('triton-viz-text-sync', handleTextSync));
+        window.addEventListener('tilelens-text-sync', handleTextSync);
+        disposer.add(() => window.removeEventListener('tilelens-text-sync', handleTextSync));
         let lastWidth = 0;
         let lastHeight = 0;
         const resizeRenderer = (): void => {
@@ -2538,7 +2538,7 @@ export function createTensorVisualization(
                 requestRender();
                 return state.colorizeOn;
             },
-            toggleShowCode: () => window.__tritonVizCodeToggle?.(),
+            toggleShowCode: () => window.__tileLensCodeToggle?.(),
             toggleHistogram: (): boolean => {
                 const isVisible = vizCache.histogramUI.overlay.style.display === 'block';
                 if (isVisible) {

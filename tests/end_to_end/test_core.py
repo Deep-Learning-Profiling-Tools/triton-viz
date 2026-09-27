@@ -4,10 +4,10 @@ import torch
 import triton
 import triton.language as tl
 
-import triton_viz
-from triton_viz.clients import Profiler, Sanitizer
-from triton_viz.core.callbacks import ForLoopCallbacks, OpCallbacks
-from triton_viz.core.client import Client
+import tilelens
+from tilelens.clients import Profiler, Sanitizer
+from tilelens.core.callbacks import ForLoopCallbacks, OpCallbacks
+from tilelens.core.client import Client
 
 
 # ======== Trace Decorator Tests =========
@@ -23,10 +23,10 @@ def test_trace_decorator_add_clients():
     Sanitizer, Profiler, and Tracer (total = 3 clients).
     """
 
-    @triton_viz.trace("sanitizer")
-    @triton_viz.trace("profiler")
-    @triton_viz.trace("tracer")
-    @triton_viz.trace(
+    @tilelens.trace("sanitizer")
+    @tilelens.trace("profiler")
+    @tilelens.trace("tracer")
+    @tilelens.trace(
         Sanitizer(abort_on_error=True)
     )  # Duplicate Sanitizer (should be ignored)
     @triton.jit
@@ -36,7 +36,7 @@ def test_trace_decorator_add_clients():
         tl.store(out_ptr + offs, tl.load(x_ptr + offs) + tl.load(y_ptr + offs))
 
     # Should be wrapped as a Trace object.
-    from triton_viz.core.trace import TritonTrace
+    from tilelens.core.trace import TritonTrace
 
     assert isinstance(my_kernel, TritonTrace)
 
@@ -51,9 +51,9 @@ def test_trace_decorator_add_clients():
 def test_trace_decorator_supports_gluon_frontend():
     from triton.experimental import gluon
     from triton.experimental.gluon import language as ttgl
-    from triton_viz.core.trace import GluonTrace
+    from tilelens.core.trace import GluonTrace
 
-    @triton_viz.trace("tracer", frontend="gluon")
+    @tilelens.trace("tracer", frontend="gluon")
     @gluon.jit
     def my_gluon_kernel(out):
         pid = ttgl.program_id(0)
@@ -67,10 +67,10 @@ def test_gluon_trace_handles_autotuner_wrapper():
     from triton.experimental import gluon
     from triton.experimental.gluon import language as ttgl
     from triton.runtime import Autotuner
-    from triton_viz.core.simulation.gluon import GluonInterpretedFunction
-    from triton_viz.core.trace import GluonTrace
+    from tilelens.core.simulation.gluon import GluonInterpretedFunction
+    from tilelens.core.trace import GluonTrace
 
-    @triton_viz.trace("tracer", frontend="gluon")
+    @tilelens.trace("tracer", frontend="gluon")
     @triton.autotune(configs=[triton.Config({"BLOCK": 1})], key=[])
     @gluon.jit
     def my_gluon_kernel(out, BLOCK: ttgl.constexpr):
@@ -87,10 +87,10 @@ def test_gluon_trace_handles_heuristics_wrapper():
     from triton.experimental import gluon
     from triton.experimental.gluon import language as ttgl
     from triton.runtime.autotuner import Heuristics
-    from triton_viz.core.simulation.gluon import GluonInterpretedFunction
-    from triton_viz.core.trace import GluonTrace
+    from tilelens.core.simulation.gluon import GluonInterpretedFunction
+    from tilelens.core.trace import GluonTrace
 
-    @triton_viz.trace("tracer", frontend="gluon")
+    @tilelens.trace("tracer", frontend="gluon")
     @triton.heuristics({"BLOCK": lambda args: 1})
     @gluon.jit
     def my_gluon_kernel(out, BLOCK: ttgl.constexpr):
@@ -108,7 +108,7 @@ def test_gluon_sanitizer_run_preserves_instrumentation_mode(monkeypatch):
     from triton.experimental import gluon
     from triton.experimental.gluon import language as ttgl
 
-    @triton_viz.trace(client=Sanitizer(abort_on_error=False), frontend="gluon")
+    @tilelens.trace(client=Sanitizer(abort_on_error=False), frontend="gluon")
     @gluon.jit
     def my_gluon_kernel(out):
         pid = ttgl.program_id(0)
@@ -180,7 +180,7 @@ def test_gluon_run_does_not_use_pre_run_as_launch_gate(monkeypatch):
 
     client = _PreRunSkippingClient()
 
-    @triton_viz.trace(client=client, frontend="gluon")
+    @tilelens.trace(client=client, frontend="gluon")
     @gluon.jit
     def my_gluon_kernel(out):
         pid = ttgl.program_id(0)
@@ -218,13 +218,13 @@ def test_unpatch_lang_restores_builtins():
     x = torch.arange(size, device="cuda")
     grid = lambda meta: (triton.cdiv(size, meta["BLOCK_SIZE"]),)
     for client in ["tracer", "sanitizer", "profiler"]:
-        traced = triton_viz.trace(client)(dummy_kernel)
+        traced = tilelens.trace(client)(dummy_kernel)
         traced[grid](x, BLOCK_SIZE=block_size)
         dummy_kernel[grid](x, BLOCK_SIZE=block_size)
 
 
 def test_trace_patches_extra_cuda_builtins():
-    @triton_viz.trace("tracer")
+    @tilelens.trace("tracer")
     @triton.jit
     def extra_cuda_builtin_kernel(out):
         offs = tl.arange(0, tl.extra.cuda.num_threads())
@@ -236,7 +236,7 @@ def test_trace_patches_extra_cuda_builtins():
 
 
 def test_trace_supports_symbolic_sort():
-    @triton_viz.trace("sanitizer")
+    @tilelens.trace("sanitizer")
     @triton.jit
     def sort_kernel(inp, out, BLOCK: tl.constexpr):
         offs = tl.arange(0, BLOCK)
@@ -250,13 +250,13 @@ def test_trace_supports_symbolic_sort():
 
 
 # ======== Nested JIT Call Tests =========
-@triton_viz.trace(client=Sanitizer(abort_on_error=True))
+@tilelens.trace(client=Sanitizer(abort_on_error=True))
 @triton.jit
 def trace_nested_inner_kernel(x):
     return x * 2
 
 
-@triton_viz.trace(client=Profiler())
+@tilelens.trace(client=Profiler())
 @triton.jit
 def trace_nested_inner_profiler_kernel(x):
     return x * 2
@@ -268,10 +268,10 @@ def test_trace_nested_jit_calls():
 
     When a traced JIT function is called from within another JIT function,
     the Trace wrapper needs to properly delegate to the underlying function.
-    This test ensures compatibility with the command line triton-sanitizer wrapper.
+    This test ensures compatibility with the command line tile-sanitizer wrapper.
     """
 
-    @triton_viz.trace(client=Sanitizer(abort_on_error=True))
+    @tilelens.trace(client=Sanitizer(abort_on_error=True))
     @triton.jit
     def trace_nested_call_kernel(ptr, n: tl.constexpr):
         x = tl.load(ptr + tl.arange(0, n))
@@ -286,7 +286,7 @@ def test_trace_nested_jit_calls():
 
 
 def test_trace_nested_jit_calls_mismatched_clients():
-    @triton_viz.trace(client=Sanitizer(abort_on_error=True))
+    @tilelens.trace(client=Sanitizer(abort_on_error=True))
     @triton.jit
     def trace_nested_call_kernel(ptr, n: tl.constexpr):
         x = tl.load(ptr + tl.arange(0, n))
@@ -310,7 +310,7 @@ if torch.cuda.is_available():  # Only test if CUDA is available
         ],
         key=["n_elements"],
     )
-    @triton_viz.trace(client=Sanitizer(abort_on_error=True))
+    @tilelens.trace(client=Sanitizer(abort_on_error=True))
     @triton.jit
     def add_kernel_no_mask(x_ptr, y_ptr, out_ptr, n_elements, BLOCK_SIZE: tl.constexpr):
         """
@@ -366,5 +366,5 @@ def test_autotune_interpreter_mode():
     def noop_kernel(n, BLOCK: tl.constexpr):
         pass
 
-    traced = triton_viz.trace(client=Sanitizer())(noop_kernel)
+    traced = tilelens.trace(client=Sanitizer())(noop_kernel)
     traced[(1,)](n=32)

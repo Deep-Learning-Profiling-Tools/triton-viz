@@ -5,19 +5,19 @@ import numpy as np
 import triton
 import triton.language as tl
 
-import triton_viz
-from triton_viz.core.data import Load, RawLoad
-from triton_viz.clients.symbolic_engine import (
+import tilelens
+from tilelens.core.data import Load, RawLoad
+from tilelens.clients.symbolic_engine import (
     SymbolicExpr,
     Z3Expr,
     RangeWrapper,
     _range_to_iterator_constraint,
 )
-from triton_viz.core.symbolic_metadata import is_pointer_dtype
-from triton_viz.clients.sanitizer.sanitizer import SymbolicSanitizer
-from triton_viz.core.callbacks import ForLoopCallbacks
-from triton_viz.core.config import config
-from triton_viz.core.patch import LoopSite, loop_file_token
+from tilelens.core.symbolic_metadata import is_pointer_dtype
+from tilelens.clients.sanitizer.sanitizer import SymbolicSanitizer
+from tilelens.core.callbacks import ForLoopCallbacks
+from tilelens.core.config import config
+from tilelens.core.patch import LoopSite, loop_file_token
 from z3.z3 import BoolRef
 
 from .loop_site_cross_file_kernel import (
@@ -107,7 +107,7 @@ class LoadIndexChecker(SymbolicSanitizer):
             return load_expr
 
         # Return OpCallbacks with the new overrider, preserving other callbacks
-        from triton_viz.core.callbacks import OpCallbacks
+        from tilelens.core.callbacks import OpCallbacks
 
         return OpCallbacks(
             before_callback=op_callbacks.before_callback,
@@ -217,7 +217,7 @@ tuple_pointer_item_checker: SymbolicSanitizer = SymbolicSanitizer(abort_on_error
 # ======== Kernels ===========
 
 
-@triton_viz.trace(client=load_index_checker)
+@tilelens.trace(client=load_index_checker)
 @triton.jit
 def indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
@@ -229,7 +229,7 @@ def indirect_load_kernel(idx_ptr, src_ptr, dst_ptr, BLOCK_SIZE: tl.constexpr):
     tl.store(dst_ptr + offsets, out_val)
 
 
-@triton_viz.trace(client=loop_bounds_checker)
+@tilelens.trace(client=loop_bounds_checker)
 @triton.jit
 def loop_bounds_kernel(start_ptr, stop_ptr, out_ptr):
     start = tl.load(start_ptr)
@@ -239,7 +239,7 @@ def loop_bounds_kernel(start_ptr, stop_ptr, out_ptr):
     tl.store(out_ptr, start)
 
 
-@triton_viz.trace(client=loop_bounds_checker)
+@tilelens.trace(client=loop_bounds_checker)
 @triton.jit
 def loop_bounds_pid_kernel(out_ptr):
     pid = tl.program_id(0)
@@ -250,7 +250,7 @@ def loop_bounds_pid_kernel(out_ptr):
     tl.store(out_ptr + pid, start)
 
 
-@triton_viz.trace(client=loop_deferred_check_recorder)
+@tilelens.trace(client=loop_deferred_check_recorder)
 @triton.jit
 def loop_deferred_check_kernel(out_ptr):
     for i in range(0, 4):
@@ -258,7 +258,7 @@ def loop_deferred_check_kernel(out_ptr):
         tl.store(out_ptr + idx, idx)
 
 
-@triton_viz.trace(client=load_index_checker)
+@tilelens.trace(client=load_index_checker)
 @triton.jit
 def loop_deferred_check_simplify_kernel(out_ptr):
     pid = tl.program_id(0)
@@ -268,7 +268,7 @@ def loop_deferred_check_simplify_kernel(out_ptr):
         tl.store(out_ptr + idx, idx)
 
 
-@triton_viz.trace(client=sort_pointer_sanitizer)
+@tilelens.trace(client=sort_pointer_sanitizer)
 @triton.jit
 def sort_pointer_oob_kernel(out_ptr, BLOCK: tl.constexpr):
     offs = tl.arange(0, BLOCK)
@@ -276,7 +276,7 @@ def sort_pointer_oob_kernel(out_ptr, BLOCK: tl.constexpr):
     tl.store(out_ptr + sorted_offsets, offs, mask=offs == 0)
 
 
-@triton_viz.trace(client=tuple_pointer_cast_checker)
+@tilelens.trace(client=tuple_pointer_cast_checker)
 @triton.jit
 def pointer_tuple_cast_where_store_kernel(peer_ptrs):
     pid = tl.program_id(0)
@@ -288,7 +288,7 @@ def pointer_tuple_cast_where_store_kernel(peer_ptrs):
     tl.store(selected_ptr + offs, tl.full((1,), 1.0, dtype=tl.float32))
 
 
-@triton_viz.trace(client=tuple_pointer_item_checker)
+@tilelens.trace(client=tuple_pointer_item_checker)
 @triton.jit
 def pointer_tuple_item_select_store_kernel(peer_ptrs, rank_ptr):
     dst_rank = tl.load(rank_ptr)
@@ -440,7 +440,7 @@ def test_tuple_pointer_item_selection_uses_registered_tuple_ranges():
 nested_loop_checker = SymbolicSanitizer()
 
 
-@triton_viz.trace(client=nested_loop_checker)
+@tilelens.trace(client=nested_loop_checker)
 @triton.jit
 def nested_loop_outer_dep_kernel(out_ptr):
     for i in range(0, 3):
@@ -469,7 +469,7 @@ def test_nested_loop_no_false_positive():
 line_number_checker: SymbolicSanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
-@triton_viz.trace(client=line_number_checker)
+@tilelens.trace(client=line_number_checker)
 @triton.jit
 def oob_in_loop_kernel(ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     """Kernel where OOB occurs inside a loop at the tl.load line."""
@@ -534,7 +534,7 @@ def test_gemm_oob_call_stack():
     matches what is documented in docs/index.html:
 
       ━━━ Code Context ━━━
-      File: triton-viz/examples/sanitizer/gemm_oob.py
+      File: tilelens/examples/sanitizer/gemm_oob.py
       Function: gemm_kernel
       Line 25:
         22 │     for k_block in range(K // TILE_SIZE):
@@ -591,7 +591,7 @@ def test_gemm_oob_call_stack():
 block_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
-@triton_viz.trace(client=block_sanitizer)
+@tilelens.trace(client=block_sanitizer)
 @triton.jit
 def block_tensor_1d_load_kernel(ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
@@ -606,7 +606,7 @@ def block_tensor_1d_load_kernel(ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     tl.load(block_ptr, boundary_check=(0,))
 
 
-@triton_viz.trace(client=block_sanitizer)
+@tilelens.trace(client=block_sanitizer)
 @triton.jit
 def block_tensor_1d_load_oob_kernel(ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
@@ -622,7 +622,7 @@ def block_tensor_1d_load_oob_kernel(ptr, N: tl.constexpr, BLOCK_SIZE: tl.constex
     tl.load(block_ptr)
 
 
-@triton_viz.trace(client=block_sanitizer)
+@tilelens.trace(client=block_sanitizer)
 @triton.jit
 def block_tensor_1d_store_kernel(ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
@@ -638,7 +638,7 @@ def block_tensor_1d_store_kernel(ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr)
     tl.store(block_ptr, val, boundary_check=(0,))
 
 
-@triton_viz.trace(client=block_sanitizer)
+@tilelens.trace(client=block_sanitizer)
 @triton.jit
 def block_tensor_1d_store_oob_kernel(ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     pid = tl.program_id(0)
@@ -655,7 +655,7 @@ def block_tensor_1d_store_oob_kernel(ptr, N: tl.constexpr, BLOCK_SIZE: tl.conste
     tl.store(block_ptr, val)
 
 
-@triton_viz.trace(client=block_sanitizer)
+@tilelens.trace(client=block_sanitizer)
 @triton.jit
 def block_tensor_2d_load_kernel(
     ptr,
@@ -677,7 +677,7 @@ def block_tensor_2d_load_kernel(
     tl.load(block_ptr, boundary_check=(0, 1))
 
 
-@triton_viz.trace(client=block_sanitizer)
+@tilelens.trace(client=block_sanitizer)
 @triton.jit
 def block_tensor_2d_load_oob_kernel(
     ptr,
@@ -700,7 +700,7 @@ def block_tensor_2d_load_oob_kernel(
     tl.load(block_ptr)
 
 
-@triton_viz.trace(client=block_sanitizer)
+@tilelens.trace(client=block_sanitizer)
 @triton.jit
 def block_tensor_boundary_check_kernel(ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     """Block extends past tensor end but boundary_check masks it."""
@@ -717,7 +717,7 @@ def block_tensor_boundary_check_kernel(ptr, N: tl.constexpr, BLOCK_SIZE: tl.cons
     tl.load(block_ptr, boundary_check=(0,))
 
 
-@triton_viz.trace(client=block_sanitizer)
+@tilelens.trace(client=block_sanitizer)
 @triton.jit
 def block_tensor_loop_advance_kernel(ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr):
     block_ptr = tl.make_block_ptr(
@@ -733,7 +733,7 @@ def block_tensor_loop_advance_kernel(ptr, N: tl.constexpr, BLOCK_SIZE: tl.conste
         block_ptr = tl.advance(block_ptr, (BLOCK_SIZE,))
 
 
-@triton_viz.trace(client=block_sanitizer)
+@tilelens.trace(client=block_sanitizer)
 @triton.jit
 def block_tensor_loop_advance_oob_kernel(
     ptr, N: tl.constexpr, BLOCK_SIZE: tl.constexpr
@@ -752,7 +752,7 @@ def block_tensor_loop_advance_oob_kernel(
         block_ptr = tl.advance(block_ptr, (BLOCK_SIZE,))
 
 
-@triton_viz.trace(client=block_sanitizer)
+@tilelens.trace(client=block_sanitizer)
 @triton.jit
 def block_tensor_2d_loop_advance_kernel(
     ptr,
@@ -895,7 +895,7 @@ def test_block_tensor_2d_loop_advance_non_oob():
 
 def test_cli_code_context_points_to_kernel():
     """
-    Run a minimal OOB kernel via ``triton-sanitizer`` CLI and verify the
+    Run a minimal OOB kernel via ``tile-sanitizer`` CLI and verify the
     Code Context section points to the actual kernel line, not the CLI
     entry-point wrapper.
     """
@@ -926,7 +926,7 @@ def test_cli_code_context_points_to_kernel():
         tmp_path = tmp.name
 
     try:
-        sanitizer = os.path.join(os.path.dirname(sys.executable), "triton-sanitizer")
+        sanitizer = os.path.join(os.path.dirname(sys.executable), "tile-sanitizer")
         result = subprocess.run(
             [sanitizer, tmp_path],
             capture_output=True,
@@ -952,7 +952,7 @@ def test_cli_code_context_points_to_kernel():
 reduce_indices_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
-@triton_viz.trace(client=reduce_indices_sanitizer)
+@tilelens.trace(client=reduce_indices_sanitizer)
 @triton.jit
 def max_return_indices_kernel(inp_ptr, out_val_ptr, out_idx_ptr, N: tl.constexpr):
     offs = tl.arange(0, N)
@@ -962,7 +962,7 @@ def max_return_indices_kernel(inp_ptr, out_val_ptr, out_idx_ptr, N: tl.constexpr
     tl.store(out_idx_ptr, max_idx)
 
 
-@triton_viz.trace(client=reduce_indices_sanitizer)
+@tilelens.trace(client=reduce_indices_sanitizer)
 @triton.jit
 def min_return_indices_kernel(inp_ptr, out_val_ptr, out_idx_ptr, N: tl.constexpr):
     offs = tl.arange(0, N)
@@ -1009,7 +1009,7 @@ def test_tl_min_return_indices():
 reduce_broadcast_sanitizer = SymbolicSanitizer()
 
 
-@triton_viz.trace(client=reduce_broadcast_sanitizer)
+@tilelens.trace(client=reduce_broadcast_sanitizer)
 @triton.jit
 def reduce_broadcast_kernel(in_ptr, out_ptr, M: tl.constexpr, N: tl.constexpr):
     row = tl.program_id(0) * 1 + tl.arange(0, 1)[:, None]
@@ -1046,7 +1046,7 @@ def test_reduce_broadcast():
 fake_tensor_sanitizer = SymbolicSanitizer(abort_on_error=True)
 
 
-@triton_viz.trace(client=fake_tensor_sanitizer)
+@tilelens.trace(client=fake_tensor_sanitizer)
 @triton.jit
 def fake_tensor_oob_kernel(x_ptr, out_ptr, N: tl.constexpr):
     # Intentionally read out-of-bounds: offset N is beyond the valid range [0, N)
@@ -1064,7 +1064,7 @@ def test_oob_with_fake_tensor(_isolate_virtual_memory):
         fake_tensor_oob_kernel[(1,)](x, out, N=8)
 
 
-@triton_viz.trace(client=SymbolicSanitizer())
+@tilelens.trace(client=SymbolicSanitizer())
 @triton.jit
 def block_ptr_sum_kernel(
     s_ptr,
@@ -1092,7 +1092,7 @@ def test_reduce_symbolic_core_dtype():
     block_ptr_sum_kernel[(1,)](s, z, T=16, S=16, BT=16, BS=16)
 
 
-@triton_viz.trace(client=SymbolicSanitizer())
+@tilelens.trace(client=SymbolicSanitizer())
 @triton.jit
 def softmax_kernel(output_ptr, input_ptr, N, BLOCK: tl.constexpr):
     row = tl.program_id(0)
@@ -1112,7 +1112,7 @@ def test_reduce_symbolic_nonetype():
     softmax_kernel[(4,)](out, x, 64, BLOCK=64)
 
 
-@triton_viz.trace(client=SymbolicSanitizer())
+@tilelens.trace(client=SymbolicSanitizer())
 @triton.jit
 def exp_expand_kernel(x_ptr, out_ptr, N: tl.constexpr):
     offs = tl.arange(0, N)
@@ -1132,7 +1132,7 @@ def test_expand_dims_scalar_attr():
 # ======== Non-contiguous Expanded Tensor Regression Test ===========
 
 
-@triton_viz.trace(client=SymbolicSanitizer())
+@tilelens.trace(client=SymbolicSanitizer())
 @triton.jit
 def read_expanded_kernel(inp, out, stride_row, stride_col, M, N, BLOCK_N: tl.constexpr):
     row = tl.program_id(0)
@@ -1159,7 +1159,7 @@ def test_non_contiguous_expanded_tensor():
 inner_stride1_offset_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
-@triton_viz.trace(client=inner_stride1_offset_sanitizer)
+@tilelens.trace(client=inner_stride1_offset_sanitizer)
 @triton.jit
 def inner_stride1_offset_no_oob_kernel(x_ptr, out_ptr, L: tl.constexpr):
     offs = tl.arange(0, 4)
@@ -1189,7 +1189,7 @@ def test_inner_stride1_nonzero_storage_offset_no_oob():
 cumsum_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
-@triton_viz.trace(client=cumsum_sanitizer)
+@tilelens.trace(client=cumsum_sanitizer)
 @triton.jit
 def cumsum_indexed_store_kernel(active_ptr, out_ptr, BLOCK: tl.constexpr):
     offs = tl.arange(0, BLOCK)
@@ -1212,7 +1212,7 @@ def test_sanitizer_supports_data_dependent_cumsum_index():
 ashr_index_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
-@triton_viz.trace(client=ashr_index_sanitizer)
+@tilelens.trace(client=ashr_index_sanitizer)
 @triton.jit
 def ashr_index_store_kernel(out_ptr, BLOCK: tl.constexpr):
     offs = tl.arange(0, BLOCK)
@@ -1233,7 +1233,7 @@ def test_sanitizer_supports_ashr_in_symbolic_address():
 where_index_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
-@triton_viz.trace(client=where_index_sanitizer)
+@tilelens.trace(client=where_index_sanitizer)
 @triton.jit
 def where_index_store_kernel(out_ptr, BLOCK: tl.constexpr):
     offs = tl.arange(0, BLOCK)
@@ -1254,7 +1254,7 @@ def test_sanitizer_supports_where_in_symbolic_address():
 masked_compaction_index_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
-@triton_viz.trace(client=masked_compaction_index_sanitizer)
+@tilelens.trace(client=masked_compaction_index_sanitizer)
 @triton.jit
 def masked_compaction_index_store_kernel(bitmask_ptr, out_ptr, BLOCK: tl.constexpr):
     offs = tl.arange(0, BLOCK)
@@ -1284,7 +1284,7 @@ def test_sanitizer_materializes_loaded_masked_compaction_store_indices():
 data_dep_div_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
-@triton_viz.trace(client=data_dep_div_sanitizer)
+@tilelens.trace(client=data_dep_div_sanitizer)
 @triton.jit
 def data_dep_loop_div_kernel(Lens, Out, BLOCK: tl.constexpr):
     pid = tl.program_id(0)
@@ -1323,7 +1323,7 @@ def test_data_dependent_loop_bound_div():
 cdiv_loop_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
-@triton_viz.trace(client=cdiv_loop_sanitizer)
+@tilelens.trace(client=cdiv_loop_sanitizer)
 @triton.jit
 def cdiv_loop_bound_kernel(
     X, Out, seqlen, chunk_size, BLOCK_CS: tl.constexpr, BLOCK_N: tl.constexpr
@@ -1368,7 +1368,7 @@ def test_data_dependent_cdiv_loop_bound():
 # ======== TensorWrapper Regression Test ===========
 
 
-@triton_viz.trace(client=SymbolicSanitizer())
+@tilelens.trace(client=SymbolicSanitizer())
 @triton.jit
 def copy_kernel(src, dst, N, BLOCK: tl.constexpr):
     offs = tl.arange(0, BLOCK)
@@ -1383,7 +1383,7 @@ def copy_kernel(src, dst, N, BLOCK: tl.constexpr):
 reduce_dot_sanitizer = SymbolicSanitizer()
 
 
-@triton_viz.trace(client=reduce_dot_sanitizer)
+@tilelens.trace(client=reduce_dot_sanitizer)
 @triton.jit
 def dot_row_max_kernel(
     Q,
@@ -1437,7 +1437,7 @@ def test_reduce_on_dot_result():
     ), f"Expected no OOB records, got {len(reduce_dot_sanitizer.records)}"
 
 
-@triton_viz.trace(client=reduce_dot_sanitizer)
+@tilelens.trace(client=reduce_dot_sanitizer)
 @triton.jit
 def batched_dot_row_max_kernel(
     A,
@@ -1526,7 +1526,7 @@ def test_reinterpret_tensor_wrapper():
 strided_view_sanitizer = SymbolicSanitizer(abort_on_error=False)
 
 
-@triton_viz.trace(client=strided_view_sanitizer)
+@tilelens.trace(client=strided_view_sanitizer)
 @triton.jit
 def strided_view_oob_load_kernel(
     vals_ptr,

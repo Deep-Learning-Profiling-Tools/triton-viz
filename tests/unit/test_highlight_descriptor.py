@@ -1,8 +1,8 @@
 import numpy as np
 import pytest
 
-import triton_viz.visualizer.interface as viz_interface
-from triton_viz.visualizer.interface import (
+import tilelens.visualizer.interface as viz_interface
+from tilelens.visualizer.interface import (
     _build_highlight_descriptor,
     _collect_load_store_program_subsets,
     _coords_from_offsets,

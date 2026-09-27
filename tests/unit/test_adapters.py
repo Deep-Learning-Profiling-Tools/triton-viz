@@ -3,9 +3,9 @@ import numpy as np
 import triton.language as tl
 from triton.runtime.interpreter import TensorHandle
 
-from triton_viz.core.callbacks import OpCallbacks
-from triton_viz.core.client import Client, ClientManager
-from triton_viz.core.data import (
+from tilelens.core.callbacks import OpCallbacks
+from tilelens.core.client import Client, ClientManager
+from tilelens.core.data import (
     AddPtr,
     BinaryOp,
     CastImpl,
@@ -20,9 +20,9 @@ from triton_viz.core.data import (
     UnaryOp,
 )
 
-from triton_viz.core.frontend.base import AdapterResult, get_frontend
-from triton_viz.core.frontend.nki import HAS_NKI
-from triton_viz.core.symbolic_metadata import (
+from tilelens.core.frontend.base import AdapterResult, get_frontend
+from tilelens.core.frontend.nki import HAS_NKI
+from tilelens.core.symbolic_metadata import (
     FLOAT32,
     FLOAT8_E4B8,
     FLOAT8_E5B16,
@@ -33,7 +33,7 @@ from triton_viz.core.symbolic_metadata import (
     pointer_type,
 )
 
-from triton_viz.core.patch import PatchOp
+from tilelens.core.patch import PatchOp
 
 TRITON_FRONTEND = get_frontend("triton")
 TRITON_ADAPTERS = TRITON_FRONTEND.adapters
@@ -184,7 +184,7 @@ def test_program_id_adapter_returns_axis_only():
 def test_gluon_descriptor_memory_adapters_accept_async_signatures():
     load = GLUON_ADAPTERS[Load]
     store = GLUON_ADAPTERS[Store]
-    from triton_viz.core.frontend import gluon as gluon_frontend
+    from tilelens.core.frontend import gluon as gluon_frontend
 
     normal_descriptor_load = gluon_frontend._gluon_descriptor_load_adapter(
         3,
@@ -281,7 +281,7 @@ def test_gluon_descriptor_memory_adapters_accept_async_signatures():
 
 
 def test_gluon_descriptor_load_adapters_honor_positional_predicates():
-    from triton_viz.core.frontend import gluon as gluon_frontend
+    from tilelens.core.frontend import gluon as gluon_frontend
 
     desc = type("TensorDescriptor", (), {"block_shape": (1,)})()
     normal_load = gluon_frontend._gluon_descriptor_load_adapter(
@@ -348,7 +348,7 @@ def test_gluon_load_store_adapters_keep_first_positional_mask():
 
 
 def test_gluon_load_adapter_does_not_treat_pred_as_mask():
-    from triton_viz.core.frontend import gluon as gluon_frontend
+    from tilelens.core.frontend import gluon as gluon_frontend
 
     assert gluon_frontend._gluon_load_adapter("ptr", pred="pred").args == (
         "ptr",
@@ -358,7 +358,7 @@ def test_gluon_load_adapter_does_not_treat_pred_as_mask():
 
 
 def test_gluon_frontend_routes_tensor_descriptor_access_to_overrider(monkeypatch):
-    from triton_viz.core.frontend import gluon as gluon_frontend
+    from tilelens.core.frontend import gluon as gluon_frontend
 
     class FakeTensor:
         dtype = "float32"
@@ -554,7 +554,7 @@ def test_gluon_frontend_wraps_symbolic_concrete_fn():
 
 def test_gluon_language_ops_patch_and_use_simulation_callable():
     from triton.experimental.gluon import language as ttgl
-    from triton_viz.core.simulation import gluon as gluon_sim
+    from tilelens.core.simulation import gluon as gluon_sim
 
     seen_axes = []
     original_program_id = ttgl.program_id
@@ -583,7 +583,7 @@ def test_gluon_language_ops_patch_and_use_simulation_callable():
             return OpCallbacks()
 
         def register_for_loop_callback(self):
-            from triton_viz.core.callbacks import ForLoopCallbacks
+            from tilelens.core.callbacks import ForLoopCallbacks
 
             return ForLoopCallbacks()
 

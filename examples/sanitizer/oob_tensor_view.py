@@ -2,7 +2,7 @@
 
 When a masked ``tl.load`` uses a logical length larger than the view's
 element count, the JIT performs a "wild pointer read" past the underlying
-storage. This example wraps the kernel with the triton-viz sanitizer so the
+storage. This example wraps the kernel with the tilelens sanitizer so the
 OOB access is caught symbolically instead of silently returning OOB memory.
 """
 
@@ -11,10 +11,10 @@ import torch
 import triton
 import triton.language as tl
 
-import triton_viz
+import tilelens
 
 
-@triton_viz.trace("sanitizer")
+@tilelens.trace("sanitizer")
 @triton.jit
 def oob_load_kernel(
     vals_ptr,

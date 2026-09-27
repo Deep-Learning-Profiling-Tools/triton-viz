@@ -1,11 +1,11 @@
 import neuronxcc.nki as nki
 import neuronxcc.nki.language as nl
-from triton_viz.clients import Tracer
-from triton_viz.core.trace import launches
+from tilelens.clients import Tracer
+from tilelens.core.trace import launches
 import math
 import numpy as np
 import torch
-import triton_viz
+import tilelens
 
 
 def nki_rmsnorm_kernel(a_tensor, g_tensor, result):
@@ -77,7 +77,7 @@ def torch_rmsnorm_kernel(a_tensor, g_tensor):
 
 
 def _run_demo():
-    triton_viz_enabled = True
+    tilelens_enabled = True
     kernel_grid = (1, 1, 1)
     b_dim, d_dim = 32, 32
     a_tensor = torch.arange(b_dim * d_dim).float().view(b_dim, d_dim)
@@ -85,9 +85,9 @@ def _run_demo():
     result = torch.empty_like(a_tensor).numpy()
     kernel_args = (a_tensor.numpy(), g_tensor.numpy(), result)
 
-    if triton_viz_enabled:
+    if tilelens_enabled:
         print("Executing kernel with NKI interpreter...")
-        traced_kernel = triton_viz.trace(client=Tracer(), frontend="nki")(
+        traced_kernel = tilelens.trace(client=Tracer(), frontend="nki")(
             nki_rmsnorm_kernel
         )
         kernel_instance = traced_kernel[kernel_grid]
@@ -107,7 +107,7 @@ def _run_demo():
                     print(f"  masks shape: {record.masks.shape}")
 
         try:
-            triton_viz.launch(share=False)
+            tilelens.launch(share=False)
         except Exception as e:
             print(f"\nError during visualization: {e}")
             import traceback

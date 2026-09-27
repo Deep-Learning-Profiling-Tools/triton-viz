@@ -14,10 +14,10 @@ from triton.experimental.gluon.language.nvidia.hopper import (
 )
 from triton.experimental.gluon.nvidia.hopper import TensorDescriptor
 
-import triton_viz
-from triton_viz.clients.sanitizer.sanitizer import SymbolicSanitizer
-from triton_viz.core.data import Load
-from triton_viz.core.simulation.gluon import GluonInterpretedFunction, gluon_builder
+import tilelens
+from tilelens.clients.sanitizer.sanitizer import SymbolicSanitizer
+from tilelens.core.data import Load
+from tilelens.core.simulation.gluon import GluonInterpretedFunction, gluon_builder
 
 try:
     from triton.experimental.gluon.language.amd.cdna4 import (
@@ -795,7 +795,7 @@ def _tensor_memory_roundtrip_kernel(
 
 
 def test_gluon_trace_runs_copy_scalar_kernel():
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_copy_scalar_kernel)
+    kernel = tilelens.trace("tracer", frontend="gluon")(_copy_scalar_kernel)
 
     inp = torch.tensor([42.0])
     out = torch.empty_like(inp)
@@ -808,7 +808,7 @@ def test_gluon_trace_runs_copy_scalar_kernel():
 
 def test_gluon_sanitizer_allows_in_bounds_kernel():
     sanitizer = SymbolicSanitizer(abort_on_error=False)
-    kernel = triton_viz.trace(
+    kernel = tilelens.trace(
         client=sanitizer,
         frontend="gluon",
     )(_copy_scalar_kernel)
@@ -824,7 +824,7 @@ def test_gluon_sanitizer_allows_in_bounds_kernel():
 def test_gluon_sanitizer_reports_real_oob_load_kernel(monkeypatch):
     monkeypatch.setattr(knobs.compilation, "always_compile", True)
     sanitizer = SymbolicSanitizer(abort_on_error=False)
-    kernel = triton_viz.trace(
+    kernel = tilelens.trace(
         client=sanitizer,
         frontend="gluon",
     )(_oob_scalar_offset_kernel)
@@ -845,7 +845,7 @@ def test_gluon_sanitizer_reports_real_oob_load_kernel(monkeypatch):
 
 def test_gluon_sanitizer_allows_masked_in_bounds_kernel():
     sanitizer = SymbolicSanitizer(abort_on_error=False)
-    kernel = triton_viz.trace(
+    kernel = tilelens.trace(
         client=sanitizer,
         frontend="gluon",
     )(_masked_safe_kernel)
@@ -862,7 +862,7 @@ def test_gluon_sanitizer_allows_masked_in_bounds_kernel():
 def test_gluon_core_ops_run_scalar_range_memcpy_on_cpu():
     inp = torch.arange(40, dtype=torch.float32)
     out = torch.full_like(inp, -1)
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_range_memcpy_kernel)
+    kernel = tilelens.trace("tracer", frontend="gluon")(_range_memcpy_kernel)
 
     kernel[(1,)](inp, out, inp.numel(), 64, num_warps=1)
 
@@ -874,7 +874,7 @@ def test_gluon_core_ops_run_masked_1d_memcpy_on_cpu():
     inp = torch.arange(40, dtype=torch.float32)
     out = torch.full_like(inp, -1)
     layout = gl.BlockedLayout([1], [32], [1], [0])
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_masked_1d_memcpy_kernel)
+    kernel = tilelens.trace("tracer", frontend="gluon")(_masked_1d_memcpy_kernel)
 
     kernel[(1,)](inp, out, inp.numel(), 64, layout, num_warps=1)
 
@@ -885,7 +885,7 @@ def test_gluon_core_ops_run_masked_2d_memcpy_on_cpu():
     inp = torch.arange(24, dtype=torch.float32).reshape(4, 6)
     out = torch.full_like(inp, -1)
     layout = gl.BlockedLayout([1, 1], [1, 32], [4, 1], [1, 0])
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_masked_2d_memcpy_kernel)
+    kernel = tilelens.trace("tracer", frontend="gluon")(_masked_2d_memcpy_kernel)
 
     kernel[(1, 1)](
         inp,
@@ -908,7 +908,7 @@ def test_gluon_core_ops_run_converted_layout_elementwise_add_on_cpu():
     out = torch.full_like(a, -1)
     layout_in = gl.BlockedLayout([1, 1], [1, 32], [1, 4], [1, 0])
     layout_out = gl.BlockedLayout([1, 1], [1, 32], [4, 1], [1, 0])
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_converted_layout_add_kernel)
+    kernel = tilelens.trace("tracer", frontend="gluon")(_converted_layout_add_kernel)
 
     kernel[(1,)](
         a,
@@ -935,7 +935,7 @@ def test_gluon_core_ops_run_converted_layout_elementwise_add_on_cpu():
 def test_gluon_async_copy_runs_masked_1d_copy_on_cpu():
     inp = torch.arange(40, dtype=torch.float32)
     out = torch.full_like(inp, -1)
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_async_copy_1d_kernel)
+    kernel = tilelens.trace("tracer", frontend="gluon")(_async_copy_1d_kernel)
 
     kernel[(1,)](inp, out, inp.numel(), 64, num_warps=4)
 
@@ -949,7 +949,7 @@ def test_gluon_async_copy_runs_masked_1d_copy_on_cpu():
 def test_gluon_amd_async_copy_preserves_masked_other_on_cpu():
     inp = torch.arange(40, dtype=torch.float32)
     out = torch.full((64,), -1, dtype=torch.float32)
-    kernel = triton_viz.trace("tracer", frontend="gluon")(_amd_async_copy_other_kernel)
+    kernel = tilelens.trace("tracer", frontend="gluon")(_amd_async_copy_other_kernel)
 
     kernel[(1,)](inp, out, inp.numel(), out.numel(), num_warps=4)
 
@@ -966,7 +966,7 @@ def test_gluon_async_copy_runs_staged_elementwise_add_on_cpu():
     b = 10 + a
     out = torch.full_like(a, -1)
     smem_layout = gl.SwizzledSharedLayout(vec=1, per_phase=1, max_phase=1, order=[1, 0])
-    kernel = triton_viz.trace("tracer", frontend="gluon")(
+    kernel = tilelens.trace("tracer", frontend="gluon")(
         _async_copy_elementwise_add_kernel
     )
 

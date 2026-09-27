@@ -1,7 +1,7 @@
 import assert from 'node:assert/strict';
 import { test } from 'node:test';
-import { createFlowDiagram } from '../../triton_viz/static/ops/nki.js';
-import { getHue } from '../../triton_viz/static/utils/colormap.js';
+import { createFlowDiagram } from '../../tilelens/static/ops/nki.js';
+import { getHue } from '../../tilelens/static/utils/colormap.js';
 
 function createCanvasContext(logs) {
     return {
