@@ -1,0 +1,43 @@
+module {
+  tt.func public @k(%p: !tt.ptr<f32>, %n: i32) attributes {noinline = false} {
+    %c0 = arith.constant 0 : i32
+    %c1 = arith.constant 1 : i32
+    %r = tt.make_range {end = 64 : i32, start = 0 : i32} : tensor<64xi32>
+    %v = arith.sitofp %r : tensor<64xi32> to tensor<64xf32>
+    %s:2 = "tt.reduce"(%v, %r) <{axis = 0 : i32}> ({
+    ^bb0(%a: f32, %ai: i32, %b: f32, %bi: i32):
+      %gt = arith.cmpf ogt, %a, %b : f32
+      %o:2 = scf.if %gt -> (f32, i32) {
+        %acc = scf.for %i = %c0 to %n step %c1 iter_args(%t = %a) -> (f32) : i32 {
+          %lt = arith.cmpi slt, %i, %ai : i32
+          %u = scf.if %lt -> (f32) {
+            %w = arith.addf %t, %b : f32
+            scf.yield %w : f32
+          } else {
+            scf.yield %t : f32
+          }
+          scf.yield %u : f32
+        }
+        scf.yield %acc, %ai : f32, i32
+      } else {
+        scf.yield %b, %bi : f32, i32
+      }
+      tt.reduce.return %o#0, %o#1 : f32, i32
+    }) : (tensor<64xf32>, tensor<64xi32>) -> (f32, i32)
+    %z = scf.for %i = %c0 to %n step %c1 iter_args(%t = %c0) -> (i32) : i32 {
+      %wr = scf.while (%x = %t) : (i32) -> i32 {
+        %c = arith.cmpi slt, %x, %n : i32
+        scf.condition(%c) %x : i32
+      } do {
+      ^bb0(%y: i32):
+        %y1 = arith.addi %y, %c1 : i32
+        scf.yield %y1 : i32
+      }
+      scf.yield %wr : i32
+    }
+    %q = tt.addptr %p, %s#1 : !tt.ptr<f32>, i32
+    %q2 = tt.addptr %q, %z : !tt.ptr<f32>, i32
+    tt.store %q2, %s#0 : !tt.ptr<f32>
+    tt.return
+  }
+}

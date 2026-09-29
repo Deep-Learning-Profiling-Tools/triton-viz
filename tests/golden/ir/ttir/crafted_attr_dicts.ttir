@@ -1,0 +1,18 @@
+module {
+  tt.func public @k(%p: !tt.ptr<i32>) attributes {noinline = false} {
+    %c = arith.constant {tt.divisibility = dense<16> : tensor<1xi32>} 16 : i32
+    %d = arith.constant {axis = 5 : i32} -3 : i32
+    %r = tt.make_range {end = 64 : i32, start = 0 : i32} : tensor<64xi32>
+    %s = "tt.reduce"(%r) <{axis = 0 : i32}> ({
+    ^bb0(%a: i32, %b: i32):
+      %t = arith.addi %a, %b : i32
+      tt.reduce.return %t : i32
+    }) {tt.divisibility = dense<16> : tensor<1xi32>, axis_note = 3 : i32} : (tensor<64xi32>) -> i32
+    %e = tt.expand_dims %r {axis = 0 : i32, tt.note = "axis = 1"} : tensor<64xi32> -> tensor<1x64xi32>
+    %q = tt.addptr %p, %s : !tt.ptr<i32>, i32
+    %q2 = tt.addptr %q, %c : !tt.ptr<i32>, i32
+    %q3 = tt.addptr %q2, %d : !tt.ptr<i32>, i32
+    tt.store %q3, %s : !tt.ptr<i32>
+    tt.return
+  }
+}

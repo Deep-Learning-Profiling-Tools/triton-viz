@@ -1,0 +1,12 @@
+module {
+  tt.func public @k(%p: !tt.ptr<i32>, %n: i32) attributes {noinline = false} {
+    cf.br ^bb2
+  ^bb1:
+    %q = tt.addptr %p, %x : !tt.ptr<i32>, i32
+    tt.store %q, %x : !tt.ptr<i32>
+    tt.return
+  ^bb2:
+    %x = arith.addi %n, %n : i32
+    cf.br ^bb1
+  }
+}

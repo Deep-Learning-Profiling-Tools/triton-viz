@@ -1,0 +1,10 @@
+module {
+  tt.func public @k(%p: !tt.ptr<i32>, %c: i1) attributes {noinline = false} {
+    %c0 = arith.constant 0 : i32
+    scf.if %c {
+      tt.store %p, %c0 : !tt.ptr<i32>
+    } else {
+    }
+    tt.return
+  }
+}

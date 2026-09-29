@@ -1,0 +1,5 @@
+[codespell]
+# Fixed vocabulary, not typos: `olt` is an MLIR arith.cmpf predicate (ordered
+# less-than), `aranges` is the plural of tl.arange, `lits` names the walk
+# layer's string-literal spans (tilelens/ir/_mlir_walk.py).
+ignore-words-list = aranges,lits,olt

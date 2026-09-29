@@ -1,17 +1,73 @@
-from copy import deepcopy
+import copy
+import inspect
+from contextlib import contextmanager
 from collections.abc import Callable
+from types import MappingProxyType
 from typing import Any
 from ..utils.traceback_utils import CODE_KEYS, get_code_key
 
-from .config import config as cfg
+from .config import config as cfg, untested_triton_version
 from ..clients import Sanitizer, Profiler, RaceDetector, Tracer
 from ..clients.race_detector.race_detector import NullRaceDetector
-from .client import ClientManager, Client
+from .client import ClientManager, Client, LaunchCall, LanguagePatchedError
 from .data import Launch
 import types
 
 
 launches: list[Launch] = []
+
+
+def _without_warmup(kwargs: dict[str, Any]) -> dict[str, Any]:
+    # Launch kwargs carry warmup=False; the warmup entry points set their own.
+    return {k: v for k, v in kwargs.items() if k != "warmup"}
+
+
+def _launch_call(
+    jit_fn: Any, args: tuple, kwargs: dict[str, Any], *, capture: bool
+) -> LaunchCall:
+    return LaunchCall(
+        jit_fn=jit_fn,
+        args=tuple(args),
+        kwargs=MappingProxyType(
+            {k: v for k, v in kwargs.items() if k not in ("grid", "warmup")}
+        ),
+        grid=kwargs.get("grid"),
+        capture=capture,
+    )
+
+
+def _rebind_closure(fn: Any, old: Any, new: Any) -> Any:
+    """Return ``fn`` with the closure cells that hold ``old`` pointing at ``new``."""
+    closure = getattr(fn, "__closure__", None)
+    if not closure:
+        return fn
+    cells = []
+    for cell in closure:
+        try:
+            value = cell.cell_contents
+        except ValueError:  # empty cell
+            value = None
+        cells.append(types.CellType(new) if value is old else cell)
+    if all(a is b for a, b in zip(cells, closure)):
+        return fn
+    rebound = types.FunctionType(
+        fn.__code__, fn.__globals__, fn.__name__, fn.__defaults__, tuple(cells)
+    )
+    rebound.__kwdefaults__ = fn.__kwdefaults__
+    return rebound
+
+
+def _refers_to(fn: Any, obj: Any) -> bool:
+    """Whether ``fn`` is bound to ``obj`` or holds it in a closure cell."""
+    if getattr(fn, "__self__", None) is obj:
+        return True
+    for cell in getattr(fn, "__closure__", None) or ():
+        try:
+            if cell.cell_contents is obj:
+                return True
+        except ValueError:  # empty cell
+            pass
+    return False
 
 
 class TraceInterface:
@@ -41,8 +97,31 @@ class TraceInterface:
         self.client_manager.add_clients([self._normalize_client(new_client)])
 
     def finalize(self):
+        # Take the Launch first: once finalize ends the launch, another host
+        # thread may begin the next one on this manager.
+        launch = self.client_manager.launch
         self.client_manager.finalize()
-        launches.append(self.client_manager.launch)
+        launches.append(launch)
+
+    @contextmanager
+    def _launch_scope(self, call: LaunchCall):
+        """begin_launch, then abort_launch if the launch raises. A refused or
+        failing begin_launch cleans up after itself and is not aborted: the
+        refusal must not reach the clients of another thread's launch."""
+        mgr = self.client_manager
+        mgr.begin_launch(call)
+        try:
+            yield
+        except BaseException as exc:
+            mgr.abort_launch(exc)
+            raise
+
+    def _interpreter_wanted(self) -> bool:
+        # With no compiled kernel to launch, the interpreted run stands in for
+        # the launch if an interpreting client needs it or no IR client asked
+        # to skip the launch.
+        mgr = self.client_manager
+        return bool(mgr.interpreting_clients()) or mgr.launch_policy() == "run"
 
 
 class LaunchInterface:
@@ -84,24 +163,137 @@ class KernelTraceSupport:
         return (1.0, 1.0, 1.0)
 
     def _interpreter_runner(self, runner: Any, interpreted_fn: Any) -> Any:
-        if self._is_autotuner(runner):
-            runner.fn = interpreted_fn
-            # Kernel Cache: replace the benchmark with a dummy to skip performance testing.
-            runner._do_bench = self.dummy_benchmarker
-            return runner
-        if self._is_heuristics(runner):
-            runner.fn = interpreted_fn
-            return runner
-        return interpreted_fn
+        return self._rebuild_runner(runner, interpreted_fn, interpreted=True)
 
     def _warmup_runner(self, runner: Any, jit_fn: Any | None) -> Any | None:
-        if not (self._is_autotuner(runner) or self._is_heuristics(runner)):
-            return jit_fn
         if jit_fn is None:
             return None
-        warmup_runner = deepcopy(runner)
-        warmup_runner.fn = jit_fn
-        return warmup_runner
+        return self._rebuild_runner(runner, jit_fn, interpreted=False)
+
+    def _ir_runner(self, runner: Any, jit_fn: Any | None) -> Any | None:
+        if jit_fn is None:
+            return None
+        return self._rebuild_runner(runner, _IRLeaf(jit_fn), interpreted=False, ir=True)
+
+    def _autotuned(self, runner: Any) -> bool:
+        """Whether an Autotuner layer sits anywhere in ``runner``'s chain."""
+        while self._is_autotuner(runner) or self._is_heuristics(runner):
+            if self._is_autotuner(runner):
+                return True
+            runner = runner.fn
+        return False
+
+    def _drop_autotuner_args(self, runner: Any) -> None:
+        """Clear the per-call tensors Autotuner layers in ``runner``'s chain
+        of copies may still hold: ``nargs`` and ``restore_copies``.
+
+        Autotuner.run and .warmup keep the call's arguments in ``nargs``
+        until they return, and a benchmark call keeps its restore_value
+        clones in ``restore_copies`` until its post_hook, which _bench skips
+        for a KeyboardInterrupt. So a launch that raises would leave the
+        caller's tensors, or device clones of them, on a copy that outlives
+        the launch (D23).
+        """
+        while self._is_autotuner(runner) or self._is_heuristics(runner):
+            if self._is_autotuner(runner):
+                runner.nargs = None
+                if hasattr(runner, "restore_copies"):
+                    runner.restore_copies = {}
+            runner = runner.fn
+
+    def _rebuild_runner(
+        self, runner: Any, leaf: Any, *, interpreted: bool, ir: bool = False
+    ) -> Any:
+        """Rebuild the Autotuner/Heuristics chain of ``runner`` on top of ``leaf``.
+
+        Every layer is shallow-copied down to the kernel, which ``leaf``
+        replaces, so the user's runner is never mutated. No deepcopy: a real
+        JITFunction holds an RLock. A nested trace is looked through so the
+        layers it wraps are kept. ``ir``: the chain whose warmup stands in
+        for the launch's autotuning (the IR clients' compiles).
+        """
+        if isinstance(runner, (TritonTrace, GluonTrace)):
+            runner = runner.fn
+        if not (self._is_autotuner(runner) or self._is_heuristics(runner)):
+            return leaf
+        layer = copy.copy(runner)
+        layer.fn = self._rebuild_runner(runner.fn, leaf, interpreted=interpreted, ir=ir)
+        if self._is_autotuner(layer):
+            self._isolate_autotuner(runner, layer, interpreted=interpreted)
+            if ir:
+                layer.prune_configs = self._refusing_conflicts(layer)
+        elif not interpreted:
+            layer.warmup = self._heuristics_warmup(layer)
+        return layer
+
+    @staticmethod
+    def _refusing_conflicts(layer: Any) -> Callable:
+        # The launch's autotuning benchmarks each pruned config first, and
+        # Autotuner._bench refuses a call that passes one of the config's
+        # meta-parameters itself, with this ValueError (as Triton 3.6 and 3.8
+        # word it). Autotuner.warmup, through which the IR clients' compiles
+        # go instead, would pass the keyword twice (a TypeError naming the
+        # IR leaf), so the IR chain's copy checks the pruned configs first.
+        prune = layer.prune_configs
+
+        def prune_configs(kwargs):
+            pruned = prune(kwargs)
+            for config in pruned:
+                conflicts = kwargs.keys() & config.kwargs.keys()
+                if conflicts:
+                    raise ValueError(
+                        f"Conflicting meta-parameters: {', '.join(conflicts)}."
+                        " Make sure that you don't re-define auto-tuned symbols."
+                    )
+            return pruned
+
+        return prune_configs
+
+    def _isolate_autotuner(
+        self, original: Any, layer: Any, *, interpreted: bool
+    ) -> None:
+        # Per-run state written by Autotuner.run/_bench/warmup lives on the
+        # copy, so a trace never changes what the user's autotuner picks.
+        layer.cache = {}
+        layer.nargs = None
+        # A disk-cache hit would skip benchmarking (hiding configs from IR
+        # clients), and interpreter timings must never be persisted.
+        layer.cache_results = False
+        # Triton's own reset_to_zero/restore_value hooks close over the
+        # Autotuner they were built for; point them at the copy. A hook still
+        # tied to the original afterwards would write its state onto the
+        # user's autotuner, so refuse instead.
+        for name in ("pre_hook", "post_hook"):
+            if getattr(layer, f"user_defined_{name}", False):
+                continue
+            hook = _rebind_closure(getattr(layer, name), original, layer)
+            if _refers_to(hook, original):
+                raise RuntimeError(
+                    f"cannot trace {original!r}: Triton's default Autotuner "
+                    f"{name} no longer closes over the Autotuner as in Triton "
+                    "3.6 and 3.8, so the traced copy could not be isolated from "
+                    "it (untested Triton version)"
+                )
+            setattr(layer, name, hook)
+        if interpreted:
+            # Kernel Cache: replace the benchmark with a dummy to skip performance testing.
+            layer._do_bench = self.dummy_benchmarker
+            # do_bench is a cached_property; drop a value the original cached.
+            layer.__dict__.pop("do_bench", None)
+
+    @staticmethod
+    def _heuristics_warmup(layer: Any) -> Callable:
+        # Heuristics inherits KernelInterface.warmup, which calls
+        # run(warmup=True) and so bypasses fn.warmup, where patch_warmup
+        # collects the warmup votes. Warm up like Autotuner.warmup does
+        # instead: fill in the heuristic kwargs as Heuristics.run does, then
+        # call fn.warmup.
+        def warmup(*args, **kwargs):
+            for name, heur in layer.values.items():
+                kwargs[name] = heur({**dict(zip(layer.arg_names, args)), **kwargs})
+            return layer.fn.warmup(*args, **kwargs)
+
+        return warmup
 
     def _copy_callable_attrs(
         self,
@@ -161,7 +353,11 @@ class TritonTrace(LaunchInterface, TraceInterface, KernelTraceSupport):
         else:
             self.jit_fn, self.base_fn, self.interpreted_fn = unpack_kernel(runner)
         self.runner = self._interpreter_runner(runner, self.interpreted_fn)
+        # The real chain for the interpreted launches' warmup votes, and one
+        # for IR compiles (on the host, D25) and real launches, whose
+        # compiles no warmup patch gates.
         self.warmup_runner = self._warmup_runner(runner, self.jit_fn)
+        self.ir_runner = self._ir_runner(runner, self.jit_fn)
 
         self.arg_names = runner.arg_names
 
@@ -172,40 +368,356 @@ class TritonTrace(LaunchInterface, TraceInterface, KernelTraceSupport):
         self._copy_callable_attrs(runner, self.base_fn, src_fallback=self.jit_fn)
 
     def run(self, *args, **kwargs):
-        with self.client_manager.patch_warmup(self.jit_fn):
-            if self.warmup_runner:
-                self.warmup_runner.warmup(*args, **kwargs)
+        mgr = self.client_manager
+        has_ir = bool(mgr.ir_clients())
+        # IR mode runs only on a tested Triton release (D10b).
+        capture = (
+            has_ir and self.jit_fn is not None and untested_triton_version() is None
+        )
+        call = _launch_call(self.jit_fn, args, kwargs, capture=capture)
+        with self._launch_scope(call):
+            if not has_ir:
+                return self._run_interpreted(*args, **kwargs)
+            if not capture:
+                # No compiled kernel for the IR clients (call.capture is
+                # False): TRITON_INTERPRET / an InterpretedFunction runner
+                # (no JITFunction), or an untested Triton release. Nothing
+                # binds the call either (D28 holds where IR mode runs): the
+                # JIT's binder is private API the release gate keeps off an
+                # untested release, reached only through the autotune layers
+                # that add the configs' arguments, so a call that does not
+                # bind returns None like any other launch here.
+                if self._interpreter_wanted():
+                    return self._run_interpreted(*args, **kwargs)
+                self.finalize()
+                return None
+            if mgr.interpreting_clients():
+                # Mixed trace (D4b): host-compile every config for the IR
+                # clients, then the interpreter produces the outputs (no real
+                # launch, no device). An IR-side compile failure is data for
+                # the IR clients and never stops the eager peers. A call that
+                # does not bind the kernel's parameters raises here, as in an
+                # IR-only trace (D28), before the interpreter runs: the
+                # interpreted run would fail on the same call (with Python's
+                # own TypeError for the kernel function), and the error
+                # raised is the one the untraced JIT raises.
+                self._compile_for_ir(args, kwargs)
+                return self._run_interpreted(*args, **kwargs)
+            ret = self._run_compiled(*args, **kwargs)
+            self.finalize()
+            return ret
+
+    def _real_compile_window(self):
+        return _unwrapped_trace_globals(self.base_fn)
+
+    def _compile_for_ir(self, args, kwargs):
+        """Compile every (pruned) config through the IR runner's warmup; the
+        capture host-compiles each call for every IR target (D25) and turns
+        it into an IR event, or a compile_failed event, without launching or
+        touching a device. Returns the warmup result and the capture window:
+        for a plain or @heuristics kernel the host-compiled kernel of the
+        first IR target (None if it failed to compile).
+
+        A config that fails to compile never fails the launch (D27), not
+        even when no config compiled: the failure is the IR target's, which
+        the IR client chose, and the IR clients get it through
+        compile_failed. A call that does not bind the kernel's parameters
+        is no compile failure: it raises the JIT binder's error, as the
+        untraced call does (D28, see ClientManager.ir_capture).
+        """
+        runner = self.ir_runner
+        assert runner is not None  # built whenever jit_fn is set
+        try:
+            with (
+                self._real_compile_window(),
+                self.client_manager.ir_capture(
+                    self.jit_fn, compile_only=True, real_args=_untraced_call_args
+                ) as window,
+            ):
+                ret = runner.warmup(*args, **_without_warmup(kwargs))
+        finally:
+            self._drop_autotuner_args(runner)
+        return ret, window
+
+    def _run_compiled(self, *args, **kwargs):
+        """IR-only trace: no interpreter. Every config is compiled for the IR
+        clients first, so what they see never depends on the autotune cache
+        or on benchmark timing (D3); the real launch follows unless an IR
+        client declared LAUNCH="skip".
+
+        A skipped launch returns what it can of the untraced return value:
+        the host-compiled kernel when no Autotuner is involved (its only
+        config; never loaded, it cannot launch; None if it failed to
+        compile), None for an autotuned kernel (no config was picked).
+        Nothing of a skipped launch needs a GPU. A config that failed to
+        compile for the IR target fails neither kind of launch (D27): the IR
+        clients get it through compile_failed, and a real launch ("run")
+        compiles its own kernel for the device, which decides as it would
+        untraced. Only a compile refused while an interpreted traced launch
+        has the language patched (LanguagePatchedError, no compile's
+        outcome: concurrent traced launches that mix interpretation and
+        real compiles are unsupported) fails the launch, and a call that
+        does not bind the kernel's parameters, which raises the JIT
+        binder's error as the untraced call does (D28).
+
+        The compiles are host compiles and never enter JITFunction.run, so
+        the user's pre_run_hooks fire only for real launches (under "run"):
+        once per real call, as untraced, benchmark calls included. Only the
+        real launch needs a device; it compiles its own kernel through the
+        JIT.
+        """
+        ret, window = self._compile_for_ir(args, kwargs)
+        refused = [e for e in window.failures if isinstance(e, LanguagePatchedError)]
+        if refused:
+            raise refused[0]
+        if self.client_manager.launch_policy() == "skip":
+            return None if self._autotuned(self.ir_runner) else ret
+        try:
+            with (
+                self._real_compile_window(),
+                self.client_manager.ir_capture(
+                    self.jit_fn, real_args=_untraced_call_args
+                ),
+            ):
+                return self.ir_runner.run(*args, **kwargs)
+        finally:
+            self._drop_autotuner_args(self.ir_runner)
+
+    def _run_interpreted(self, *args, **kwargs):
+        self._voted_warmup(*args, **kwargs)
 
         with self.client_manager.patch_run(self.base_fn, frontend_name="triton"):
             kwargs.update({"client_manager": self.client_manager})
             kwargs.update({"jit_fn": self.jit_fn})
-            ret = self.runner.run(*args, **kwargs)
+            try:
+                ret = self.runner.run(*args, **kwargs)
+            finally:
+                self._drop_autotuner_args(self.runner)
             self.finalize()
             return ret
 
     def __call__(self, *args, **kwargs):
-        # When a traced JIT function is called from within another JIT function,
-        # we need to execute the underlying function directly
-
-        # check that client sets match for calling and called functions
+        # A traced JIT function called from inside a traced kernel's
+        # interpreted run executes its interpreted function directly.
         from .frontend import triton as triton_frontend
 
         outer_client_manager = triton_frontend.frontend.current_client_manager()
-        if outer_client_manager is not None:
-            outer_clients = set(outer_client_manager.clients)
-            inner_clients = set(self.client_manager.clients)
-            if outer_clients != inner_clients:
-                raise RuntimeError(
-                    "nested traced calls require matching clients; "
-                    f"outer={outer_clients}, inner={inner_clients}"
-                )
+        if outer_client_manager is None:
+            # Outside an interpreted launch this is a real compile that
+            # reached the trace as a plain Python callable, through a path
+            # _untraced_call_args does not map. Running the interpreter here
+            # would patch triton.language for every later compile.
+            raise TypeError(
+                f"{self.__name__} is a tilelens-traced Triton function called "
+                "outside a traced launch's interpreter, e.g. by a real compile "
+                "that reached it through an argument; pass its JITFunction "
+                f"({self.__name__}.jit_fn) there instead."
+            )
+        # Only interpreting clients take part in the interpreted run (D4b).
+        outer_clients = {c.NAME for c in outer_client_manager.interpreting_clients()}
+        inner_clients = {c.NAME for c in self.client_manager.interpreting_clients()}
+        if outer_clients != inner_clients:
+            raise RuntimeError(
+                "nested traced calls require matching clients; "
+                f"outer={outer_clients}, inner={inner_clients}"
+            )
 
         return self.interpreted_fn(*args, **kwargs)
 
     def warmup(self, *args, **kwargs):
-        with self.client_manager.patch_warmup(self.jit_fn):
-            if self.warmup_runner:
-                self.warmup_runner.warmup(*args, **kwargs)
+        return self._voted_warmup(*args, **kwargs)
+
+    def _voted_warmup(self, *args, **kwargs):
+        # The pre/post_warmup vote: a real compile only if some client asks.
+        if not self.warmup_runner:
+            return None
+        with self.client_manager.patch_warmup(
+            self.jit_fn,
+            compile_context=self._real_compile_window,
+            real_args=_untraced_call_args,
+        ):
+            try:
+                return self.warmup_runner.warmup(*args, **_without_warmup(kwargs))
+            finally:
+                self._drop_autotuner_args(self.warmup_runner)
+
+
+class _IRLeaf:
+    """The traced JITFunction at the bottom of the IR runner chain.
+
+    Its warmup is the JITFunction class's, so no instance-level warmup patch
+    (patch_warmup's vote gate, or anyone else's) decides whether an IR
+    config compiles; everything else, ``run`` (where ir_capture sits, and
+    host-compiles instead of entering JITFunction.run) included, is the
+    JITFunction instance's. Its ``fn`` is the JITFunction too: Triton's
+    Autotuner follows ``.fn`` from its own down to the JITFunction it
+    tunes (its disk cache key; ``knobs.autotuning.listener``, which
+    Triton 3.8 calls from a real launch's autotuning).
+    """
+
+    def __init__(self, jit_fn: Any) -> None:
+        self.jit_fn = jit_fn
+
+    @property
+    def fn(self) -> Any:
+        return self.jit_fn
+
+    def warmup(self, *args, **kwargs):
+        return type(self.jit_fn).warmup(self.jit_fn, *args, **kwargs)
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "jit_fn":  # not set yet (e.g. mid-copy): no recursion
+            raise AttributeError(name)
+        return getattr(self.jit_fn, name)
+
+
+def _untraced_call_args(
+    jit_fn: Any, args: tuple, kwargs: dict[str, Any]
+) -> tuple[tuple, dict[str, Any]]:
+    """One JITFunction.run / warmup call's arguments as a compile (on the
+    host or the device) must see them: each TritonTrace passed as an
+    argument (also inside a tuple), or bound as a parameter default,
+    replaced by its JITFunction (the default passed explicitly). Triton's code generator treats any other callee as
+    plain Python and would call TritonTrace.__call__.
+    """
+
+    def real(value: Any) -> Any:
+        if isinstance(value, TritonTrace) and value.jit_fn is not None:
+            return value.jit_fn
+        if isinstance(value, tuple):
+            items = [real(item) for item in value]
+            if all(new is old for new, old in zip(items, value)):
+                return value
+            # A namedtuple is rebuilt from fields, a plain tuple from items.
+            return type(value)(*items) if hasattr(value, "_fields") else tuple(items)
+        return value
+
+    real_args = tuple(real(arg) for arg in args)
+    real_kwargs = {name: real(value) for name, value in kwargs.items()}
+    signature = getattr(jit_fn, "signature", None)
+    if isinstance(signature, inspect.Signature):
+        for index, (name, param) in enumerate(signature.parameters.items()):
+            if index < len(real_args) or name in real_kwargs:
+                continue
+            if real(param.default) is not param.default:
+                real_kwargs[name] = real(param.default)
+    return real_args, real_kwargs
+
+
+def _code_names(code: types.CodeType) -> set[str]:
+    names = set(code.co_names)
+    for const in code.co_consts:
+        if isinstance(const, types.CodeType):
+            names |= _code_names(const)
+    return names
+
+
+def _is_triton_internal(value: Any) -> bool:
+    # Triton's own modules and stdlib functions hold no user traces.
+    module: Any = getattr(value, "__module__", None)
+    if isinstance(value, types.ModuleType):
+        module = value.__name__
+    return isinstance(module, str) and module.split(".")[0] == "triton"
+
+
+def _traced_references(
+    base_fn: Callable | None,
+) -> list[tuple[dict, str, "TritonTrace"]]:
+    """Every (namespace, name, trace) binding a real compile of ``base_fn``
+    resolves to a TritonTrace.
+
+    Triton resolves a callee from the caller's globals and then through
+    module attributes (``helpers.fn``, ``pkg.api.fn``). The walk follows the
+    same paths, filtered by the names each function's code mentions
+    (co_names), and continues into every referenced JIT function's own code,
+    so helpers of helpers are found and unrelated bindings are left alone.
+    Triton also resolves parameter default expressions in the globals; their
+    names are not in co_names, so a global bound to a traced default counts
+    too.
+    """
+    from triton import JITFunction
+
+    found: list[tuple[dict, str, TritonTrace]] = []
+    bindings: set[tuple[int, str]] = set()
+    visited_fns: set[int] = set()
+    pending: list[Any] = [base_fn]
+    while pending:
+        fn = pending.pop()
+        code = getattr(fn, "__code__", None)
+        fn_globals = getattr(fn, "__globals__", None)
+        if not isinstance(code, types.CodeType) or not isinstance(fn_globals, dict):
+            continue
+        if id(fn) in visited_fns:
+            continue
+        visited_fns.add(id(fn))
+        names = _code_names(code)
+        traced_defaults = [
+            d
+            for d in getattr(fn, "__defaults__", None) or ()
+            if isinstance(d, TritonTrace)
+        ]
+        if traced_defaults:
+            names |= {
+                name
+                for name, value in fn_globals.items()
+                if any(value is default for default in traced_defaults)
+            }
+        namespaces = [fn_globals]
+        visited_namespaces = {id(fn_globals)}
+        while namespaces:
+            namespace = namespaces.pop()
+            for name in names:
+                value = namespace.get(name)
+                if isinstance(value, TritonTrace):
+                    if (
+                        value.jit_fn is not None
+                        and (id(namespace), name) not in bindings
+                    ):
+                        bindings.add((id(namespace), name))
+                        found.append((namespace, name, value))
+                    pending.append(value.base_fn)
+                elif isinstance(value, JITFunction) and not _is_triton_internal(value):
+                    pending.append(value.fn)
+                elif isinstance(value, types.ModuleType) and not _is_triton_internal(
+                    value
+                ):
+                    module_dict = getattr(value, "__dict__", None)
+                    if (
+                        isinstance(module_dict, dict)
+                        and id(module_dict) not in visited_namespaces
+                    ):
+                        visited_namespaces.add(id(module_dict))
+                        namespaces.append(module_dict)
+    return found
+
+
+@contextmanager
+def _unwrapped_trace_globals(base_fn: Callable | None = None):
+    """Temporarily bind each TritonTrace a real compile of ``base_fn`` would
+    reach back to its JITFunction.
+
+    Under the CLI wrappers every ``@triton.jit`` function, device functions
+    included, becomes a TritonTrace. Triton's dependency walker and code
+    generator only accept JITCallables as callees ("Unsupported function
+    referenced"); the interpreter tolerates the wrapper through
+    ``TritonTrace.__call__``, a real compile does not. Only the bindings the
+    kernel's code can reach are swapped (see _traced_references), and each is
+    restored on exit unless it was rebound in the meantime. Callees reached
+    through closure variables are not covered (Triton's dependency walker
+    rejects them); callees passed as arguments are mapped per call instead
+    (_untraced_call_args).
+    """
+    swapped: list[tuple[dict, str, TritonTrace]] = []
+    try:
+        for namespace, name, trace in _traced_references(base_fn):
+            if namespace.get(name) is trace:
+                namespace[name] = trace.jit_fn
+                swapped.append((namespace, name, trace))
+        yield
+    finally:
+        for namespace, name, trace in reversed(swapped):
+            if namespace.get(name) is trace.jit_fn:
+                namespace[name] = trace
 
 
 class NKITrace(LaunchInterface, TraceInterface):
@@ -273,23 +785,29 @@ class NKITrace(LaunchInterface, TraceInterface):
             if you want full python flexibility inside kernels (e.g. importing modules inside a kernel).
             Does nothing if self.frontend_name == 'nki'.
         """
-        if self.frontend_name == "nki_beta2" and pre_trace:
-            import nki
+        with self._launch_scope(_launch_call(None, args, kwargs, capture=False)):
+            if not self._interpreter_wanted():
+                # Only IR clients, and one asked to skip the launch: there is
+                # no compiled kernel here, so nothing runs.
+                self.finalize()
+                return None
+            if self.frontend_name == "nki_beta2" and pre_trace:
+                import nki
 
-            kwargs.pop("warmup", None)
-            grid = kwargs.pop("grid", None)
-            nki.trace(self.func, grid=grid, platform_target=platform_target).specialize(
-                *args, **kwargs
-            )
-            kwargs["grid"] = grid
-        with self.client_manager.patch_run(
-            self.func,
-            frontend_name=self.frontend_name,
-        ):
-            kwargs.update({"client_manager": self.client_manager})
-            ret = self.interpreter_fn.run(*args, **kwargs)
-            self.finalize()
-            return ret
+                kwargs.pop("warmup", None)
+                grid = kwargs.pop("grid", None)
+                nki.trace(
+                    self.func, grid=grid, platform_target=platform_target
+                ).specialize(*args, **kwargs)
+                kwargs["grid"] = grid
+            with self.client_manager.patch_run(
+                self.func,
+                frontend_name=self.frontend_name,
+            ):
+                kwargs.update({"client_manager": self.client_manager})
+                ret = self.interpreter_fn.run(*args, **kwargs)
+                self.finalize()
+                return ret
 
 
 class GluonTrace(LaunchInterface, TraceInterface, KernelTraceSupport):
@@ -331,17 +849,23 @@ class GluonTrace(LaunchInterface, TraceInterface, KernelTraceSupport):
                 "GluonTrace.run() missing required keyword argument: 'grid'"
             )
 
-        with self.client_manager.patch_run(self.base_fn, frontend_name="gluon"):
-            try:
-                ret = self.runner.run(
-                    *args,
-                    **kwargs,
-                    client_manager=self.client_manager,
-                )
-            finally:
-                self.client_manager.post_run_callback(self.base_fn)
-            self.finalize()
-            return ret
+        with self._launch_scope(_launch_call(None, args, kwargs, capture=False)):
+            if not self._interpreter_wanted():
+                # Only IR clients, and one asked to skip the launch: there is
+                # no compiled kernel here, so nothing runs.
+                self.finalize()
+                return None
+            with self.client_manager.patch_run(self.base_fn, frontend_name="gluon"):
+                try:
+                    ret = self.runner.run(
+                        *args,
+                        **kwargs,
+                        client_manager=self.client_manager,
+                    )
+                finally:
+                    self.client_manager.post_run_callback(self.base_fn)
+                self.finalize()
+                return ret
 
     def __call__(self, *args, **kwargs):
         return self.fn(*args, **kwargs)

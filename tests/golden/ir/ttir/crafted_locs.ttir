@@ -1,0 +1,16 @@
+#loc = loc("k.py":1:0)
+#loc1 = loc("k.py":2:5)
+#loc2 = loc("k.py":3:6)
+#loc9 = loc(fused<"meta">[#loc1, #loc2])
+#loc10 = loc(callsite(#loc1 at #loc9))
+module {
+  tt.func public @k(%p: !tt.ptr<i32> loc("p"(#loc)), %n: i32 loc(unknown)) attributes {noinline = false} {
+    %c1 = arith.constant 1 : i32 loc(fused[#loc1, "x.py":7:3])
+    %a = arith.addi %n, %c1 : i32 loc(#loc9)
+    %b = arith.addi %a, %c1 : i32 loc(callsite("inner"("y.py":3:4) at callsite(#loc1 at #loc2)))
+    %q = tt.addptr %p, %b : !tt.ptr<i32>, i32 loc("q.py":9:9)
+    tt.store %q, %a : !tt.ptr<i32> loc(#loc10)
+    tt.return loc(#loc11)
+  } loc(#loc)
+} loc(#loc)
+#loc11 = loc("k.py":12:1)

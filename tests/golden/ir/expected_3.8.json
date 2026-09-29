@@ -1,0 +1,684 @@
+{
+ "adv_descs.ttir": {
+  "stats": {
+   "ops": 15,
+   "implicit_ops": 0,
+   "blocks": 2,
+   "values": 12,
+   "funcs": 1,
+   "ssa_edges": 29,
+   "result_locs": 9,
+   "arg_locs": 3,
+   "bind_attrs": 3,
+   "type_checks": 4,
+   "needed_attrs": 8,
+   "cf_edges": 0,
+   "pred_checks": 0
+  },
+  "census": [
+   [
+    "arith.constant.value=0",
+    1
+   ],
+   [
+    "arith.constant.value=1",
+    1
+   ],
+   [
+    "arith.constant.value=32",
+    1
+   ],
+   [
+    "tt.descriptor_reduce.kind='add'",
+    1
+   ],
+   [
+    "tt.make_range.end=32",
+    1
+   ],
+   [
+    "tt.make_range.start=0",
+    1
+   ],
+   [
+    "zero-result op with a text loc",
+    6
+   ]
+  ],
+  "funcs": [
+   "descs"
+  ]
+ },
+ "adv_zero_result.ttir": {
+  "stats": {
+   "ops": 28,
+   "implicit_ops": 1,
+   "blocks": 3,
+   "values": 23,
+   "funcs": 1,
+   "ssa_edges": 31,
+   "result_locs": 20,
+   "arg_locs": 3,
+   "bind_attrs": 8,
+   "type_checks": 5,
+   "needed_attrs": 21,
+   "cf_edges": 0,
+   "pred_checks": 0
+  },
+  "census": [
+   [
+    "arith.cmpi.predicate='eq'",
+    1
+   ],
+   [
+    "arith.cmpi.predicate='slt'",
+    1
+   ],
+   [
+    "arith.constant.value=0",
+    1
+   ],
+   [
+    "arith.constant.value=1",
+    1
+   ],
+   [
+    "arith.constant.value=64",
+    1
+   ],
+   [
+    "arith.constant.value=True",
+    1
+   ],
+   [
+    "tt.atomic_rmw.rmw_op='add'",
+    1
+   ],
+   [
+    "tt.atomic_rmw.rmw_op='max'",
+    1
+   ],
+   [
+    "tt.atomic_rmw.scope='gpu'",
+    2
+   ],
+   [
+    "tt.atomic_rmw.sem='acq_rel'",
+    2
+   ],
+   [
+    "tt.get_program_id.axis=0",
+    1
+   ],
+   [
+    "tt.make_range.end=64",
+    1
+   ],
+   [
+    "tt.make_range.start=0",
+    1
+   ],
+   [
+    "zero-result op with a text loc",
+    7
+   ]
+  ],
+  "funcs": [
+   "zero_result"
+  ]
+ },
+ "golden_matmul_tma_s1_sm90.ttir": {
+  "stats": {
+   "ops": 31,
+   "implicit_ops": 0,
+   "blocks": 3,
+   "values": 34,
+   "funcs": 1,
+   "ssa_edges": 50,
+   "result_locs": 26,
+   "arg_locs": 6,
+   "bind_attrs": 3,
+   "type_checks": 7,
+   "needed_attrs": 15,
+   "cf_edges": 0,
+   "pred_checks": 0
+  },
+  "census": [
+   [
+    "arith.constant.splat=True",
+    1
+   ],
+   [
+    "arith.constant.value=('float', '0.000000e+00')",
+    1
+   ],
+   [
+    "arith.constant.value=0",
+    1
+   ],
+   [
+    "arith.constant.value=1",
+    2
+   ],
+   [
+    "arith.constant.value=31",
+    1
+   ],
+   [
+    "arith.constant.value=32",
+    1
+   ],
+   [
+    "arith.constant.value=64",
+    1
+   ],
+   [
+    "scf.for.unsignedCmp=False",
+    1
+   ],
+   [
+    "tt.dot.inputPrecision='tf32'",
+    1
+   ],
+   [
+    "tt.dot.maxNumImpreciseAcc=0",
+    1
+   ],
+   [
+    "tt.get_program_id.axis=0",
+    1
+   ],
+   [
+    "tt.get_program_id.axis=1",
+    1
+   ],
+   [
+    "zero-result op with a text loc",
+    5
+   ]
+  ],
+  "funcs": [
+   "matmul_tma_kernel"
+  ]
+ },
+ "golden_matmul_tma_s3_sm90.ttir": {
+  "stats": {
+   "ops": 31,
+   "implicit_ops": 0,
+   "blocks": 3,
+   "values": 34,
+   "funcs": 1,
+   "ssa_edges": 50,
+   "result_locs": 26,
+   "arg_locs": 6,
+   "bind_attrs": 3,
+   "type_checks": 7,
+   "needed_attrs": 15,
+   "cf_edges": 0,
+   "pred_checks": 0
+  },
+  "census": [
+   [
+    "arith.constant.splat=True",
+    1
+   ],
+   [
+    "arith.constant.value=('float', '0.000000e+00')",
+    1
+   ],
+   [
+    "arith.constant.value=0",
+    1
+   ],
+   [
+    "arith.constant.value=1",
+    2
+   ],
+   [
+    "arith.constant.value=31",
+    1
+   ],
+   [
+    "arith.constant.value=32",
+    1
+   ],
+   [
+    "arith.constant.value=64",
+    1
+   ],
+   [
+    "scf.for.unsignedCmp=False",
+    1
+   ],
+   [
+    "tt.dot.inputPrecision='tf32'",
+    1
+   ],
+   [
+    "tt.dot.maxNumImpreciseAcc=0",
+    1
+   ],
+   [
+    "tt.get_program_id.axis=0",
+    1
+   ],
+   [
+    "tt.get_program_id.axis=1",
+    1
+   ],
+   [
+    "zero-result op with a text loc",
+    5
+   ]
+  ],
+  "funcs": [
+   "matmul_tma_kernel"
+  ]
+ },
+ "golden_matmul_tma_ws_s3_sm90.ttir": {
+  "stats": {
+   "ops": 31,
+   "implicit_ops": 0,
+   "blocks": 3,
+   "values": 34,
+   "funcs": 1,
+   "ssa_edges": 50,
+   "result_locs": 26,
+   "arg_locs": 6,
+   "bind_attrs": 3,
+   "type_checks": 7,
+   "needed_attrs": 15,
+   "cf_edges": 0,
+   "pred_checks": 0
+  },
+  "census": [
+   [
+    "arith.constant.splat=True",
+    1
+   ],
+   [
+    "arith.constant.value=('float', '0.000000e+00')",
+    1
+   ],
+   [
+    "arith.constant.value=0",
+    1
+   ],
+   [
+    "arith.constant.value=1",
+    2
+   ],
+   [
+    "arith.constant.value=31",
+    1
+   ],
+   [
+    "arith.constant.value=32",
+    1
+   ],
+   [
+    "arith.constant.value=64",
+    1
+   ],
+   [
+    "scf.for.unsignedCmp=False",
+    1
+   ],
+   [
+    "tt.dot.inputPrecision='tf32'",
+    1
+   ],
+   [
+    "tt.dot.maxNumImpreciseAcc=0",
+    1
+   ],
+   [
+    "tt.get_program_id.axis=0",
+    1
+   ],
+   [
+    "tt.get_program_id.axis=1",
+    1
+   ],
+   [
+    "zero-result op with a text loc",
+    5
+   ]
+  ],
+  "funcs": [
+   "matmul_tma_ws_kernel"
+  ]
+ },
+ "kernel_deep_chain.ttir": {
+  "stats": {
+   "ops": 1207,
+   "implicit_ops": 0,
+   "blocks": 2,
+   "values": 1205,
+   "funcs": 1,
+   "ssa_edges": 2404,
+   "result_locs": 1203,
+   "arg_locs": 2,
+   "bind_attrs": 3,
+   "type_checks": 1,
+   "needed_attrs": 5,
+   "cf_edges": 0,
+   "pred_checks": 0
+  },
+  "census": [
+   [
+    "arith.constant.value=('float', '1.000000e+00')",
+    1
+   ],
+   [
+    "tt.get_program_id.axis=0",
+    1
+   ],
+   [
+    "zero-result op with a text loc",
+    4
+   ]
+  ],
+  "funcs": [
+   "deep_chain"
+  ]
+ },
+ "kernel_dot_precisions.ttir": {
+  "stats": {
+   "ops": 23,
+   "implicit_ops": 0,
+   "blocks": 2,
+   "values": 22,
+   "funcs": 1,
+   "ssa_edges": 27,
+   "result_locs": 19,
+   "arg_locs": 3,
+   "bind_attrs": 5,
+   "type_checks": 5,
+   "needed_attrs": 15,
+   "cf_edges": 0,
+   "pred_checks": 0
+  },
+  "census": [
+   [
+    "arith.constant.splat=True",
+    2
+   ],
+   [
+    "arith.constant.value=('float', '0.000000e+00')",
+    1
+   ],
+   [
+    "arith.constant.value=16",
+    1
+   ],
+   [
+    "tt.dot.inputPrecision='ieee'",
+    1
+   ],
+   [
+    "tt.dot.inputPrecision='tf32x3'",
+    1
+   ],
+   [
+    "tt.dot.maxNumImpreciseAcc=0",
+    2
+   ],
+   [
+    "tt.expand_dims.axis=0",
+    1
+   ],
+   [
+    "tt.expand_dims.axis=1",
+    1
+   ],
+   [
+    "tt.make_range.end=16",
+    1
+   ],
+   [
+    "tt.make_range.start=0",
+    1
+   ],
+   [
+    "zero-result op with a text loc",
+    4
+   ]
+  ],
+  "funcs": [
+   "dot_precisions"
+  ]
+ },
+ "kernel_dot_scaled.ttir": {
+  "stats": {
+   "ops": 50,
+   "implicit_ops": 0,
+   "blocks": 2,
+   "values": 51,
+   "funcs": 1,
+   "ssa_edges": 58,
+   "result_locs": 46,
+   "arg_locs": 5,
+   "bind_attrs": 7,
+   "type_checks": 13,
+   "needed_attrs": 23,
+   "cf_edges": 0,
+   "pred_checks": 0
+  },
+  "census": [
+   [
+    "arith.constant.splat=True",
+    5
+   ],
+   [
+    "arith.constant.value=('float', '0.000000e+00')",
+    1
+   ],
+   [
+    "arith.constant.value=128",
+    2
+   ],
+   [
+    "arith.constant.value=2",
+    1
+   ],
+   [
+    "arith.constant.value=64",
+    1
+   ],
+   [
+    "tt.expand_dims.axis=0",
+    3
+   ],
+   [
+    "tt.expand_dims.axis=1",
+    2
+   ],
+   [
+    "tt.make_range.end=128",
+    1
+   ],
+   [
+    "tt.make_range.end=2",
+    1
+   ],
+   [
+    "tt.make_range.end=64",
+    1
+   ],
+   [
+    "tt.make_range.start=0",
+    3
+   ],
+   [
+    "zero-result op with a text loc",
+    4
+   ]
+  ],
+  "funcs": [
+   "dot_scaled_k"
+  ]
+ },
+ "kernel_eps_consts.ttir": {
+  "stats": {
+   "ops": 17,
+   "implicit_ops": 0,
+   "blocks": 2,
+   "values": 16,
+   "funcs": 1,
+   "ssa_edges": 17,
+   "result_locs": 13,
+   "arg_locs": 3,
+   "bind_attrs": 5,
+   "type_checks": 3,
+   "needed_attrs": 9,
+   "cf_edges": 0,
+   "pred_checks": 0
+  },
+  "census": [
+   [
+    "arith.constant.splat=True",
+    1
+   ],
+   [
+    "arith.constant.value=('float', '9.99999996E-13')",
+    1
+   ],
+   [
+    "arith.constant.value=('float', '9.99999997E-7')",
+    1
+   ],
+   [
+    "tt.make_range.end=64",
+    1
+   ],
+   [
+    "tt.make_range.start=0",
+    1
+   ],
+   [
+    "zero-result op with a text loc",
+    4
+   ]
+  ],
+  "funcs": [
+   "eps_consts"
+  ]
+ },
+ "kernel_unicode_msgs.ttir": {
+  "stats": {
+   "ops": 14,
+   "implicit_ops": 0,
+   "blocks": 2,
+   "values": 9,
+   "funcs": 1,
+   "ssa_edges": 12,
+   "result_locs": 8,
+   "arg_locs": 1,
+   "bind_attrs": 7,
+   "type_checks": 3,
+   "needed_attrs": 10,
+   "cf_edges": 0,
+   "pred_checks": 0
+  },
+  "census": [
+   [
+    "arith.cmpf.predicate='ogt'",
+    1
+   ],
+   [
+    "arith.constant.splat=True",
+    2
+   ],
+   [
+    "arith.constant.value=('float', '0.000000e+00')",
+    1
+   ],
+   [
+    "arith.constant.value=('float', '1.000000e+00')",
+    1
+   ],
+   [
+    "tt.make_range.end=64",
+    1
+   ],
+   [
+    "tt.make_range.start=0",
+    1
+   ],
+   [
+    "zero-result op with a text loc",
+    6
+   ]
+  ],
+  "funcs": [
+   "unicode_msgs"
+  ]
+ },
+ "spike_misc.ttir": {
+  "stats": {
+   "ops": 24,
+   "implicit_ops": 0,
+   "blocks": 2,
+   "values": 21,
+   "funcs": 1,
+   "ssa_edges": 26,
+   "result_locs": 18,
+   "arg_locs": 3,
+   "bind_attrs": 7,
+   "type_checks": 4,
+   "needed_attrs": 15,
+   "cf_edges": 0,
+   "pred_checks": 0
+  },
+  "census": [
+   [
+    "arith.cmpf.predicate='ogt'",
+    1
+   ],
+   [
+    "arith.cmpi.predicate='slt'",
+    1
+   ],
+   [
+    "arith.constant.splat=True",
+    2
+   ],
+   [
+    "arith.constant.value=('float', '-1.500000e+00')",
+    1
+   ],
+   [
+    "arith.constant.value=('float', '0.000000e+00')",
+    1
+   ],
+   [
+    "arith.constant.value=64",
+    1
+   ],
+   [
+    "tt.get_num_programs.axis=0",
+    1
+   ],
+   [
+    "tt.get_program_id.axis=0",
+    1
+   ],
+   [
+    "tt.make_range.end=64",
+    1
+   ],
+   [
+    "tt.make_range.start=0",
+    1
+   ],
+   [
+    "zero-result op with a text loc",
+    6
+   ]
+  ],
+  "funcs": [
+   "misc"
+  ]
+ }
+}

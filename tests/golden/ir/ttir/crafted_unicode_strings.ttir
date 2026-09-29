@@ -1,0 +1,10 @@
+#loc = loc("/tmp/\E5\86\85\E6\A0\B8/k.py":1:0)
+#loc1 = loc("/tmp/\E5\86\85\E6\A0\B8/k.py":2:4)
+module {
+  tt.func public @"\E6\A0\B8"(%p: !tt.ptr<f32> loc("\CF\80_ptr"(#loc)), %c: i1 loc("\E6\95\B0"(#loc))) attributes {noinline = false} {
+    %v = tt.load %p : !tt.ptr<f32> loc("\E5\80\BC"(#loc1))
+    tt.assert %c, "\E9\94\99\E8\AF\AF \22quoted\22 \\ back" : i1 loc(#loc1)
+    tt.print "\CF\80=" {hex = false, isSigned = array<i32: 0>} : %v : f32 loc(#loc1)
+    tt.return loc(#loc1)
+  } loc(#loc)
+} loc(#loc)
