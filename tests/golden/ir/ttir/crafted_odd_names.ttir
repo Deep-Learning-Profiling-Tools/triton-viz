@@ -1,0 +1,12 @@
+module {
+  tt.func public @k(%p: !tt.ptr<i32>, %n: i32) attributes {noinline = false} {
+    %c-1_i32 = arith.constant -1 : i32
+    %1 = arith.addi %n, %c-1_i32 : i32
+    %10 = arith.addi %1, %1 : i32
+    %a.b = arith.addi %10, %1 : i32
+    %a$c = arith.muli %a.b, %10 : i32
+    %q = tt.addptr %p, %a$c : !tt.ptr<i32>, i32
+    tt.store %q, %1 : !tt.ptr<i32>
+    tt.return
+  }
+}

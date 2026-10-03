@@ -1,0 +1,27 @@
+#loc = loc("nat_kernels.py":28:0)
+#loc9 = loc("x_ptr"(#loc))
+#loc10 = loc("out_ptr"(#loc))
+#loc11 = loc("n"(#loc))
+module {
+  tt.func public @empty_then(%x_ptr: !tt.ptr<f32> loc("x_ptr"(#loc)), %out_ptr: !tt.ptr<f32> loc("out_ptr"(#loc)), %n: i32 loc("n"(#loc))) attributes {noinline = false} {
+    %pid = tt.get_program_id x : i32 loc(#loc12)
+    %0 = arith.cmpi slt, %pid, %n : i32 loc(#loc2)
+    scf.if %0 {
+    } else {
+      %1 = tt.addptr %out_ptr, %pid : !tt.ptr<f32>, i32 loc(#loc4)
+      %2 = tt.addptr %x_ptr, %pid : !tt.ptr<f32>, i32 loc(#loc5)
+      %3 = tt.load %2 : !tt.ptr<f32> loc(#loc6)
+      tt.store %1, %3 : !tt.ptr<f32> loc(#loc7)
+    } loc(#loc3)
+    tt.return loc(#loc8)
+  } loc(#loc)
+} loc(#loc)
+#loc1 = loc("nat_kernels.py":29:24)
+#loc2 = loc("nat_kernels.py":30:13)
+#loc3 = loc("nat_kernels.py":30:7)
+#loc4 = loc("nat_kernels.py":33:27)
+#loc5 = loc("nat_kernels.py":33:48)
+#loc6 = loc("nat_kernels.py":33:40)
+#loc7 = loc("nat_kernels.py":33:32)
+#loc8 = loc("nat_kernels.py":30:4)
+#loc12 = loc("pid"(#loc1))

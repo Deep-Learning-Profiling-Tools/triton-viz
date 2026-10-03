@@ -1,0 +1,19 @@
+#loc = loc("tests/golden/ir/reader_kernels.py":221:1)
+#loc5 = loc("x_ptr"(#loc))
+#loc6 = loc("lo"(#loc))
+#loc7 = loc("n"(#loc))
+module {
+  tt.func public @iv_wrap(%x_ptr: !tt.ptr<f32> loc("x_ptr"(#loc)), %lo: i32 loc("lo"(#loc)), %n: i32 loc("n"(#loc))) attributes {noinline = false} {
+    %cst = arith.constant 1.000000e+00 : f32 loc(#loc1)
+    %c1048576_i32 = arith.constant 1048576 : i32 loc(#loc2)
+    scf.for %k = %lo to %n step %c1048576_i32  : i32 {
+      %0 = tt.addptr %x_ptr, %k : !tt.ptr<f32>, i32 loc(#loc3)
+      tt.store %0, %cst : !tt.ptr<f32> loc(#loc4)
+    } loc(#loc2)
+    tt.return loc(#loc)
+  } loc(#loc)
+} loc(#loc)
+#loc1 = loc(unknown)
+#loc2 = loc("tests/golden/ir/reader_kernels.py":223:5)
+#loc3 = loc("tests/golden/ir/reader_kernels.py":224:18)
+#loc4 = loc("tests/golden/ir/reader_kernels.py":224:9)

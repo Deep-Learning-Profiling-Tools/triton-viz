@@ -1,0 +1,15 @@
+module {
+  tt.func public @k(%p: !tt.ptr<i32>, %a: i32, %b: i32) attributes {noinline = false} {
+    %c = arith.cmpi slt, %a, %b : i32
+    cf.cond_br %c, ^bb1(%a : i32), ^bb1(%b : i32)
+  ^bb1(%x: i32):
+    %y = arith.addi %x, %a : i32
+    cf.cond_br %c, ^bb2(%y, %x : i32, i32), ^bb3
+  ^bb2(%u: i32, %v: i32):
+    %q = tt.addptr %p, %u : !tt.ptr<i32>, i32
+    tt.store %q, %v : !tt.ptr<i32>
+    cf.br ^bb3
+  ^bb3:
+    tt.return
+  }
+}
