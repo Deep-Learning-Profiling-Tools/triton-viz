@@ -1,4 +1,4 @@
-#loc = loc("/home/hwu27/workspace/triton-viz/tests/golden/ttgir/generate_golden.py":146:0)
+#loc = loc("generate_golden.py":146:0)
 #loc4 = loc("lock_ptr"(#loc))
 #loc5 = loc("out_ptr"(#loc))
 module {
@@ -10,7 +10,7 @@ module {
     tt.return loc(#loc3)
   } loc(#loc)
 } loc(#loc)
-#loc1 = loc("/home/hwu27/workspace/triton-viz/tests/golden/ttgir/generate_golden.py":148:37)
-#loc2 = loc("/home/hwu27/workspace/triton-viz/tests/golden/ttgir/generate_golden.py":149:22)
-#loc3 = loc("/home/hwu27/workspace/triton-viz/tests/golden/ttgir/generate_golden.py":149:4)
+#loc1 = loc("generate_golden.py":148:37)
+#loc2 = loc("generate_golden.py":149:22)
+#loc3 = loc("generate_golden.py":149:4)
 #loc6 = loc("old"(#loc1))

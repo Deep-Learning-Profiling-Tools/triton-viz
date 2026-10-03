@@ -1,4 +1,4 @@
-#loc = loc("/home/hwu27/workspace/triton-viz-ir-mode/ir_mode_audit/spike/review/\E5\86\85\E6\A0\B8/k_uni.py":7:0)
+#loc = loc("\E5\86\85\E6\A0\B8/k_uni.py":7:0)
 #loc7 = loc("x_ptr"(#loc))
 module {
   tt.func public @k_uni(%x_ptr: !tt.ptr<f32> loc("x_ptr"(#loc))) attributes {noinline = false} {
@@ -12,10 +12,10 @@ module {
     tt.return loc(#loc6)
   } loc(#loc)
 } loc(#loc)
-#loc1 = loc("/home/hwu27/workspace/triton-viz-ir-mode/ir_mode_audit/spike/review/\E5\86\85\E6\A0\B8/k_uni.py":9:51)
-#loc2 = loc("/home/hwu27/workspace/triton-viz-ir-mode/ir_mode_audit/spike/review/\E5\86\85\E6\A0\B8/k_uni.py":8:24)
-#loc3 = loc("/home/hwu27/workspace/triton-viz-ir-mode/ir_mode_audit/spike/review/\E5\86\85\E6\A0\B8/k_uni.py":9:21)
-#loc4 = loc("/home/hwu27/workspace/triton-viz-ir-mode/ir_mode_audit/spike/review/\E5\86\85\E6\A0\B8/k_uni.py":9:35)
-#loc5 = loc("/home/hwu27/workspace/triton-viz-ir-mode/ir_mode_audit/spike/review/\E5\86\85\E6\A0\B8/k_uni.py":9:27)
-#loc6 = loc("/home/hwu27/workspace/triton-viz-ir-mode/ir_mode_audit/spike/review/\E5\86\85\E6\A0\B8/k_uni.py":9:4)
+#loc1 = loc("\E5\86\85\E6\A0\B8/k_uni.py":9:51)
+#loc2 = loc("\E5\86\85\E6\A0\B8/k_uni.py":8:24)
+#loc3 = loc("\E5\86\85\E6\A0\B8/k_uni.py":9:21)
+#loc4 = loc("\E5\86\85\E6\A0\B8/k_uni.py":9:35)
+#loc5 = loc("\E5\86\85\E6\A0\B8/k_uni.py":9:27)
+#loc6 = loc("\E5\86\85\E6\A0\B8/k_uni.py":9:4)
 #loc8 = loc("offs"(#loc2))
