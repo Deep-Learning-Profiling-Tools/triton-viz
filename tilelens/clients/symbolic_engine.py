@@ -306,10 +306,10 @@ class SymbolicExprDataWrapper:
         )
 
     def __int__(self) -> int:
-        int_val, _ = self.symbolic_expr.eval()
-        if isinstance(int_val, list):
-            int_val = int_val[0]
-        return self.coerce_int(int_val)
+        # Triton 3.6's tensor.__index__ calls int(handle.data) where newer
+        # releases call handle.data.squeeze(). Concretize on both paths so a
+        # loop index or program id yields its current value, not a free Z3 var.
+        return self.coerce_int(self._scalar_data())
 
     def __bool__(self) -> bool:
         return bool(self._scalar_data().item())

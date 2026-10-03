@@ -142,6 +142,20 @@ def test_loop_sites_in_different_files_get_distinct_iterator_state():
     assert f"loop_i_{site_b}" in str(ctx_b.iterator_constraint)
 
 
+def test_loop_index_int_is_the_current_iteration():
+    client = _LoopSiteSymbolicClient()
+    iterable = RangeWrapper(range(2), length=2, start=0, stop=2, step=1)
+    site = LoopSite(7, loop_file_token("/src/kernel.py"))
+
+    client._loop_hook_before(site, iterable)
+    idx = SymbolicExpr.from_value(client._loop_hook_iter_overrider(site, 1))
+    # Triton 3.6 indexes a tuple through int(tensor.handle.data); the loop
+    # index's Z3 form is a free variable, so int() must use the iteration.
+    assert isinstance(idx, SymbolicExpr)
+    assert int(idx.data) == 1
+    client._loop_hook_after(site)
+
+
 # ======== Reduce Operations Tests =========
 
 
