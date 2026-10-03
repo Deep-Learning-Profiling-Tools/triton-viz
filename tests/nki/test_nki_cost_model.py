@@ -1005,6 +1005,7 @@ def test_tensor_calibration_mixed_small_and_tiled_controls_fit_startup(tmp_path)
     assert calibration.startup_ns("float32") == pytest.approx(800.0, rel=1e-6)
     assert calibration.domain_match("float32", 4_194_304) == "in_domain"
 
+
 def test_free_dim_counts_every_free_axis():
     calibration = ComputeCalibration({("vector", "float32", 1): (10.0, 1.0)})
     model = CostModel(compute_calibration=calibration, strict_calibration=True)
@@ -1057,3 +1058,55 @@ def test_two_input_cost_is_derived_when_only_one_input_is_calibrated():
         is None
     )
 
+
+def test_dma_contiguity_aware_lookup_uses_contiguous_runs():
+    surface = DmaCalibrationSurface(
+        {(128, 512): 100.0, (128, 4096): 180.0, (128, 32768): 230.0}
+    )
+    full_rows = {
+        "op": "load",
+        "engine": "dma",
+        "mem_src": "hbm",
+        "mem_dst": "sbuf",
+        "bytes": 524288,
+        "partition_count": 128,
+        "free_bytes_per_partition": 4096,
+        "src_ranges": [[0, 524288]],
+    }
+    column_slice = {
+        **full_rows,
+        "src_ranges": [[i * 1024, i * 1024 + 512] for i in range(1024)],
+    }
+    small_rows = {
+        **full_rows,
+        "bytes": 65536,
+        "free_bytes_per_partition": 512,
+        "src_ranges": [[0, 65536]],
+    }
+    store = {
+        **full_rows,
+        "mem_src": "sbuf",
+        "mem_dst": "hbm",
+        "src_ranges": None,
+        "dst_ranges": [[0, 524288]],
+    }
+    default = CostModel(dma_calibration=surface, dma_write_calibration=surface)
+    aware = CostModel(
+        dma_calibration=surface,
+        dma_write_calibration=surface,
+        dma_contiguity_aware=True,
+    )
+    # Off by default: lookups use free_bytes_per_partition.
+    assert default.cost_ns(full_rows) == pytest.approx(524288 / 180.0)
+    assert default.cost_ns(column_slice) == pytest.approx(524288 / 180.0)
+    # >= 4 KiB contiguous per partition: priced at the saturated stream point.
+    assert aware.cost_ns(full_rows) == pytest.approx(524288 / 230.0)
+    assert aware.cost_ns(store) == pytest.approx(524288 / 230.0)
+    assert aware.dma_lookup(full_rows)["lookup_free_bytes"] == 32768
+    # A column slice moves 512 B runs although its free size is 4 KiB.
+    assert aware.cost_ns(column_slice) == pytest.approx(524288 / 100.0)
+    # Small runs are unchanged.
+    assert aware.cost_ns(small_rows) == pytest.approx(default.cost_ns(small_rows))
+    # Without range information the lookup is unchanged.
+    no_ranges = {**full_rows, "src_ranges": None}
+    assert aware.cost_ns(no_ranges) == pytest.approx(default.cost_ns(full_rows))

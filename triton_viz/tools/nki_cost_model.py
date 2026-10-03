@@ -1308,6 +1308,41 @@ def _canonical_engine(raw_engine: str, op: str) -> str:
     return ENGINE_VECTOR
 
 
+DMA_STREAM_SATURATION_BYTES = 4096
+DMA_SATURATED_LOOKUP_BYTES = 32768
+
+
+def _dma_contiguous_run_bytes(event: dict[str, Any]) -> int | None:
+    """Median contiguous byte run on the HBM side of a DMA, or ``None``.
+
+    Reads come from ``src_ranges`` and writes go to ``dst_ranges``; each range
+    is a ``[start, end)`` byte interval recorded by the tracer. Rows that are
+    adjacent in HBM appear as one merged range, so the run of a full-row block
+    load can exceed the bytes a single partition moves; callers take the min
+    with the free size.
+    """
+    src = str(event.get("mem_src", "")).lower()
+    dst = str(event.get("mem_dst", "")).lower()
+    if src == "hbm":
+        ranges = event.get("src_ranges")
+    elif dst == "hbm":
+        ranges = event.get("dst_ranges")
+    else:
+        return None
+    runs = []
+    for item in ranges or ():
+        try:
+            lo, hi = int(item[0]), int(item[1])
+        except (TypeError, ValueError, IndexError):
+            continue
+        if hi > lo:
+            runs.append(hi - lo)
+    if not runs:
+        return None
+    runs.sort()
+    return runs[len(runs) // 2]
+
+
 def _free_dim(event: dict[str, Any]) -> int | None:
     """Return the free size (elements per partition) for a compute op.
 
@@ -1493,6 +1528,11 @@ class CostModel:
     dma_engine_bytes_per_ns: float = 17.0
     dma_max_engines: int = 16
     dma_bytes_per_ns: float | None = None  # legacy explicit aggregate override
+    # Opt-in: look DMA surfaces up by the contiguous bytes each partition moves
+    # in one run, as seen inside a stream of transfers (see
+    # ``_dma_lookup_free_bytes``). Off by default because the surfaces and the
+    # published benchmark error were fit without it.
+    dma_contiguity_aware: bool = False
     dma_calibration: DmaCalibrationSurface | None = None
     dma_write_calibration: DmaCalibrationSurface | None = None
     dma_transpose_calibration: DmaCalibrationSurface | None = None
@@ -1592,10 +1632,37 @@ class CostModel:
             return self.dma_write_calibration
         return self.dma_calibration
 
+    def _dma_lookup_free_bytes(self, event: dict[str, Any]) -> int:
+        """Free bytes per partition used to look up the DMA bandwidth surface.
+
+        By default this is the transfer's ``free_bytes_per_partition``. With
+        ``dma_contiguity_aware`` two effects measured on Inf2 are applied:
+
+        * A strided view (e.g. a column slice of several rows per partition)
+          moves several separate runs per partition, so its granularity is the
+          median contiguous run on the HBM side, not the free size.
+        * Inside a stream of DMAs, runs of at least
+          ``DMA_STREAM_SATURATION_BYTES`` contiguous bytes per partition already
+          reach the bandwidth ceiling: a 4 MiB copy issued as 16 DMAs of 4 KiB
+          per partition is as fast as one 32 KiB-per-partition DMA, whereas the
+          single-transfer surface prices it about 17% slower. Such runs are
+          looked up at ``DMA_SATURATED_LOOKUP_BYTES``.
+        """
+        free_bytes = int(event.get("free_bytes_per_partition") or 0)
+        if not self.dma_contiguity_aware or free_bytes <= 0:
+            return free_bytes
+        run = _dma_contiguous_run_bytes(event)
+        if run is None:
+            return free_bytes
+        effective = min(free_bytes, run)
+        if effective >= DMA_STREAM_SATURATION_BYTES:
+            effective = max(free_bytes, DMA_SATURATED_LOOKUP_BYTES)
+        return effective
+
     def dma_lookup(self, event: dict[str, Any]) -> dict[str, Any]:
         """Describe the selected DMA calibration path without changing cost."""
         partitions = int(event.get("partition_count") or 0)
-        free_bytes = int(event.get("free_bytes_per_partition") or 0)
+        free_bytes = self._dma_lookup_free_bytes(event)
         surface = self._dma_surface(event)
         if partitions > 0 and free_bytes > 0 and surface is not None:
             point = surface.lookup(partitions, free_bytes)
@@ -1611,7 +1678,7 @@ class CostModel:
 
     def _dma_cost_ns(self, event: dict[str, Any], nbytes: int) -> float:
         partitions = int(event.get("partition_count") or 0)
-        free_bytes = int(event.get("free_bytes_per_partition") or 0)
+        free_bytes = self._dma_lookup_free_bytes(event)
         surface = self._dma_surface(event)
         if partitions > 0 and free_bytes > 0 and surface is not None:
             bandwidth = surface.lookup(partitions, free_bytes).bandwidth_gbps
