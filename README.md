@@ -238,7 +238,11 @@ def kernel(x_ptr, n, BLOCK: tl.constexpr):
   `is_hip()`) answer for that target too, and `TRITON_OVERRIDE_ARCH` does not
   apply: the target is the one named. The TTIR can differ between targets (e.g.
   tensor descriptors, target-dependent branches), and a verdict holds for the
-  target it was checked for.
+  target it was checked for. To check a launch for several targets, stack one
+  sanitizer per target (`@tilelens.trace(Sanitizer(compile=True,
+  target="cuda:90"))` over `@tilelens.trace(Sanitizer(compile=True,
+  target="cuda:80"))`): each keeps its own verdict (`last_verdict`), and the
+  launch's records hold them in trace order.
 - Targets also differ in what compiles at all: `fp8e4nv` (`torch.float8_e4m3fn`,
   `tl.float8e4nv`) needs `cuda:89` or later, `num_ctas > 1` and 16-bit tensor
   descriptor atomic min/max need `cuda:90`. A kernel or autotune config that fails

@@ -465,22 +465,24 @@ def test_add_clients_rejects_skip_run_conflict_before_inserting():
         manager.add_clients([_IndifferentIRClient(), _RunIRClient()])
 
     # Nothing from the rejected batch was inserted.
-    assert list(manager.clients) == ["ir_skip", "eager"]
+    assert [c.NAME for c in manager.clients] == ["ir_skip", "eager"]
 
     with pytest.raises(RuntimeError, match="LAUNCH='skip'"):
         ClientManager([_RunIRClient(), _SkipIRClient()])
 
 
-def test_launch_conflict_check_sees_the_resulting_ir_clients():
-    # A same-NAME client replaces the one it would otherwise conflict with.
+def test_launch_conflict_check_sees_every_ir_client():
+    # A same-NAME IR client joins the first rather than replacing it, so
+    # their conflict is seen.
     class _RunInSkipSlot(_IRClient):
         NAME = "ir_skip"
         LAUNCH = "run"
 
-    manager = ClientManager([_SkipIRClient()])
-    manager.add_clients([_RunInSkipSlot()])
-    assert [type(c) for c in manager.clients.values()] == [_RunInSkipSlot]
-    assert manager.launch_policy() == "run"
+    first = _SkipIRClient()
+    manager = ClientManager([first])
+    with pytest.raises(RuntimeError, match="cannot share one trace"):
+        manager.add_clients([_RunInSkipSlot()])
+    assert manager.clients == [first]
 
     # An interpreting client's LAUNCH takes no part in the vote.
     class _EagerSkip(_EagerClient):
@@ -492,13 +494,34 @@ def test_launch_conflict_check_sees_the_resulting_ir_clients():
     assert manager.launch_policy() == "run"
 
 
-def test_add_clients_keeps_duplicate_rule_and_accepts_indifferent():
-    first = _SkipIRClient()
-    manager = ClientManager([first, _IndifferentIRClient(), _EagerClient()])
-    manager.add_clients([_SkipIRClient()])
+def test_add_clients_keeps_every_ir_client_instance():
+    # Adding a client already in the trace changes nothing; another
+    # instance of its class is kept, not dropped (e.g. one per target).
+    first, second = _SkipIRClient(), _SkipIRClient()
+    indifferent, eager = _IndifferentIRClient(), _EagerClient()
+    manager = ClientManager([first, indifferent, eager])
+    manager.add_clients([first, second, second])
 
-    assert list(manager.clients) == ["ir_skip", "ir_indifferent", "eager"]
-    assert manager.clients["ir_skip"] is first
+    assert manager.clients == [first, indifferent, eager, second]
+    assert manager.ir_clients() == [first, indifferent, second]
+    assert manager.get_client("ir_skip") is first
+
+
+def test_add_clients_refuses_a_second_interpreting_client_of_one_name():
+    # One interpreted run serves one client per NAME: another one, of the
+    # same class or not, raises rather than being dropped, and nothing from
+    # its batch is inserted.
+    class _SameName(_SiblingEagerClient):
+        NAME = "eager"
+
+    first = _EagerClient()
+    manager = ClientManager([first])
+    for duplicate in (_EagerClient(), _SameName()):
+        with pytest.raises(ValueError, match="interpreting client named 'eager'"):
+            manager.add_clients([_IndifferentIRClient(), duplicate])
+        assert manager.clients == [first]
+    manager.add_clients([first])
+    assert manager.clients == [first]
 
 
 def test_add_clients_rejects_unknown_launch_value():
@@ -516,7 +539,7 @@ def test_trace_decorator_rejects_conflicting_launch_preferences():
     with pytest.raises(RuntimeError, match="cannot share one trace"):
         tilelens.trace(_RunIRClient())(traced)
 
-    assert list(traced.client_manager.clients) == ["ir_skip"]
+    assert [c.NAME for c in traced.client_manager.clients] == ["ir_skip"]
 
 
 def test_client_partition_and_launch_policy():
@@ -989,8 +1012,8 @@ def test_ir_capture_warmup_call_never_launches():
         jit_fn.run(torch.zeros(4), 4, grid=None, warmup=True)
 
     assert log == ["compile", "before", "after"]
-    assert manager.clients["ir_run"].events[0].launched is False
-    assert manager.clients["ir_run"].events[0].resolved_grid is None
+    assert manager.get_client("ir_run").events[0].launched is False
+    assert manager.get_client("ir_run").events[0].resolved_grid is None
 
 
 def test_ir_capture_restores_on_error_and_does_not_double_wrap():
@@ -1284,6 +1307,29 @@ def test_each_target_compiles_once_and_reaches_only_its_clients(_fake_host_compi
         jit_fn.run(torch.zeros(4), 4, grid=(1,), warmup=True)
     assert [t for _, t, _ in _fake_host_compile] == [cuda89]
     assert [e.target for e in hip.events] == [cuda89]
+
+
+def test_instances_of_one_ir_client_class_keep_their_own_targets(
+    _fake_host_compile,
+):
+    """Stacked traces of one IR client class, one instance per target, keep
+    both instances: each target compiles once and reaches only its own."""
+    from triton.backends.compiler import GPUTarget
+
+    cuda80, cuda90 = GPUTarget("cuda", 80, 32), GPUTarget("cuda", 90, 32)
+    sm80, sm90 = _SkipIRClient(), _SkipIRClient()
+    sm80.ir_target, sm90.ir_target = "cuda:80", "cuda:90"
+    traced = tilelens.trace(sm90)(tilelens.trace(sm80)(_make_plain_kernel()))
+    manager = traced.client_manager
+    assert manager.clients == [sm80, sm90]
+    jit_fn = _FakeJit(compile_error=None)
+
+    with manager.ir_capture(jit_fn, compile_only=True):
+        jit_fn.run(torch.zeros(4), 4, grid=(1,), warmup=True)
+
+    assert [t for _, t, _ in _fake_host_compile] == [cuda80, cuda90]
+    assert [e.target for e in sm80.events] == [cuda80]
+    assert [e.target for e in sm90.events] == [cuda90]
 
 
 def test_the_configured_target_is_the_default(monkeypatch, _fake_host_compile):
@@ -2283,7 +2329,7 @@ def test_gluon_and_nki_traces_run_the_launch_lifecycle(trace_cls):
     # Only IR clients, one of them skipping: nothing is interpreted.
     assert traced[(2,)](torch.zeros(4)) is None
     assert log == ["begin", "finalize"]
-    (call,) = traced.client_manager.clients["ir_skip"].launch_calls
+    (call,) = traced.client_manager.get_client("ir_skip").launch_calls
     assert call.jit_fn is None and call.capture is False and call.grid == (2,)
 
     log = []

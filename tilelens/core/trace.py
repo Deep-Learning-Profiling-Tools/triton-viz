@@ -16,6 +16,21 @@ import types
 
 launches: list[Launch] = []
 
+# The clients trace() takes by name, each built with its defaults.
+_NAMED_CLIENTS: dict[str, type[Client]] = {
+    "sanitizer": Sanitizer,
+    "profiler": Profiler,
+    "race_detector": RaceDetector,
+    "tracer": Tracer,
+}
+
+
+def _named_client_type(name: str) -> type[Client]:
+    try:
+        return _NAMED_CLIENTS[name.lower()]
+    except KeyError:
+        raise ValueError(f"Unknown client: {name}") from None
+
 
 def _without_warmup(kwargs: dict[str, Any]) -> dict[str, Any]:
     # Launch kwargs carry warmup=False; the warmup entry points set their own.
@@ -78,22 +93,19 @@ class TraceInterface:
     @staticmethod
     def _normalize_client(client: str | Client) -> Client:
         if isinstance(client, str):
-            name = client.lower()
-            if name == "sanitizer":
-                return Sanitizer()
-            if name == "profiler":
-                return Profiler()
-            if name == "race_detector":
-                return RaceDetector()
-            if name == "tracer":
-                return Tracer()
-            raise ValueError(f"Unknown client: {client}")
+            return _named_client_type(client)()
         elif isinstance(client, Client):
             return client
         else:
             raise TypeError(f"Expected str or Client, got {type(client)}")
 
     def add_client(self, new_client: str | Client) -> None:
+        # A name asks for that kind of client with its defaults: one already
+        # in the trace serves it, and none of the caller's settings are lost.
+        if isinstance(new_client, str):
+            name = _named_client_type(new_client).NAME
+            if self.client_manager.get_client(name) is not None:
+                return
         self.client_manager.add_clients([self._normalize_client(new_client)])
 
     def finalize(self):

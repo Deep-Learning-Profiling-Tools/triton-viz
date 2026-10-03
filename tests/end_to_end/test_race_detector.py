@@ -125,7 +125,7 @@ def test_string_dispatch_and_manager_lookup(_isolate_race_detector_cfg):
     x = torch.zeros(8, dtype=torch.float32)
     traced[(1,)](x, BLOCK=8)
 
-    rd = traced.client_manager.clients["race_detector"]
+    rd = traced.client_manager.get_client("race_detector")
     assert isinstance(rd, SymbolicRaceDetector)
     assert len(rd.records) == 2
 
