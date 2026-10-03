@@ -391,6 +391,7 @@ def test_the_ir_mode_modules_are_the_d29_list(tests_conftest):
     ir_mode = [
         "unit/ir/test_host_compile.py",
         "unit/ir/test_ir_capture.py",
+        "unit/ir/test_lowering.py",
         "unit/ir/test_mlir_walk.py",
         "unit/ir/test_ttir_reader.py",
         "unit/ir/test_verdict_io.py",
