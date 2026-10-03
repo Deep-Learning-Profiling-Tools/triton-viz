@@ -295,7 +295,7 @@ def kernel(x_ptr):
     pass
 
 
-print(sorted(kernel.client_manager.clients), sys.argv[1:])
+print(sorted(c.NAME for c in kernel.client_manager.clients), sys.argv[1:])
 """
 
 

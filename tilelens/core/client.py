@@ -143,6 +143,9 @@ class CompileGroup:
 
 
 class Client(ABC):
+    # Names the client's records and its ClientManager.get_client lookup. A
+    # trace holds one interpreting client per NAME, since the interpreted
+    # run serves one; IR clients may repeat a NAME (see ir_target).
     NAME: ClassVar[str]
     # Whether the client consumes the interpreted run (op/loop callbacks,
     # pre/post_run votes, arg/grid callbacks). IR clients set this to False
@@ -163,8 +166,9 @@ class Client(ABC):
     # GPUTarget or a spec such as "cuda:90" or "hip:gfx942" (see
     # tilelens.core.host_compile.parse_ir_target); None for the configured
     # default (tilelens.config.ir_target: TILELENS_IR_TARGET, else
-    # "cuda:89"). A client may set it per instance. Core compiles once per
-    # distinct target and gives each client only its own target's events.
+    # "cuda:89"). A client may set it per instance, so one trace can hold an
+    # instance of a client class per target. Core compiles once per distinct
+    # target and gives each client only its own target's events.
     ir_target: Any = None
 
     def __init__(self) -> None:
@@ -486,7 +490,8 @@ def _install_warmup_gate(jit_fn: Any) -> Callable:
 
 class ClientManager:
     def __init__(self, clients: list[Client] | None = None):
-        self.clients: dict[str, Client] = {}
+        # In trace order: the order clients are called and finalized in.
+        self.clients: list[Client] = []
         if clients:
             self.add_clients(clients)
         self.launch = Launch()
@@ -528,23 +533,42 @@ class ClientManager:
         return nullcontext()
 
     def get_client(self, name: str) -> Client | None:
-        return self.clients.get(name)
+        """The first client in trace order whose NAME is ``name``."""
+        return next((c for c in self.clients if c.NAME == name), None)
 
     def add_clients(self, new_clients_list: list[Client]) -> None:
+        """Append each client, in order; one already in the trace (the same
+        object) is skipped. Every other client is kept or the call raises:
+        nothing is dropped silently."""
         # Validate the whole resulting set before inserting anything, so a
         # rejected composition leaves the manager unchanged.
-        additions: dict[str, Client] = {}
+        resulting = list(self.clients)
         for new_client in new_clients_list:
-            duplicate = any(
-                isinstance(existing_client, new_client.__class__)
-                for existing_client in (*self.clients.values(), *additions.values())
-            )
-            if not duplicate:
-                additions[new_client.NAME] = new_client
-        # A same-NAME addition replaces the existing client, so check the set
-        # that will result, not the one before replacement.
-        self._check_launch_preferences(list({**self.clients, **additions}.values()))
-        self.clients.update(additions)
+            if any(new_client is client for client in resulting):
+                continue
+            if new_client.NEEDS_INTERPRETER:
+                taken = next(
+                    (
+                        c
+                        for c in resulting
+                        if c.NEEDS_INTERPRETER and c.NAME == new_client.NAME
+                    ),
+                    None,
+                )
+                if taken is not None:
+                    raise ValueError(
+                        "this trace already has an interpreting client named "
+                        f"{new_client.NAME!r} ({type(taken).__name__}); one "
+                        "interpreted run serves one client per name, so "
+                        f"another ({type(new_client).__name__}) cannot share "
+                        "the trace. Trace the kernel twice instead, e.g. "
+                        "tilelens.trace(a)(kernel) and tilelens.trace(b)(kernel), "
+                        "and launch each; stacked trace decorators merge into "
+                        "one trace."
+                    )
+            resulting.append(new_client)
+        self._check_launch_preferences(resulting)
+        self.clients = resulting
 
     @staticmethod
     def _check_launch_preferences(clients: list[Client]) -> None:
@@ -569,10 +593,10 @@ class ClientManager:
             )
 
     def interpreting_clients(self) -> list[Client]:
-        return [c for c in self.clients.values() if c.NEEDS_INTERPRETER]
+        return [c for c in self.clients if c.NEEDS_INTERPRETER]
 
     def ir_clients(self) -> list[Client]:
-        return [c for c in self.clients.values() if not c.NEEDS_INTERPRETER]
+        return [c for c in self.clients if not c.NEEDS_INTERPRETER]
 
     def compile_groups(self) -> list[CompileGroup]:
         """The IR clients grouped by the target their kernels are compiled
@@ -626,7 +650,7 @@ class ClientManager:
         self._reset_launch_state()
         begun: list[Client] = []
         try:
-            for client in self.clients.values():
+            for client in self.clients:
                 begun.append(client)
                 client.begin_launch(call)
         except BaseException as exc:
@@ -670,7 +694,7 @@ class ClientManager:
             # Held until every client got the abort, so no other thread's
             # begin_launch resets the state in between.
             self._launch_owner = thread
-        self._abort_clients(list(self.clients.values()), exc)
+        self._abort_clients(list(self.clients), exc)
 
     def _abort_clients(self, clients: list[Client], exc: BaseException) -> None:
         interrupt: BaseException | None = None
@@ -747,7 +771,7 @@ class ClientManager:
         # not short-circuit on the first True.
         votes = [
             client.pre_warmup_callback(jit_fn, *args, **kwargs)
-            for client in self.clients.values()
+            for client in self.clients
         ]
         if not any(votes):
             return None
@@ -757,7 +781,7 @@ class ClientManager:
             args, kwargs = real_args(jit_fn, args, kwargs)
         with compile_context():
             ret = warmup(*args, **kwargs)
-        for client in self.clients.values():
+        for client in self.clients:
             client.post_warmup_callback(jit_fn, ret)
         return ret
 
@@ -1112,7 +1136,7 @@ class ClientManager:
                 # Finalize every client even if a peer raises (e.g. SystemExit
                 # from an abort), then re-raise the first failure.
                 first_exc: BaseException | None = None
-                for client in self.clients.values():
+                for client in self.clients:
                     try:
                         # client may introduce tensors not declared in kernel args (e.g. tracer recording a tensor allocation)
                         self.launch.tensors.update(getattr(client, "tensors", []) or [])

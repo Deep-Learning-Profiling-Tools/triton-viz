@@ -285,7 +285,7 @@ def test_declarations_and_composition():
     # The eager sanitizer can share its trace (D4b); a client that needs the
     # real launch cannot (D4a).
     manager = ClientManager([san, SymbolicSanitizer(abort_on_error=False)])
-    assert set(manager.clients) == {"compiled_sanitizer", "sanitizer"}
+    assert [c.NAME for c in manager.clients] == ["compiled_sanitizer", "sanitizer"]
     with pytest.raises(RuntimeError, match="disagree on whether the real kernel"):
         ClientManager([san, _RunIR()])
 

@@ -16,19 +16,18 @@ def test_trace_decorator_add_clients():
     Test goal:
     1. Apply @trace("sanitizer") and @trace("profiler") to add the Sanitizer and Profiler clients.
     2. Apply @trace("tracer") to append a Tracer client.
-    3. Apply @trace(("sanitizer",)) with a duplicate Sanitizer, which should be
-       ignored by the de-duplication logic.
+    3. Apply @trace("sanitizer") over a Sanitizer instance: the name asks for a
+       default Sanitizer, which the one already in the trace serves.
 
     The final Trace object should contain exactly one instance each of
-    Sanitizer, Profiler, and Tracer (total = 3 clients).
+    Sanitizer, Profiler, and Tracer (total = 3 clients). A second Sanitizer
+    instance, whose settings would be lost, is refused.
     """
 
     @tilelens.trace("sanitizer")
     @tilelens.trace("profiler")
     @tilelens.trace("tracer")
-    @tilelens.trace(
-        Sanitizer(abort_on_error=True)
-    )  # Duplicate Sanitizer (should be ignored)
+    @tilelens.trace(Sanitizer(abort_on_error=False))
     @triton.jit
     def my_kernel(x_ptr, y_ptr, out_ptr, BLOCK_SIZE: tl.constexpr):
         pid = tl.program_id(0)
@@ -41,11 +40,14 @@ def test_trace_decorator_add_clients():
     assert isinstance(my_kernel, TritonTrace)
 
     # Verify client de-duplication and addition logic
-    clients = my_kernel.client_manager.clients
-    assert len(clients) == 3
-    assert sum(c == "sanitizer" for c in clients) == 1
-    assert sum(c == "profiler" for c in clients) == 1
-    assert sum(c == "tracer" for c in clients) == 1
+    names = [c.NAME for c in my_kernel.client_manager.clients]
+    assert sorted(names) == ["profiler", "sanitizer", "tracer"]
+    # The instance's own settings were kept, not a default's.
+    assert my_kernel.client_manager.get_client("sanitizer").abort_on_error is False
+
+    with pytest.raises(ValueError, match="interpreting client named 'sanitizer'"):
+        tilelens.trace(Sanitizer(abort_on_error=True))(my_kernel)
+    assert len(my_kernel.client_manager.clients) == 3
 
 
 def test_trace_decorator_supports_gluon_frontend():

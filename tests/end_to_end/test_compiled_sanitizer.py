@@ -1577,6 +1577,26 @@ def test_target_dependent_branches_are_the_ir_targets(make, target, status):
     assert _check_branches(make, target)[0] == status
 
 
+def test_sanitizers_for_two_targets_share_one_trace():
+    """A second compiled sanitizer, for another target, is not dropped from
+    the trace: one launch is checked for each target, each with its own
+    verdict."""
+    sm80 = Sanitizer(compile=True, abort_on_error=False, target="cuda:80")
+    sm90 = Sanitizer(compile=True, abort_on_error=False, target="cuda:90")
+    traced = tilelens.trace(sm90)(tilelens.trace(sm80)(_make_unmasked_from_sm89()))
+    assert traced.client_manager.ir_clients() == [sm80, sm90]
+
+    traced[(8,)](torch.zeros(64), 64, BLOCK=16)
+
+    assert (sm80.last_status, sm80.records) == ("ok", [])
+    assert sm90.last_status == "violations" and sm90.records
+    assert trace_module.launches[-1].records == [
+        sm80.last_verdict,
+        *sm90.records,
+        sm90.last_verdict,
+    ]
+
+
 class _Machine:
     """A stand-in for Triton's active driver on a machine with a GPU of
     ``target``; it must never be asked during IR mode's compile."""
