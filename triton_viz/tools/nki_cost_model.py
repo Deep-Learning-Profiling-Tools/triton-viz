@@ -1283,25 +1283,29 @@ def _canonical_engine(raw_engine: str, op: str) -> str:
 
 
 def _free_dim(event: dict[str, Any]) -> int | None:
-    """Return the free-dimension length (elements per partition) for a compute op.
+    """Return the free size (elements per partition) for a compute op.
 
-    VectorE/ScalarE are partition-parallel: the partition axis maps onto lanes,
-    so op latency tracks the free (last) axis of the *processed* tile, not the
-    total element count. For a reduction the input free dimension is larger than
-    the output's (which collapses to 1), and the engine still streams the whole
-    input, so we take the max last-dim across the input and output shapes. This
-    is exact for elementwise ops (input == output) and correct for reductions.
-    Returns ``None`` when no shape is available so the caller can fall back to
-    the element-count model.
+    VectorE/ScalarE are partition-parallel: the partition axis (axis 0) maps
+    onto lanes, so op latency tracks the elements each partition streams, i.e.
+    the product of all free axes of the *processed* tile, not the total element
+    count. A ``(P, A, B)`` tile streams ``A * B`` elements per partition; taking
+    only the last axis would price it ``A`` times too cheap (e.g. casts over
+    coalesced ``(128, 8, 1024)`` operands or 4-D rotate-half views). For a
+    reduction the input free size is larger than the output's (which collapses
+    to 1), and the engine still streams the whole input, so we take the max
+    across the input and output shapes. A 1-D shape is treated as its own free
+    size. Returns ``None`` when no shape is available so the caller can fall
+    back to the element-count model.
     """
     free = None
     for key in ("output_shape", "input_shape", "other_shape"):
         shape = event.get(key)
         if isinstance(shape, (list, tuple)) and len(shape) >= 1:
             try:
-                candidate = int(shape[-1])
+                dims = [int(dim) for dim in shape]
             except (TypeError, ValueError):
                 continue
+            candidate = math.prod(dims[1:]) if len(dims) >= 2 else dims[0]
             free = candidate if free is None else max(free, candidate)
     return free
 

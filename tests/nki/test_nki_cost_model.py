@@ -1004,3 +1004,26 @@ def test_tensor_calibration_mixed_small_and_tiled_controls_fit_startup(tmp_path)
     assert calibration.flops_per_ns("float32") == pytest.approx(20_000.0, rel=1e-6)
     assert calibration.startup_ns("float32") == pytest.approx(800.0, rel=1e-6)
     assert calibration.domain_match("float32", 4_194_304) == "in_domain"
+
+def test_free_dim_counts_every_free_axis():
+    calibration = ComputeCalibration({("vector", "float32", 1): (10.0, 1.0)})
+    model = CostModel(compute_calibration=calibration, strict_calibration=True)
+
+    def event(shape):
+        return {
+            "op": "compute",
+            "engine": "vector",
+            "input_shape": shape,
+            "output_shape": shape,
+            "input_dtypes": ["float32"],
+            "output_dtype": "float32",
+        }
+
+    flat = model.cost_ns(event([128, 512]))
+    assert flat == pytest.approx(522.0)
+    # A (P, A, B) tile streams A * B elements per partition, not B.
+    assert model.cost_ns(event([128, 8, 64])) == pytest.approx(flat)
+    assert model.cost_ns(event([128, 2, 4, 64])) == pytest.approx(flat)
+    # A 1-D shape is its own free size.
+    assert model.cost_ns(event([512])) == pytest.approx(flat)
+
