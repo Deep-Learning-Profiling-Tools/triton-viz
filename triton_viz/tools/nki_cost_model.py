@@ -916,6 +916,7 @@ class ComputeCalibration:
         candidates = [
             ((engine, dtype, streams), "exact"),
             ((engine, dtype, stream_class), "streams_fallback"),
+            (("derived", engine, dtype), "derived_streams"),
         ]
         if not strict_dtype:
             candidates.extend(
@@ -929,11 +930,36 @@ class ComputeCalibration:
             if key in seen:
                 continue
             seen.add(key)
-            hit = self.points.get(key)
+            if match == "derived_streams":
+                hit = (
+                    self._derived_two_input(engine, dtype)
+                    if stream_class == 2
+                    else None
+                )
+            else:
+                hit = self.points.get(key)
             if hit is not None:
                 startup, per_elem = hit
                 return startup + max(0, int(free_dim)) * per_elem, match
         return None, "missing"
+
+    def _derived_two_input(self, engine, dtype):
+        """Two-input cost derived from the same engine's one-input fit.
+
+        Some engine/dtype pairs are only calibrated for one input stream (e.g.
+        two-input ScalarE instructions, which appear in LayerNorm-style
+        kernels). The startup cost is kept and the per-element cost is scaled
+        by VectorE's measured two-input / one-input ratio for the same dtype.
+        Returns ``None`` when any of the three required fits is missing.
+        """
+        one = self.points.get((engine, dtype, 1))
+        vector_one = self.points.get(("vector", dtype, 1))
+        vector_two = self.points.get(("vector", dtype, 2))
+        if one is None or vector_one is None or vector_two is None:
+            return None
+        if vector_one[1] <= 0:
+            return None
+        return one[0], one[1] * vector_two[1] / vector_one[1]
 
     def instruction_ns(
         self, engine, dtype, input_streams, free_dim, *, strict_dtype=False

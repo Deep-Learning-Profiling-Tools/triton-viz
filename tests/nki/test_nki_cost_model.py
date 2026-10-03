@@ -1027,3 +1027,33 @@ def test_free_dim_counts_every_free_axis():
     # A 1-D shape is its own free size.
     assert model.cost_ns(event([512])) == pytest.approx(flat)
 
+
+def test_two_input_cost_is_derived_when_only_one_input_is_calibrated():
+    calibration = ComputeCalibration(
+        {
+            ("scalar", "float32", 1): (30.0, 0.3),
+            ("vector", "float32", 1): (50.0, 0.4),
+            ("vector", "float32", 2): (60.0, 0.8),
+        }
+    )
+    ns, match = calibration.instruction_lookup("scalar", "float32", 2, 100)
+    assert match == "derived_streams"
+    # startup of the one-input ScalarE fit, per-element cost scaled by VectorE's
+    # two-input / one-input ratio (0.8 / 0.4)
+    assert ns == pytest.approx(30.0 + 100 * 0.6)
+    assert calibration.instruction_ns(
+        "scalar", "float32", 2, 100, strict_dtype=True
+    ) == pytest.approx(90.0)
+    # one-input lookups and calibrated entries are unchanged
+    assert calibration.instruction_lookup("scalar", "float32", 1, 100) == (
+        pytest.approx(60.0),
+        "exact",
+    )
+    assert calibration.instruction_lookup("vector", "float32", 2, 100)[1] == "exact"
+
+    incomplete = ComputeCalibration({("scalar", "float32", 1): (30.0, 0.3)})
+    assert (
+        incomplete.instruction_ns("scalar", "float32", 2, 100, strict_dtype=True)
+        is None
+    )
+
