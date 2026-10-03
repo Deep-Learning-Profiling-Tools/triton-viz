@@ -362,6 +362,21 @@ def jobs(rel: str) -> dict[str, _Spec]:
     return todo
 
 
+# A loc's path up to this repository's tests/ or Triton's package directory:
+# where the checkout and Triton happen to be on the machine that printed it.
+_REPO_LOC = r'loc\("[^"]*/tests/(?=golden/)'
+_TRITON_LOC = r'loc\("[^"]*/triton/'
+
+
+def portable(text: str) -> str:
+    """``text`` with each loc naming a file of this repository from
+    ``tests/`` and one of Triton's own sources (tl.cdiv, ...) from
+    ``triton/``, so a golden prints the same on every machine."""
+    import re  # not above the kernels: a line added there moves their locs
+
+    return re.sub(_TRITON_LOC, 'loc("triton/', re.sub(_REPO_LOC, 'loc("tests/', text))
+
+
 def ttir(spec: _Spec) -> str:
     """The TTIR the installed Triton prints for ``spec`` (a host compile)."""
     from triton.backends.compiler import GPUTarget
@@ -397,7 +412,7 @@ def main() -> int:
                 continue
             path = os.path.join(out, f"{name}.ttir")
             with open(path, "w", encoding="utf-8") as f:
-                f.write(text)
+                f.write(portable(text))
             print(f"[{name}] wrote {path}")
     return 1 if failed else 0
 

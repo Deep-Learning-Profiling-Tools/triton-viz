@@ -1,4 +1,4 @@
-#loc = loc("/home/hwu27/workspace/triton-viz-ir-mode/tests/golden/ir/reader_kernels.py":132:0)
+#loc = loc("tests/golden/ir/reader_kernels.py":132:0)
 #loc6 = loc("x_ptr"(#loc))
 module {
   tt.func public @rv_inline_asm_store(%x_ptr: !tt.ptr<i32> loc("x_ptr"(#loc))) attributes {noinline = false} {
@@ -10,11 +10,11 @@ module {
     tt.return loc(#loc5)
   } loc(#loc)
 } loc(#loc)
-#loc1 = loc("/home/hwu27/workspace/triton-viz-ir-mode/tests/golden/ir/reader_kernels.py":136:23)
-#loc2 = loc("/home/hwu27/workspace/triton-viz-ir-mode/tests/golden/ir/reader_kernels.py":135:17)
-#loc3 = loc("/home/hwu27/workspace/triton-viz-ir-mode/tests/golden/ir/reader_kernels.py":135:25)
-#loc4 = loc("/home/hwu27/workspace/triton-viz-ir-mode/tests/golden/ir/reader_kernels.py":140:8)
-#loc5 = loc("/home/hwu27/workspace/triton-viz-ir-mode/tests/golden/ir/reader_kernels.py":137:4)
+#loc1 = loc("tests/golden/ir/reader_kernels.py":136:23)
+#loc2 = loc("tests/golden/ir/reader_kernels.py":135:17)
+#loc3 = loc("tests/golden/ir/reader_kernels.py":135:25)
+#loc4 = loc("tests/golden/ir/reader_kernels.py":140:8)
+#loc5 = loc("tests/golden/ir/reader_kernels.py":137:4)
 #loc7 = loc("v"(#loc1))
 #loc8 = loc("p"(#loc2))
 #loc9 = loc("p"(#loc3))

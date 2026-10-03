@@ -153,28 +153,15 @@ def _real_compiles_available() -> bool:
     return isinstance(tl_standard.cdiv, JITFunction)
 
 
-# Where a golden's locs name the generator: the checkout's own path.
-_GENERATOR_LOC = re.compile(r'loc\("[^"]*generate_ttir\.py"')
-# Where they name Triton's own sources (tl.cdiv, tl.zeros, ...): the path
-# Triton is installed at, which differs between machines.
-_TRITON_LOC = re.compile(r'loc\("[^"]*/triton/')
-
-
-def _portable(ttir: str) -> str:
-    """``ttir`` with the paths that depend on the machine taken out."""
-    return _TRITON_LOC.sub('loc("<triton>/', _GENERATOR_LOC.sub('loc("G"', ttir))
-
-
 @pytest.mark.skipif(
     not _real_compiles_available(),
     reason="Triton was imported under TRITON_INTERPRET=1: nothing compiles in-process",
 )
 def test_the_kernel_goldens_regenerate_byte_for_byte(monkeypatch, tmp_path):
     """generate_ttir.py prints, under the installed release, exactly the
-    goldens it wrote into that release's directory (the generator's and
-    Triton's install paths aside): its locs name the kernels' lines, so a
-    line added above them shows here, not as goldens that no longer
-    regenerate."""
+    goldens it wrote into that release's directory (its paths made
+    portable): its locs name the kernels' lines, so a line added above them
+    shows here, not as goldens that no longer regenerate."""
     # tests/unit/test_multithreading.py sets TRITON_INTERPRET=1 at import
     # time, under which @triton.jit builds InterpretedFunctions: pin the knob
     # off while the generator's kernels are built, as the compile tests do.
@@ -200,8 +187,7 @@ def test_the_kernel_goldens_regenerate_byte_for_byte(monkeypatch, tmp_path):
     del todo["kernel_deep_chain"]
     for name, spec in todo.items():
         want = (out / f"{name}.ttir").read_text(encoding="utf-8")
-        got = gen.ttir(spec)
-        assert _portable(got) == _portable(want), name
+        assert gen.portable(gen.ttir(spec)) == want, name
 
 
 @pytest.mark.parametrize("label", PINNED)
@@ -858,9 +844,7 @@ def _ops(m: W.Module, name: str) -> list[W.Op]:
 def test_unicode_source_path():
     m = W._walk(_text("nat_k_uni.ttir"))
     files = {op.loc.file for op in m.ops if op.loc is not None}
-    assert files == {
-        "/home/hwu27/workspace/triton-viz-ir-mode/ir_mode_audit/spike/review/内核/k_uni.py"
-    }
+    assert files == {"内核/k_uni.py"}
 
 
 def test_unicode_parameter_names_come_from_namelocs():

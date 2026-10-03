@@ -70,6 +70,16 @@ def _kernels():
     return module
 
 
+def _portable():
+    spec = importlib.util.spec_from_file_location(
+        "generate_ttir", os.path.join(HERE, "generate_ttir.py")
+    )
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    return module.portable
+
+
 def main() -> int:
     import triton
     from triton.backends.compiler import GPUTarget
@@ -77,6 +87,7 @@ def main() -> int:
 
     only = set(sys.argv[1:])
     kernels = _kernels()
+    portable = _portable()
     failed = 0
     release = ".".join(triton.__version__.split(".")[:2])
     out = os.path.join(
@@ -100,7 +111,7 @@ def main() -> int:
                 continue
             path = os.path.join(out, f"{name}.ttir")
             with open(path, "w", encoding="utf-8") as f:
-                f.write(k.asm["ttir"])
+                f.write(portable(k.asm["ttir"]))
             print(f"[{name}] wrote {path}")
     return 1 if failed else 0
 

@@ -1,4 +1,4 @@
-#loc = loc("/home/hwu27/workspace/triton-viz-ir-mode/tests/golden/ir/reader_kernels.py":106:1)
+#loc = loc("tests/golden/ir/reader_kernels.py":106:1)
 #loc7 = loc("x_ptr"(#loc))
 module {
   tt.func public @rv_trunci_alias(%x_ptr: !tt.ptr<i32> loc("x_ptr"(#loc))) attributes {noinline = false} {
@@ -13,12 +13,12 @@ module {
     tt.return loc(#loc)
   } loc(#loc)
 } loc(#loc)
-#loc1 = loc("/home/hwu27/workspace/triton-viz-ir-mode/tests/golden/ir/reader_kernels.py":110:5)
+#loc1 = loc("tests/golden/ir/reader_kernels.py":110:5)
 #loc2 = loc(unknown)
-#loc3 = loc("/home/hwu27/workspace/triton-viz-ir-mode/tests/golden/ir/reader_kernels.py":108:11)
-#loc4 = loc("/home/hwu27/workspace/triton-viz-ir-mode/tests/golden/ir/reader_kernels.py":109:12)
-#loc5 = loc("/home/hwu27/workspace/triton-viz-ir-mode/tests/golden/ir/reader_kernels.py":109:11)
-#loc6 = loc("/home/hwu27/workspace/triton-viz-ir-mode/tests/golden/ir/reader_kernels.py":110:14)
+#loc3 = loc("tests/golden/ir/reader_kernels.py":108:11)
+#loc4 = loc("tests/golden/ir/reader_kernels.py":109:12)
+#loc5 = loc("tests/golden/ir/reader_kernels.py":109:11)
+#loc6 = loc("tests/golden/ir/reader_kernels.py":110:14)
 #loc8 = loc("pid"(#loc3))
 #loc9 = loc("off"(#loc4))
 #loc10 = loc("off"(#loc5))
