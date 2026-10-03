@@ -79,7 +79,8 @@ class Profiler(Client):
         self.mask_op_stats: list[MaskOpStats] = []
 
         # Case 4: Buffer Load Check
-        self.has_buffer_load = False
+        # None until an AMD (amdgcn) kernel ASM is captured; the check only applies there.
+        self.has_buffer_load: bool | None = None
         self.disable_buffer_load_check = cfg.profiler_disable_buffer_load_check
         self.potential_buffer_load_issue_found = False
 
@@ -195,6 +196,7 @@ class Profiler(Client):
         if num_outside == 0:
             # All offsets are within 32-bit range
             # If we're on AMD GPU and buffer_load is NOT found, this is an error
+            # (has_buffer_load stays None when no amdgcn stage was captured, e.g. NVIDIA)
             if self.has_buffer_load is False:
                 # Buffer Load optimization should be used when offsets are within 32-bit range.
                 self.potential_buffer_load_issue_found = True
@@ -516,7 +518,9 @@ class Profiler(Client):
                 + "-" * 11
             )
             print("=" * 60)
-            if self.potential_buffer_load_issue_found:
+            if self.has_buffer_load is None:
+                print("Buffer Load check skipped: no AMD (amdgcn) kernel was captured.")
+            elif self.potential_buffer_load_issue_found:
                 print("\n>>>>>> Warning: Potential Buffer Load Issue Detected! <<<<<<")
                 print(
                     "\nSome memory access offsets are within 32-bit range, "
